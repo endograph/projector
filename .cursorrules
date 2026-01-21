@@ -1,0 +1,11 @@
+Always use `bun` - never use npm, yarn, or pnpm.
+
+This is a Bun workspace monorepo. Packages are in `packages/`:
+- markov-machines - Framework
+- todo - Reference implementation
+
+Commands:
+- bun install - Install dependencies
+- bun test - Run tests
+- bun run <script> - Run scripts
+- bun add <package> - Add dependency

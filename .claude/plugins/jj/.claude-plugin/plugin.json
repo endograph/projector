@@ -1,0 +1,8 @@
+{
+  "name": "jj",
+  "description": "Jujutsu (jj) version control commands - a modern alternative to git",
+  "version": "1.0.0",
+  "author": {
+    "name": "Zack"
+  }
+}

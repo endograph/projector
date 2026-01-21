@@ -1,0 +1,19 @@
+{
+  "name": "machines",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "claude": "claude --plugin-dir ./.claude/plugins/jj"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
