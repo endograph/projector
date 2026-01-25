@@ -17,9 +17,10 @@ export interface TransitionContext {
 /**
  * Spawn target specification.
  * Supports both standard and worker nodes.
+ * Uses Node<any, T> to accept nodes with any message type and specific state type.
  */
 export interface SpawnTarget<T = unknown> {
-  node: Node<T>;
+  node: Node<any, T>;
   state?: T;
   /** Override executor config for this spawned instance */
   executorConfig?: StandardNodeConfig;
@@ -28,10 +29,11 @@ export interface SpawnTarget<T = unknown> {
 /**
  * Normal transition - replace current instance with new node.
  * Supports both standard and worker nodes.
+ * Uses Node<any, T> to accept nodes with any message type and specific state type.
  */
 export interface TransitionToResult<T = unknown> {
   type: "transition";
-  node: Node<T>;
+  node: Node<any, T>;
   state?: T;
   /** Override executor config for this transition */
   executorConfig?: StandardNodeConfig;
@@ -72,8 +74,9 @@ export interface SuspendResult {
 
 /**
  * Union of all transition results.
+ * Default to `any` to allow assignment from specific state types.
  */
-export type TransitionResult<T = unknown> =
+export type TransitionResult<T = any> =
   | TransitionToResult<T>
   | SpawnResult<T>
   | CedeResult
@@ -140,7 +143,7 @@ export type Transition<S = unknown> =
  * Supports both standard and worker nodes.
  */
 export function transitionTo<T>(
-  node: Node<T>,
+  node: Node<any, T>,
   state?: T,
   options?: TransitionToOptions,
 ): TransitionToResult<T> {

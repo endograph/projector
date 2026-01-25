@@ -5,9 +5,10 @@ import type { SuspendResult } from "./transitions.js";
 
 /**
  * Helper to extract state type from a Node type.
- * Constrained to Node to avoid unbounded type inference.
+ * Constrained to Node<any, any> to accept nodes with any message type.
+ * Node<M, S> - state is the second type parameter.
  */
-export type NodeState<N extends Node> = N extends Node<infer S> ? S : unknown;
+export type NodeState<N extends Node<any, any>> = N extends Node<any, infer S> ? S : unknown;
 
 /**
  * Information about a suspended instance.
@@ -26,9 +27,9 @@ export interface SuspendInfo {
 /**
  * Runtime node instance with state and optional children.
  * Forms a tree structure where nodes can spawn children.
- * @typeParam N - The node type (full Node<S> type for type inference).
+ * @typeParam N - The node type. Uses Node<any, any> to accept nodes with any message type.
  */
-export interface Instance<N extends Node = Node> {
+export interface Instance<N extends Node<any, any> = Node<any, any>> {
   /** Unique identifier for this instance */
   id: string;
   /** The node definition */
@@ -49,7 +50,7 @@ export interface Instance<N extends Node = Node> {
  * Create a new instance with auto-generated ID.
  * Accepts either a single child or array for convenience - normalizes to array internally.
  */
-export function createInstance<N extends Node>(
+export function createInstance<N extends Node<any, any>>(
   node: N,
   state: NodeState<N>,
   children?: Instance | Instance[],
@@ -75,7 +76,7 @@ export function createInstance<N extends Node>(
 /**
  * Check if a value is an Instance.
  */
-export function isInstance<N extends Node = Node>(value: unknown): value is Instance<N> {
+export function isInstance<N extends Node<any, any> = Node<any, any>>(value: unknown): value is Instance<N> {
   return (
     typeof value === "object" &&
     value !== null &&

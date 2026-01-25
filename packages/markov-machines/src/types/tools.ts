@@ -33,6 +33,8 @@ export interface ToolDefinition<
     input: TInput,
     ctx: ToolContext<S>,
   ) => Promise<TOutput> | TOutput;
+  /** If true, tool execution ends the turn immediately (yields end_turn) */
+  terminal?: boolean;
 }
 
 /**

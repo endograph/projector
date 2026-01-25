@@ -95,7 +95,7 @@ export interface Executor<AppMessage = unknown> {
    * @param options - Run options
    */
   run(
-    charter: Charter<AppMessage>,
+    charter: Charter<any>,
     instance: Instance,
     ancestors: Instance[],
     input: string,

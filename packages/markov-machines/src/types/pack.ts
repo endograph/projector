@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { ToolReply } from "./tools.js";
 
 /**
  * Context provided to pack tool execute functions.
@@ -10,6 +11,43 @@ export interface PackToolContext<S = unknown> {
   /** Update pack state with a partial patch */
   updateState: (patch: Partial<S>) => void;
 }
+
+/**
+ * Context provided to pack command execute functions.
+ * Pack commands have access to pack state and can return tool replies.
+ */
+export interface PackCommandContext<S = unknown> {
+  /** Current pack state */
+  state: S;
+  /** Update pack state with a partial patch */
+  updateState: (patch: Partial<S>) => void;
+}
+
+/**
+ * Result of a pack command execution.
+ * Can be a ToolReply for user feedback, or void for silent updates.
+ */
+export type PackCommandResult<T = unknown> = ToolReply<T> | void;
+
+/**
+ * Pack command definition.
+ * Commands bypass LLM and execute instantly with pack state access.
+ */
+export interface PackCommandDefinition<S = unknown, TInput = unknown, TOutput = unknown> {
+  /** Command name (must be unique within the pack) */
+  name: string;
+  /** Description shown in command list */
+  description: string;
+  /** Zod schema for command input */
+  inputSchema: z.ZodType<TInput>;
+  /** Execute function - returns ToolReply for user feedback, or void for silent updates */
+  execute: (input: TInput, ctx: PackCommandContext<S>) => Promise<PackCommandResult<TOutput>> | PackCommandResult<TOutput>;
+}
+
+/**
+ * Any pack command definition (erased input/output types).
+ */
+export type AnyPackCommandDefinition<S = unknown> = PackCommandDefinition<S, any, any>;
 
 /**
  * Pack tool definition.
@@ -43,8 +81,10 @@ export interface Pack<S = unknown> {
   description: string;
   /** Zod schema for pack state validation */
   validator: z.ZodType<S>;
-  /** Pack tools */
+  /** Pack tools (called by LLM) */
   tools: Record<string, AnyPackToolDefinition<S>>;
+  /** Pack commands (called by user, bypass LLM) */
+  commands?: Record<string, AnyPackCommandDefinition<S>>;
   /** Optional initial state */
   initialState?: S;
 }
@@ -57,6 +97,7 @@ export interface PackConfig<S = unknown> {
   description: string;
   validator: z.ZodType<S>;
   tools?: Record<string, AnyPackToolDefinition<S>>;
+  commands?: Record<string, AnyPackCommandDefinition<S>>;
   initialState?: S;
 }
 

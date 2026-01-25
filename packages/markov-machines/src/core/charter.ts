@@ -11,11 +11,13 @@ export function createCharter<AppMessage = unknown>(
 ): Charter<AppMessage> {
   const {
     name,
+    instructions,
     executor,
     tools = {},
     transitions = {},
     nodes = {},
     packs = [],
+    buildSystemPrompt,
   } = config;
 
   // Validate tool names match keys
@@ -29,10 +31,12 @@ export function createCharter<AppMessage = unknown>(
 
   return {
     name,
+    ...(instructions && { instructions }),
     executor,
     tools,
     transitions,
     nodes,
     packs,
+    ...(buildSystemPrompt && { buildSystemPrompt }),
   };
 }

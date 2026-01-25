@@ -1,5 +1,6 @@
 import type { Instance, SuspendInfo } from "../types/instance.js";
 import type { Node } from "../types/node.js";
+import type { Message } from "../types/messages.js";
 import type {
   CommandContext,
   CommandResult,
@@ -13,6 +14,7 @@ import {
   isCedeResult,
   isSuspendResult,
 } from "../types/transitions.js";
+import { isToolReply } from "../types/tools.js";
 import { cede, spawn, suspend } from "../helpers/cede-spawn.js";
 import { shallowMerge } from "../types/state.js";
 import { createInstance, createSuspendInfo, clearSuspension } from "../types/instance.js";
@@ -25,11 +27,14 @@ export async function executeCommand(
   instance: Instance,
   commandName: string,
   input: unknown,
+  instanceId: string,
+  history: Message<unknown>[],
 ): Promise<{
   result: CommandExecutionResult;
   instance: Instance;
   transitionResult?: CommandResult;
   suspendInfo?: SuspendInfo;
+  replyMessages?: { userMessage: unknown; llmMessage: string };
 }> {
   const command = instance.node.commands?.[commandName];
   if (!command) {
@@ -57,10 +62,19 @@ export async function executeCommand(
     );
   };
 
+  // Create getInstanceMessages function that filters by sourceInstanceId
+  const getInstanceMessages = (): Message[] => {
+    return history.filter(
+      (msg) => msg.metadata?.sourceInstanceId === instanceId
+    );
+  };
+
   // Create context with helpers
   const ctx: CommandContext<unknown> = {
     state: currentState,
     updateState,
+    instanceId,
+    getInstanceMessages,
     cede,
     spawn,
     suspend,
@@ -76,6 +90,19 @@ export async function executeCommand(
       return {
         result: { success: true, value: cmdResult.value },
         instance: updatedInstance,
+      };
+    }
+
+    // Handle tool reply - returns messages for user and LLM
+    if (isToolReply(cmdResult)) {
+      const updatedInstance: Instance = { ...instance, state: currentState };
+      return {
+        result: { success: true },
+        instance: updatedInstance,
+        replyMessages: {
+          userMessage: cmdResult.userMessage,
+          llmMessage: cmdResult.llmMessage,
+        },
       };
     }
 

@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+:root {
+  --terminal-green: #00ff00;
+  --terminal-green-dim: #00aa00;
+  --terminal-green-dimmer: #007700;
+  --terminal-bg: #0a0a0a;
+  --terminal-bg-lighter: #141414;
+  --terminal-cyan: #00ffff;
+  --terminal-red: #ff4444;
+  --terminal-yellow: #ffff00;
+}
+
+@theme inline {
+  --color-terminal-green: var(--terminal-green);
+  --color-terminal-green-dim: var(--terminal-green-dim);
+  --color-terminal-green-dimmer: var(--terminal-green-dimmer);
+  --color-terminal-bg: var(--terminal-bg);
+  --color-terminal-bg-lighter: var(--terminal-bg-lighter);
+  --color-terminal-cyan: var(--terminal-cyan);
+  --color-terminal-red: var(--terminal-red);
+  --color-terminal-yellow: var(--terminal-yellow);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--terminal-bg);
+  color: var(--terminal-green);
+  font-family: var(--font-geist-mono), monospace;
+  /* Ensure content is composited correctly for blend mode */
+  isolation: isolate;
+}
+
+/* Gradient overlay that affects text/borders via blend mode */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(
+    135deg,
+    hsl(var(--gradient-hue-1, 180), 100%, 50%) 0%,
+    hsl(var(--gradient-hue-2, 280), 100%, 50%) 100%
+  );
+  mix-blend-mode: hue;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: var(--gradient-intensity, 0);
+  transition: opacity 0.3s ease;
+}
+
+/* Terminal scanlines effect */
+.terminal-scanlines::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.15) 0px,
+    rgba(0, 0, 0, 0.15) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Terminal glow effect - uses dynamic color */
+.terminal-glow {
+  text-shadow: 0 0 5px var(--glow-color, rgba(0, 255, 0, 0.3));
+}
+
+/* Stronger glow for active elements */
+.terminal-glow-strong {
+  text-shadow: 0 0 8px var(--glow-color, rgba(0, 255, 0, 0.5)),
+    0 0 15px var(--glow-color, rgba(0, 255, 0, 0.3));
+}
+
+/* Flicker animation for the cursor */
+@keyframes cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.terminal-cursor {
+  animation: cursor-blink 1s step-end infinite;
+}
+
+/* Custom scrollbar for terminal feel */
+.terminal-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-scrollbar::-webkit-scrollbar-track {
+  background: var(--terminal-bg);
+}
+
+.terminal-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--terminal-green-dimmer);
+  border-radius: 4px;
+}
+
+.terminal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--terminal-green-dim);
+}
+
+/* Input styling */
+input::placeholder,
+textarea::placeholder {
+  color: var(--terminal-green-dimmer);
+}
+
+/* Focus ring override */
+*:focus {
+  outline: 1px solid var(--terminal-green-dim);
+  outline-offset: 2px;
+}
+
+/* Pane focus glow - subtle top glow without box outline */
+.pane-focus {
+  position: relative;
+}
+
+.pane-focus::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 20px;
+  background: linear-gradient(
+    to bottom,
+    var(--glow-color, rgba(0, 255, 0, 1)),
+    transparent
+  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.pane-focus:focus,
+.pane-focus:focus-within {
+  outline: none;
+}
+
+.pane-focus:focus::after,
+.pane-focus:focus-within::after {
+  opacity: 0.4;
+}
+
+/* Tab underline indicator */
+.tab-indicator {
+  position: relative;
+}
+
+.tab-indicator::after {
+  content: "";
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--terminal-green);
+  transform: scaleX(0);
+  transition: transform 0.2s ease;
+}
+
+.tab-indicator.active::after {
+  transform: scaleX(1);
+}

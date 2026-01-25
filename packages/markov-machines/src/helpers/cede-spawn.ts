@@ -74,7 +74,7 @@ export function cede<M = unknown>(
  * });
  */
 export function spawn<T = unknown>(
-  nodeOrTargets: Node<T> | SpawnTarget<T>[],
+  nodeOrTargets: Node<any, T> | SpawnTarget<T>[],
   state?: T,
   options?: SpawnOptions,
 ): SpawnResult<T> {

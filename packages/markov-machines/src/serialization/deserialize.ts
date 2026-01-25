@@ -12,7 +12,7 @@ export { deserializeNode } from "../runtime/transition-executor.js";
  * Deserialize a node instance from persisted state.
  */
 export function deserializeInstance(
-  charter: Charter,
+  charter: Charter<any>,
   serialized: SerializedInstance,
 ): Instance {
   // Resolve node
@@ -52,10 +52,10 @@ export function deserializeInstance(
  * Deserialize a machine from persisted state.
  * The charter must be the same (or compatible) as when serialized.
  */
-export function deserializeMachine(
-  charter: Charter,
-  serialized: SerializedMachine,
-): Machine {
+export function deserializeMachine<AppMessage = unknown>(
+  charter: Charter<AppMessage>,
+  serialized: SerializedMachine<AppMessage>,
+): Machine<AppMessage> {
   return {
     charter,
     instance: deserializeInstance(charter, serialized.instance),

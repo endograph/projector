@@ -36,7 +36,7 @@ export function createTransition<S = unknown>(
  * The node parameter is only used for type inference.
  */
 export function createTransition<S>(
-  from: Node<S>,
+  from: Node<any, S>,
   config: TransitionConfig<S>,
 ): CodeTransition<S>;
 
@@ -68,7 +68,7 @@ export function createTransition<S>(
  * });
  */
 export function createTransition<S>(
-  configOrFrom: TransitionConfig<S> | Node<S>,
+  configOrFrom: TransitionConfig<S> | Node<any, S>,
   maybeConfig?: TransitionConfig<S>,
 ): CodeTransition<S> {
   // Overload resolution: if second arg exists, first arg is the node

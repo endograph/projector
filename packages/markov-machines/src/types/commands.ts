@@ -9,6 +9,7 @@ import type {
   TransitionToResult,
   SuspendResult,
 } from "./transitions.js";
+import type { ToolReply } from "./tools.js";
 
 /**
  * Options for suspend helper in commands.
@@ -29,11 +30,15 @@ export interface CommandContext<S = unknown> {
   state: S;
   /** Update state with a partial patch */
   updateState: (patch: Partial<S>) => void;
+  /** ID of the instance executing this command */
+  instanceId: string;
+  /** Get messages from the conversation history that belong to this instance */
+  getInstanceMessages: () => Message[];
   /** Cede control back to parent with optional content (string or Message[]) */
   cede: <M = unknown>(content?: string | Message<M>[]) => CedeResult<M>;
   /** Spawn one or more child instances */
   spawn: <T = unknown>(
-    nodeOrTargets: Node<T> | SpawnTarget<T>[],
+    nodeOrTargets: Node<any, T> | SpawnTarget<T>[],
     state?: T,
     options?: SpawnOptions,
   ) => SpawnResult<T>;
@@ -85,7 +90,7 @@ export interface ResumeResult {
 
 /**
  * Union of all command results.
- * Commands can return a value, transition, spawn, cede, suspend, or resume.
+ * Commands can return a value, transition, spawn, cede, suspend, resume, or tool reply.
  */
 export type CommandResult<T = unknown> =
   | ValueResult<T>
@@ -93,7 +98,8 @@ export type CommandResult<T = unknown> =
   | SpawnResult
   | CedeResult
   | SuspendResult
-  | ResumeResult;
+  | ResumeResult
+  | ToolReply<T>;
 
 /**
  * Type guard for ValueResult.

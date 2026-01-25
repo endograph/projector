@@ -6,18 +6,21 @@ Guidelines for AI agents working in this repository.
 
 **Always use `bun` - never use npm, yarn, or pnpm.**
 
-- `bun install` for dependencies
-- `bun test` for tests
-- `bun run <script>` for scripts
-- `bun add <package>` to add dependencies
-- `bun add -d <package>` for dev dependencies
+## Commands
+
+- `bun install` - Install dependencies
+- `bun run typecheck` - Typecheck (uses tsgo)
+- `bun test --filter markov-machines` - Run all tests in markov-machines
+- `bun test --filter markov-machines -- src/__tests__/commands.test.ts` - Run single test file
+- `bun add <package>` / `bun add -d <package>` - Add dependencies
 
 ## Monorepo Structure
 
-This is a Bun workspace monorepo. Packages are in `packages/`:
+Bun workspace monorepo with `packages/` and `apps/`:
 
-- `markov-machines` - Framework
-- `todo` - Reference implementation
+- `packages/markov-machines` - Core agent framework (vitest for tests)
+- `packages/voice` - Voice package
+- `apps/todo`, `apps/demo` - Example applications
 
 ## Framework: markov-machines
 

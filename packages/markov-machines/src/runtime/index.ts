@@ -12,6 +12,7 @@ export {
 } from "./ref-resolver.js";
 export {
   buildSystemPrompt,
+  buildDefaultSystemPrompt,
   buildStateSection,
   buildTransitionsSection,
   buildAncestorContext,

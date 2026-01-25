@@ -1,0 +1,25 @@
+{
+  "name": "demo-voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "./scripts/kill-zombies.sh && tsx src/agent.ts dev",
+    "start": "node dist/agent.js start",
+    "build": "tsc",
+    "download-files": "tsx src/agent.ts download-files",
+    "kill-zombies": "./scripts/kill-zombies.sh"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.0.21",
+    "@livekit/agents-plugin-openai": "^1.0.21",
+    "@livekit/agents-plugin-silero": "^1.0.21",
+    "dotenv": "^17.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.20.0",
+    "typescript": "^5"
+  }
+}

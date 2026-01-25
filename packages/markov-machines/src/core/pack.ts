@@ -30,6 +30,7 @@ export function createPack<S>(config: PackConfig<S>): Pack<S> {
     description: config.description,
     validator: config.validator,
     tools: config.tools ?? {},
+    commands: config.commands,
     initialState: config.initialState,
   };
 }

@@ -13,17 +13,23 @@ import { isRef, isSerialTransition } from "../types/refs.js";
 import { isCodeTransition, isGeneralTransition } from "../types/transitions.js";
 import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema.js";
 
+export interface SerializeNodeOptions {
+  /** If true, always serialize the full node even if it's registered in the charter */
+  noRefs?: boolean;
+}
+
 /**
  * Serialize a node to a SerialNode or Ref.
- * If the node is registered in the charter, returns a Ref.
+ * If the node is registered in the charter, returns a Ref (unless noRefs is true).
  * Otherwise, serializes the full node.
  */
 export function serializeNode<S>(
-  node: Node<S>,
-  charter?: Charter,
+  node: Node<any, S>,
+  charter?: Charter<any>,
+  options?: SerializeNodeOptions,
 ): SerialNode<S> | Ref {
-  // Check if this node is registered in the charter
-  if (charter) {
+  // Check if this node is registered in the charter (unless noRefs is set)
+  if (charter && !options?.noRefs) {
     for (const [name, registeredNode] of Object.entries(charter.nodes)) {
       if (registeredNode.id === node.id) {
         return { ref: name };
@@ -101,19 +107,22 @@ function serializeTransition<S>(
   throw new Error("Unknown transition type");
 }
 
+export interface SerializeInstanceOptions extends SerializeNodeOptions {}
+
 /**
  * Serialize a node instance to a SerializedInstance.
  */
 export function serializeInstance(
   instance: Instance,
-  charter?: Charter,
+  charter?: Charter<any>,
+  options?: SerializeInstanceOptions,
 ): SerializedInstance {
-  const serializedNode = serializeNode(instance.node, charter);
+  const serializedNode = serializeNode(instance.node, charter, options);
 
   // Serialize children
   let children: SerializedInstance[] | undefined;
   if (instance.children && instance.children.length > 0) {
-    children = instance.children.map((c) => serializeInstance(c, charter));
+    children = instance.children.map((c) => serializeInstance(c, charter, options));
   }
 
   return {
@@ -137,9 +146,9 @@ export function serializeInstance(
 /**
  * Serialize a machine for persistence.
  */
-export function serializeMachine(
-  machine: Machine,
-): SerializedMachine {
+export function serializeMachine<AppMessage = unknown>(
+  machine: Machine<AppMessage>,
+): SerializedMachine<AppMessage> {
   return {
     instance: serializeInstance(machine.instance, machine.charter),
     history: machine.history,

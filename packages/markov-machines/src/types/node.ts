@@ -26,10 +26,10 @@ export interface OutputConfig<M> {
 
 /**
  * Node configuration for createNode.
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type.
  */
-export interface NodeConfig<S = unknown, M = never> {
+export interface NodeConfig<M = never, S = unknown> {
   instructions: string;
   /** Node tools (state access via context) */
   tools?: Record<string, NodeToolEntry<S>>;
@@ -45,7 +45,7 @@ export interface NodeConfig<S = unknown, M = never> {
   /** Structured output configuration */
   output?: OutputConfig<M>;
   /** Packs this node uses */
-  packs?: Pack<unknown>[];
+  packs?: Pack<any>[];
 }
 
 /**
@@ -54,10 +54,10 @@ export interface NodeConfig<S = unknown, M = never> {
  * - Don't receive user input
  * - Can't access packs
  * - Must cede to return control (end_turn throws an error)
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type.
  */
-export interface WorkerNodeConfig<S = unknown, M = never> {
+export interface WorkerNodeConfig<M = never, S = unknown> {
   instructions: string;
   /** Node tools (state access via context) */
   tools?: Record<string, NodeToolEntry<S>>;
@@ -77,10 +77,10 @@ export interface WorkerNodeConfig<S = unknown, M = never> {
 
 /**
  * Runtime node instance.
- * @typeParam S - The node's state type. Node has no knowledge of Charter.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type. Node has no knowledge of Charter.
  */
-export interface Node<S = unknown, M = never> {
+export interface Node<M = never, S = unknown> {
   /** Unique identifier for this node instance */
   id: string;
   /** Instructions for the agent in this node */
@@ -100,7 +100,7 @@ export interface Node<S = unknown, M = never> {
   /** Structured output configuration */
   output?: OutputConfig<M>;
   /** Packs this node uses (not available on worker nodes) */
-  packs?: Pack<unknown>[];
+  packs?: Pack<any>[];
   /** Whether this is a worker node */
   worker?: boolean;
 }
@@ -126,10 +126,10 @@ export interface Node<S = unknown, M = never> {
  *   end_turn without ceding, a warning is logged but the machine continues.
  *   This prevents worker nodes from prematurely ending the conversation.
  *
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type.
  */
-export interface WorkerNode<S = unknown, M = never> extends Node<S, M> {
+export interface WorkerNode<M = never, S = unknown> extends Node<M, S> {
   /** Mark as worker node - enables parallel execution but disables pack access */
   worker: true;
 }
@@ -137,7 +137,7 @@ export interface WorkerNode<S = unknown, M = never> extends Node<S, M> {
 /**
  * Check if a value is a Node instance.
  */
-export function isNode<S, M = never>(value: unknown): value is Node<S, M> {
+export function isNode<M = never, S = unknown>(value: unknown): value is Node<M, S> {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -152,6 +152,6 @@ export function isNode<S, M = never>(value: unknown): value is Node<S, M> {
 /**
  * Check if a node is a worker node.
  */
-export function isWorkerNode<S, M = never>(node: Node<S, M>): node is WorkerNode<S, M> {
+export function isWorkerNode<M = never, S = unknown>(node: Node<M, S>): node is WorkerNode<M, S> {
   return node.worker === true;
 }

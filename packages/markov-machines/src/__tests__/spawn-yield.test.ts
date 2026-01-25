@@ -112,7 +112,7 @@ describe("spawn behavior", () => {
     const charter = createCharter({
       name: "test",
       executor,
-      transitions: { spawnChild },
+      transitions: { spawnChild: spawnChild as any },
       nodes: { parentNode, childNode },
     });
 

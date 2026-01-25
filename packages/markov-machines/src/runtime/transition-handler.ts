@@ -12,7 +12,7 @@ import { createInstance, createSuspendInfo } from "../types/instance.js";
 import type { StandardNodeConfig } from "../executor/types.js";
 
 export interface TransitionOutcome {
-  node: Node<unknown>;
+  node: Node<any, unknown>;
   state: unknown;
   children: Instance[] | undefined;
   executorConfig?: StandardNodeConfig;
@@ -29,7 +29,7 @@ export interface TransitionOutcome {
  */
 export function handleTransitionResult(
   result: TransitionResult<unknown>,
-  currentNode: Node<unknown>,
+  currentNode: Node<any, unknown>,
   currentState: unknown,
   currentChildren: Instance[] | undefined,
 ): TransitionOutcome {
@@ -81,7 +81,7 @@ export function handleTransitionResult(
 
   if (isTransitionToResult(result)) {
     // Normal transition
-    const newNode = result.node as Node<unknown>;
+    const newNode = result.node;
 
     // Update state: use returned state, or node's initialState, or throw
     let newState: unknown;

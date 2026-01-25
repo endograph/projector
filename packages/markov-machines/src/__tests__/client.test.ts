@@ -148,7 +148,7 @@ describe("hydrateClientNode", () => {
     expect(typeof clientNode.commands.addTodo).toBe("function");
 
     // Call the command function
-    const command = clientNode.commands.addTodo({ text: "Buy milk" });
+    const command = (clientNode.commands as any).addTodo({ text: "Buy milk" });
 
     expect(isCommand(command)).toBe(true);
     expect(command.type).toBe("command");
@@ -190,7 +190,7 @@ describe("hydrateClientInstance", () => {
     });
 
     // Check hydrated commands
-    const command = clientInstance.node.commands.clearAll({});
+    const command = (clientInstance.node.commands as any).clearAll({});
     expect(isCommand(command)).toBe(true);
     expect(command.name).toBe("clearAll");
   });

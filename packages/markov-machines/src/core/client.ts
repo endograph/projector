@@ -17,7 +17,7 @@ import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema.js"
  * Create a DryClientNode from a Node.
  * Extracts instructions, validator (as JSON Schema), and command metadata.
  */
-export function createDryClientNode<N extends Node>(
+export function createDryClientNode<N extends Node<any, any>>(
   node: N,
 ): DryClientNode<N> {
   // Convert validator to JSON Schema
@@ -51,7 +51,7 @@ export function createDryClientNode<N extends Node>(
  * Create a DryClientInstance from a full Instance.
  * Extracts id, state, packStates, and converts node to DryClientNode.
  */
-export function createDryClientInstance<N extends Node>(
+export function createDryClientInstance<N extends Node<any, any>>(
   instance: Instance<N>,
 ): DryClientInstance<N> {
   return {
@@ -66,7 +66,7 @@ export function createDryClientInstance<N extends Node>(
  * Hydrate a DryClientNode into a ClientNode.
  * Converts command metadata into callable functions that return Command objects.
  */
-export function hydrateClientNode<N extends Node>(
+export function hydrateClientNode<N extends Node<any, any>>(
   dry: DryClientNode<N>,
 ): ClientNode<N> {
   // Create callable command functions from metadata
@@ -90,7 +90,7 @@ export function hydrateClientNode<N extends Node>(
  * Hydrate a DryClientInstance into a ClientInstance.
  * Converts command metadata into callable functions with full type safety.
  */
-export function hydrateClientInstance<N extends Node>(
+export function hydrateClientInstance<N extends Node<any, any>>(
   dry: DryClientInstance<N>,
 ): ClientInstance<N> {
   return {

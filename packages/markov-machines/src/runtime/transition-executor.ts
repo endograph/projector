@@ -22,7 +22,7 @@ import type { AnyToolDefinition } from "../types/tools.js";
  * S is the source state type.
  */
 export async function executeTransition<S>(
-  charter: Charter,
+  charter: Charter<any>,
   transition: Transition<S>,
   state: S,
   reason: string,
@@ -54,8 +54,8 @@ export async function executeTransition<S>(
       if (!node) {
         throw new Error(`Unknown node ref: ${resolved.node.ref}`);
       }
-      // Cast needed because charter.nodes contains nodes with any output type
-      return transitionTo(node as Node<unknown, never>);
+      // charter.nodes uses `any` for state, so no cast needed
+      return transitionTo(node);
     }
     return transitionTo(deserializeNode(charter, resolved.node));
   }
@@ -73,9 +73,9 @@ export async function executeTransition<S>(
  * Note: Inline node tools cannot be serialized and will be empty on deserialization.
  */
 export function deserializeNode<S>(
-  charter: Charter,
+  charter: Charter<any>,
   serialNode: SerialNode<S>,
-): Node<S> {
+): Node<never, S> {
   // Deserialize the JSON Schema validator back to a Zod schema.
   const validator = z.fromJSONSchema(serialNode.validator) as z.ZodType<S>;
 
@@ -121,15 +121,15 @@ export function deserializeNode<S>(
  * Resolve a node reference or return the inline node.
  */
 export function resolveNodeRef<S>(
-  charter: Charter,
+  charter: Charter<any>,
   nodeRef: Ref | SerialNode<S>,
-): Node<S> {
+): Node<any, S> {
   if (isRef(nodeRef)) {
     const node = charter.nodes[nodeRef.ref];
     if (!node) {
       throw new Error(`Unknown node ref: ${nodeRef.ref}`);
     }
-    return node as Node<S>;
+    return node as Node<any, S>;
   }
   return deserializeNode(charter, nodeRef);
 }

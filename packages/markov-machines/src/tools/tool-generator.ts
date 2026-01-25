@@ -34,9 +34,9 @@ type ToolSource =
  * @throws Error if a tool name from a lower-priority scope conflicts with a higher-priority scope
  */
 export function generateToolDefinitions<S>(
-  charter: Charter,
-  node: Node<S>,
-  ancestorNodes: Node<unknown>[] = [],
+  charter: Charter<any>,
+  node: Node<any, S>,
+  ancestorNodes: Node<any, unknown>[] = [],
 ): AnthropicToolDefinition[] {
   const tools: AnthropicToolDefinition[] = [];
   const toolSources = new Map<string, ToolSource>();
@@ -220,8 +220,7 @@ export function generateToolDefinitions<S>(
   // 6. Add pack tools (lowest priority - only for packs on current node, and only for non-worker nodes)
   // Worker nodes don't have access to packs
   if (!node.worker) {
-    const standardNode = node as Node<S>;
-    for (const pack of standardNode.packs ?? []) {
+    for (const pack of node.packs ?? []) {
       for (const [name, tool] of Object.entries(pack.tools)) {
         // Skip if higher-priority scope already has this tool
         if (toolSources.has(name)) continue;

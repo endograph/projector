@@ -61,7 +61,7 @@ function createTrackingMockExecutor(
         instance: result.instance ?? instance,
         messages: result.messages ?? [],
         yieldReason: result.yieldReason ?? "end_turn",
-        cedePayload: result.cedePayload,
+        cedeContent: result.cedeContent,
         packStates: result.packStates,
       };
     },

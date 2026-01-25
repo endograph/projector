@@ -110,6 +110,10 @@ export type {
   PackToolDefinition,
   PackToolContext,
   AnyPackToolDefinition,
+  PackCommandContext,
+  PackCommandDefinition,
+  PackCommandResult,
+  AnyPackCommandDefinition,
 } from "./pack.js";
 export { isPack, isPackToolDefinition } from "./pack.js";
 

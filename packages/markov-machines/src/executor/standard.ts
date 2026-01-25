@@ -34,8 +34,9 @@ import type {
 /**
  * Standard executor implementation using Anthropic SDK.
  * Makes exactly ONE API call per run(), processes tools, and returns.
+ * @typeParam AppMessage - The application message type for structured outputs (defaults to unknown).
  */
-export class StandardExecutor implements Executor<unknown> {
+export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessage> {
   type = "standard" as const;
   private client: Anthropic;
   private model: string;
@@ -57,17 +58,17 @@ export class StandardExecutor implements Executor<unknown> {
    * Processes tool calls and returns the result.
    */
   async run(
-    charter: Charter<unknown>,
+    charter: Charter<AppMessage>,
     instance: Instance,
     ancestors: Instance[],
     input: string,
-    options?: RunOptions<unknown>,
-  ): Promise<RunResult<unknown>> {
+    options?: RunOptions<AppMessage>,
+  ): Promise<RunResult<AppMessage>> {
     let currentState = instance.state;
-    let currentNode: Node<unknown> = instance.node;
+    let currentNode: Node<any, unknown> = instance.node;
     let currentChildren = instance.children;
     let currentExecutorConfig = instance.executorConfig;
-    const newMessages: Message[] = [];
+    const newMessages: Message<AppMessage>[] = [];
     const isWorker = instance.node.worker === true;
 
     // Get pack states from root instance (first ancestor or current instance)
@@ -106,6 +107,7 @@ export class StandardExecutor implements Executor<unknown> {
 
     // Build system prompt (delegated)
     const systemPrompt = buildSystemPrompt(
+      charter,
       currentNode,
       currentState,
       ancestors,
@@ -148,17 +150,14 @@ export class StandardExecutor implements Executor<unknown> {
     const effectiveTemperature = execConfig.temperature as number | undefined; // undefined = use API default
 
     // Build structured output format if node has output config (beta feature)
-    let outputFormat: { type: "json_schema"; json_schema: { name: string; schema: unknown } } | undefined;
+    let outputFormat: { type: "json_schema"; schema: unknown } | undefined;
     if (currentNode.output?.schema) {
       const jsonSchema: Record<string, unknown> = z.toJSONSchema(currentNode.output.schema, {
         target: ZOD_JSON_SCHEMA_TARGET_OPENAPI_3,
       }) as Record<string, unknown>;
       outputFormat = {
         type: "json_schema",
-        json_schema: {
-          name: `${currentNode.id}_output`,
-          schema: jsonSchema,
-        },
+        schema: jsonSchema,
       };
     }
 
@@ -197,7 +196,7 @@ export class StandardExecutor implements Executor<unknown> {
       assistantContent = assistantContent.map((block) => {
         if (block.type === "text") {
           const mapped = currentNode.output!.mapTextBlock(block.text);
-          return { type: "output", data: mapped } as OutputBlock<unknown>;
+          return { type: "output", data: mapped } as OutputBlock<AppMessage>;
         }
         return block;
       });
@@ -208,7 +207,7 @@ export class StandardExecutor implements Executor<unknown> {
 
     // Determine yield reason and process accordingly
     let yieldReason: "end_turn" | "tool_use" | "max_tokens" | "cede" | "suspend" = "end_turn";
-    let cedeContent: string | Message<unknown>[] | undefined = undefined;
+    let cedeContent: string | Message<AppMessage>[] | undefined = undefined;
     let suspendInfo: import("../types/instance.js").SuspendInfo | undefined = undefined;
 
     if (response.stop_reason === "max_tokens") {
@@ -222,7 +221,7 @@ export class StandardExecutor implements Executor<unknown> {
         .map(({ id, name, input }) => ({ id, name, input }));
 
       // Process tool calls (delegated)
-      const toolResult = await processToolCalls(
+      const toolResult = await processToolCalls<AppMessage>(
         {
           charter,
           instance,
@@ -239,14 +238,22 @@ export class StandardExecutor implements Executor<unknown> {
       currentState = toolResult.currentState;
       packStates = toolResult.packStates;
 
-      // Add tool results to messages
+      // Add tool results to messages (role: user)
       if (toolResult.toolResults.length > 0) {
-        const toolResultMsg = userMessage(toolResult.toolResults, instance.id);
+        const toolResultMsg = userMessage<AppMessage>(toolResult.toolResults, instance.id);
         newMessages.push(toolResultMsg);
       }
 
-      // Execute queued transition if any
-      if (toolResult.queuedTransition) {
+      // Add assistant messages from toolReply (role: assistant)
+      if (toolResult.assistantMessages.length > 0) {
+        const assistantMsg = assistantMessage<AppMessage>(toolResult.assistantMessages, instance.id);
+        newMessages.push(assistantMsg);
+      }
+
+      // Handle terminal tools - force end turn immediately
+      if (toolResult.terminal) {
+        yieldReason = 'end_turn';
+      } else if (toolResult.queuedTransition) {
         const transition = currentNode.transitions[toolResult.queuedTransition.name];
         if (!transition) {
           throw new Error(`Unknown transition: ${toolResult.queuedTransition.name}`);
@@ -273,7 +280,8 @@ export class StandardExecutor implements Executor<unknown> {
         currentState = outcome.state;
         currentChildren = outcome.children;
         yieldReason = outcome.yieldReason;
-        cedeContent = outcome.cedeContent;
+        // Cast needed: TransitionOutcome uses Message<unknown> but we return Message<AppMessage>
+        cedeContent = outcome.cedeContent as typeof cedeContent;
         suspendInfo = outcome.suspendInfo;
         if (outcome.executorConfig !== undefined) {
           currentExecutorConfig = outcome.executorConfig;
@@ -312,7 +320,7 @@ export class StandardExecutor implements Executor<unknown> {
    */
   private buildUpdatedInstance(
     originalInstance: Instance,
-    currentNode: Node<unknown>,
+    currentNode: Node<any, unknown>,
     currentState: unknown,
     currentChildren: Instance[] | undefined,
     ancestors: Instance[],
@@ -336,10 +344,12 @@ export class StandardExecutor implements Executor<unknown> {
 
   /**
    * Convert Anthropic content blocks to our format.
+   * Returns ContentBlock<AppMessage>[] - though the blocks returned here (text, tool_use, thinking)
+   * don't use the M parameter, this typing allows proper inference when used with OutputBlocks later.
    */
   private convertContentBlocks(
     blocks: AnthropicContentBlock[],
-  ): ContentBlock[] {
+  ): ContentBlock<AppMessage>[] {
     return blocks.map((block) => {
       if (block.type === "text") {
         return { type: "text", text: block.text };
@@ -370,7 +380,7 @@ export class StandardExecutor implements Executor<unknown> {
   /**
    * Convert our Message format to Anthropic MessageParam format.
    */
-  private convertMessageToParam(msg: Message<unknown>): MessageParam {
+  private convertMessageToParam(msg: Message<AppMessage>): MessageParam {
     if (typeof msg.content === "string") {
       return { role: msg.role, content: msg.content };
     }
@@ -413,9 +423,10 @@ export class StandardExecutor implements Executor<unknown> {
 
 /**
  * Create a standard executor instance.
+ * @typeParam AppMessage - The application message type for structured outputs (defaults to unknown).
  */
-export function createStandardExecutor(
+export function createStandardExecutor<AppMessage = unknown>(
   config?: StandardExecutorConfig,
-): StandardExecutor {
-  return new StandardExecutor(config);
+): StandardExecutor<AppMessage> {
+  return new StandardExecutor<AppMessage>(config);
 }

@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "convex:truncate:all": "bun run ../../scripts/convex-truncate.ts --all"
+    "convex:truncate:all": "bun run ../../scripts/convex-truncate.ts --all",
+    "typecheck": "tsgo"
   },
   "dependencies": {
     "convex": "^1.31.2",
@@ -20,7 +21,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "uuid": "^13.0.0",
-    "zod": "^4.3.4"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -3,17 +3,20 @@
   "type": "module",
   "private": true,
   "license": "MIT",
+  "catalog": {
+    "zod": "4"
+  },
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "scripts": {
-    "claude": "claude --plugin-dir ./.claude/plugins/jj"
+    "claude": "claude --plugin-dir ./.claude/plugins/jj",
+    "typecheck": "tsgo"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@typescript/native-preview": "latest"
   },
-  "peerDependencies": {
-    "typescript": "^5"
-  }
+  "peerDependencies": {}
 }

@@ -10,6 +10,8 @@ export interface ToolExecutionResult {
   isError: boolean;
   /** Message for the user - string or typed M (type erased to unknown at runtime) */
   userMessage?: unknown;
+  /** If true, tool execution ends the turn immediately (yields end_turn) */
+  terminal?: boolean;
 }
 
 /**
@@ -63,6 +65,7 @@ export async function executeTool<S>(
         result: output.llmMessage,
         isError: false,
         userMessage: output.userMessage,
+        terminal: tool.terminal,
       };
     }
 
@@ -70,7 +73,7 @@ export async function executeTool<S>(
     const resultStr =
       typeof output === "string" ? output : JSON.stringify(output);
 
-    return { result: resultStr, isError: false };
+    return { result: resultStr, isError: false, terminal: tool.terminal };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { result: `Tool execution error: ${message}`, isError: true };

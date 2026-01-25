@@ -25,21 +25,25 @@ const TOOL_TRANSITION = "transition";
 const TRANSITION_PREFIX = "transition_";
 
 export interface ToolCallContext {
-  charter: Charter;
+  charter: Charter<any>;
   instance: Instance;
   ancestors: Instance[];
   packStates: Record<string, unknown>;
   currentState: unknown;
-  currentNode: Node<unknown>;
+  currentNode: Node<any, unknown>;
   /** Conversation history for getInstanceMessages */
   history?: Message<unknown>[];
 }
 
-export interface ToolCallResult {
-  toolResults: (ToolResultBlock | TextBlock | OutputBlock<unknown>)[];
+export interface ToolCallResult<AppMessage = unknown> {
+  toolResults: ToolResultBlock[];
+  /** Assistant messages from toolReply userMessage (should be role: assistant) */
+  assistantMessages: (TextBlock | OutputBlock<AppMessage>)[];
   currentState: unknown;
   packStates: Record<string, unknown>;
   queuedTransition?: { name: string; reason: string; args: unknown };
+  /** If true, a terminal tool was called and the turn should end immediately */
+  terminal?: boolean;
 }
 
 export interface ToolCall {
@@ -61,7 +65,11 @@ interface TransitionResult {
 
 interface RegularToolResult {
   newCurrentState: unknown;
-  results: (ToolResultBlock | TextBlock | OutputBlock<unknown>)[];
+  toolResult: ToolResultBlock;
+  /** Assistant content from toolReply userMessage (should be role: assistant) */
+  assistantContent?: TextBlock | OutputBlock<any>;
+  /** If true, this tool is terminal and the turn should end */
+  terminal?: boolean;
 }
 
 /**
@@ -71,7 +79,7 @@ function handleUpdateStateTool(
   id: string,
   toolInput: unknown,
   currentState: unknown,
-  validator: Node<unknown>["validator"],
+  validator: Node<any, unknown>["validator"],
 ): UpdateStateResult {
   const patch = (toolInput as { patch: Partial<unknown> }).patch;
   const result = updateState(currentState, patch, validator);
@@ -108,7 +116,7 @@ function handleTransitionTool(
     const { to, reason } = toolInput as { to: string; reason: string };
     return {
       queuedTransition: { name: to, reason, args: {} },
-      toolResult: toolResult(id, `Transition to "${to}" queued`),
+      toolResult: toolResult(id, `Transition to "${to}" complete. You are now in the new context - respond to the user.`),
     };
   }
 
@@ -120,7 +128,7 @@ function handleTransitionTool(
   };
   return {
     queuedTransition: { name: transitionName, reason, args },
-    toolResult: toolResult(id, `Transition to "${transitionName}" queued`),
+    toolResult: toolResult(id, `Transition to "${transitionName}" complete. You are now in the new context - respond to the user.`),
   };
 }
 
@@ -147,7 +155,7 @@ async function handleRegularTool(
     if (!pack) {
       return {
         newCurrentState: currentState,
-        results: [toolResult(id, `Pack not found: ${packName}`, true)],
+        toolResult: toolResult(id, `Pack not found: ${packName}`, true),
       };
     }
     const packState = getOrInitPackState(packStates, pack);
@@ -162,7 +170,7 @@ async function handleRegularTool(
         if (!parseResult.success) {
           return {
             newCurrentState: currentState,
-            results: [toolResult(id, `Invalid pack tool input: ${parseResult.error.message}`, true)],
+            toolResult: toolResult(id, `Invalid pack tool input: ${parseResult.error.message}`, true),
           };
         }
       }
@@ -189,23 +197,19 @@ async function handleRegularTool(
         const resultStr = typeof result === "string" ? result : JSON.stringify(result);
         return {
           newCurrentState: currentState,
-          results: [
-            toolResult(id, `${resultStr}\n\nError: ${packStateError}`, true),
-          ],
+          toolResult: toolResult(id, `${resultStr}\n\nError: ${packStateError}`, true),
         };
       }
 
       return {
         newCurrentState: currentState,
-        results: [
-          toolResult(id, typeof result === "string" ? result : JSON.stringify(result)),
-        ],
+        toolResult: toolResult(id, typeof result === "string" ? result : JSON.stringify(result)),
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       return {
         newCurrentState: currentState,
-        results: [toolResult(id, `Tool error: ${errorMsg}`, true)],
+        toolResult: toolResult(id, `Tool error: ${errorMsg}`, true),
       };
     }
   }
@@ -253,40 +257,37 @@ async function handleRegularTool(
     result: toolResultStr,
     isError,
     userMessage,
-  } = await executeTool(
-    tool,
-    toolInput,
-    toolState,
-    onUpdate,
-    ctx.instance.id,
-    ctx.history ?? [],
-  );
+    terminal,
+  } = await executeTool(tool, toolInput, toolState, onUpdate, ctx.instance.id, ctx.history ?? []);
 
-  const results: (ToolResultBlock | TextBlock | OutputBlock<unknown>)[] = [
-    toolResult(id, toolResultStr, isError),
-  ];
+  const toolResultBlock = toolResult(id, toolResultStr, isError);
 
-  // Add user message block if present (from toolReply)
+  // Build assistant content if userMessage present (from toolReply)
+  let assistantContent: TextBlock | OutputBlock<unknown> | undefined;
   if (userMessage !== undefined) {
-    if (typeof userMessage === "string") {
-      results.push({ type: "text", text: userMessage });
-    } else {
-      results.push({ type: "output", data: userMessage });
-    }
+    assistantContent =
+      typeof userMessage === "string" ? { type: "text", text: userMessage } : { type: "output", data: userMessage };
   }
 
-  return { newCurrentState, results };
+  return {
+    newCurrentState,
+    toolResult: toolResultBlock,
+    assistantContent,
+    terminal,
+  };
 }
 
 /**
  * Process tool calls from an API response.
  * Handles updateState, transitions, pack tools, and regular node tools.
  */
-export async function processToolCalls(
+export async function processToolCalls<AppMessage = unknown>(
   ctx: ToolCallContext,
   toolCalls: ToolCall[],
-): Promise<ToolCallResult> {
-  const toolResults: (ToolResultBlock | TextBlock | OutputBlock<unknown>)[] = [];
+): Promise<ToolCallResult<AppMessage>> {
+  const toolResults: ToolResultBlock[] = [];
+  const assistantMessages: (TextBlock | OutputBlock<AppMessage>)[] = [];
+  let terminal = false;
   let currentState = ctx.currentState;
   const packStates = { ...ctx.packStates };
   let queuedTransition: { name: string; reason: string; args: unknown } | undefined;
@@ -339,7 +340,13 @@ export async function processToolCalls(
       );
       if (result) {
         currentState = result.newCurrentState;
-        toolResults.push(...result.results);
+        toolResults.push(result.toolResult);
+        if (result.assistantContent) {
+          assistantMessages.push(result.assistantContent);
+        }
+        if (result.terminal) {
+          terminal = true;
+        }
       }
       continue;
     }
@@ -350,8 +357,10 @@ export async function processToolCalls(
 
   return {
     toolResults,
+    assistantMessages,
     currentState,
     packStates,
     queuedTransition,
+    terminal,
   };
 }

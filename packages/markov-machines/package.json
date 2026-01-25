@@ -6,19 +6,20 @@
   "license": "MIT",
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/uuid": "^11.0.0",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "zod": "^4.0.0"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "zod": "catalog:"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
-    "uuid": "^13.0.0",
-    "zod": "^4.3.4"
+    "uuid": "^13.0.0"
   }
 }

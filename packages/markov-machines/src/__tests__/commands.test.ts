@@ -25,7 +25,6 @@ function createMockExecutor(): Executor {
       _options?: RunOptions,
     ): Promise<RunResult> => {
       return {
-        response: "ok",
         instance,
         messages: [],
         yieldReason: "end_turn",
@@ -344,7 +343,7 @@ describe("command with spawn", () => {
           description: "Spawn a researcher child",
           inputSchema: z.object({ query: z.string() }),
           execute: (input, ctx) => {
-            return ctx.spawn(childNode, { query: input.query });
+            return ctx.spawn(childNode, { query: input.query }) as any;
           },
         },
       },
@@ -388,7 +387,7 @@ describe("command with cede", () => {
           description: "Complete and cede to parent",
           inputSchema: z.object({}),
           execute: (_, ctx) => {
-            return ctx.cede({ findings: ctx.state.result });
+            return ctx.cede({ findings: ctx.state.result } as any);
           },
         },
       },
@@ -433,7 +432,7 @@ describe("command with cede", () => {
           description: "Try to cede from root",
           inputSchema: z.object({}),
           execute: (_, ctx) => {
-            return ctx.cede({ data: "test" });
+            return ctx.cede({ data: "test" } as any);
           },
         },
       },

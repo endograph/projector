@@ -54,8 +54,7 @@ export function resolveTool(
   // Finally check pack tools (for packs on current node, only for non-worker nodes)
   // Worker nodes don't have access to packs
   if (!instance.node.worker) {
-    const standardNode = instance.node as Node<unknown>;
-    for (const pack of standardNode.packs ?? []) {
+    for (const pack of instance.node.packs ?? []) {
       const packTool = pack.tools[toolName];
       if (packTool) {
         return { tool: packTool, owner: { pack: pack.name } };

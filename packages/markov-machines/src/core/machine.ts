@@ -35,7 +35,7 @@ function validateInstance(instance: Instance): void {
  * Initialize pack states for all packs in the charter.
  * Uses initialState from each pack if defined.
  */
-function initializePackStates(charter: Charter): Record<string, unknown> {
+function initializePackStates(charter: Charter<any>): Record<string, unknown> {
   const packStates: Record<string, unknown> = {};
   for (const pack of charter.packs) {
     packStates[pack.name] = pack.initialState;
@@ -49,7 +49,7 @@ function initializePackStates(charter: Charter): Record<string, unknown> {
  */
 export function getOrInitPackState(
   packStates: Record<string, unknown>,
-  pack: Pack<unknown>,
+  pack: Pack<any>,
 ): unknown {
   if (!(pack.name in packStates)) {
     packStates[pack.name] = pack.initialState;
@@ -62,7 +62,10 @@ export function getOrInitPackState(
  * Validates all states in the instance tree.
  * Initializes pack states on root instance if not present.
  */
-export function createMachine(charter: Charter, config: MachineConfig): Machine {
+export function createMachine<AppMessage = unknown>(
+  charter: Charter<AppMessage>,
+  config: MachineConfig<AppMessage>,
+): Machine<AppMessage> {
   const { instance: inputInstance, history = [] } = config;
 
   // Initialize pack states on root instance if not present (immutably)

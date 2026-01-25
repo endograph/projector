@@ -35,27 +35,27 @@ function validateNames(
 
 /**
  * Create a new node instance without structured output.
- * @typeParam S - The node's state type.
+ * @typeParam S - The node's state type (inferred from validator).
  */
-export function createNode<S>(config: NodeConfig<S>): Node<S, never>;
+export function createNode<S>(config: NodeConfig<never, S>): Node<never, S>;
 
 /**
  * Create a new node instance with structured output.
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type.
+ * @typeParam S - The node's state type (inferred from validator).
  */
-export function createNode<S, M>(
-  config: NodeConfig<S, M> & { output: OutputConfig<M> },
-): Node<S, M>;
+export function createNode<M, S>(
+  config: NodeConfig<M, S> & { output: OutputConfig<M> },
+): Node<M, S>;
 
 /**
  * Create a new node instance.
  * Node has no knowledge of Charter - it only knows about its own state type S.
  *
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type.
  */
-export function createNode<S, M = never>(config: NodeConfig<S, M>): Node<S, M> {
+export function createNode<M = never, S = unknown>(config: NodeConfig<M, S>): Node<M, S> {
   const {
     instructions,
     tools = {},
@@ -91,28 +91,28 @@ export function createNode<S, M = never>(config: NodeConfig<S, M>): Node<S, M> {
  * - Can't access packs
  * - Must cede to return control (end_turn throws an error)
  *
- * @typeParam S - The node's state type.
+ * @typeParam S - The node's state type (inferred from validator).
  */
-export function createWorkerNode<S>(config: WorkerNodeConfig<S>): WorkerNode<S, never>;
+export function createWorkerNode<S>(config: WorkerNodeConfig<never, S>): WorkerNode<never, S>;
 
 /**
  * Create a new worker node instance with structured output.
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type.
+ * @typeParam S - The node's state type (inferred from validator).
  */
-export function createWorkerNode<S, M>(
-  config: WorkerNodeConfig<S, M> & { output: OutputConfig<M> },
-): WorkerNode<S, M>;
+export function createWorkerNode<M, S>(
+  config: WorkerNodeConfig<M, S> & { output: OutputConfig<M> },
+): WorkerNode<M, S>;
 
 /**
  * Create a new worker node instance.
  *
- * @typeParam S - The node's state type.
  * @typeParam M - The output message type (never = no structured output).
+ * @typeParam S - The node's state type.
  */
-export function createWorkerNode<S, M = never>(
-  config: WorkerNodeConfig<S, M>,
-): WorkerNode<S, M> {
+export function createWorkerNode<M = never, S = unknown>(
+  config: WorkerNodeConfig<M, S>,
+): WorkerNode<M, S> {
   const {
     instructions,
     tools = {},
