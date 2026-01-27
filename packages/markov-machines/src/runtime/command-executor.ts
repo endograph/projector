@@ -1,12 +1,12 @@
 import type { Instance, SuspendInfo } from "../types/instance.js";
 import type { Node } from "../types/node.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage } from "../types/messages.js";
 import type {
   CommandContext,
   CommandResult,
   CommandExecutionResult,
 } from "../types/commands.js";
-import { isValueResult, isResumeResult } from "../types/commands.js";
+import { isCommandValueResult, isResumeResult } from "../types/commands.js";
 import type { SpawnTarget, SpawnOptions } from "../types/transitions.js";
 import {
   isTransitionToResult,
@@ -14,10 +14,10 @@ import {
   isCedeResult,
   isSuspendResult,
 } from "../types/transitions.js";
-import { isToolReply } from "../types/tools.js";
 import { cede, spawn, suspend } from "../helpers/cede-spawn.js";
 import { shallowMerge } from "../types/state.js";
 import { createInstance, createSuspendInfo, clearSuspension } from "../types/instance.js";
+import { userMessage, instanceMessage } from "../types/messages.js";
 
 /**
  * Execute a command on an instance.
@@ -28,13 +28,14 @@ export async function executeCommand(
   commandName: string,
   input: unknown,
   instanceId: string,
-  history: Message<unknown>[],
+  history: MachineMessage<unknown>[],
+  enqueue: (msgs: MachineMessage<unknown>[]) => void,
 ): Promise<{
   result: CommandExecutionResult;
   instance: Instance;
   transitionResult?: CommandResult;
   suspendInfo?: SuspendInfo;
-  replyMessages?: { userMessage: unknown; llmMessage: string };
+  messages?: string | MachineMessage<unknown>[];
 }> {
   const command = instance.node.commands?.[commandName];
   if (!command) {
@@ -60,12 +61,16 @@ export async function executeCommand(
       currentState as Record<string, unknown>,
       patch as Record<string, unknown>,
     );
+    // Enqueue state update message
+    enqueue([instanceMessage(
+      { kind: "state", instanceId, patch: patch as Record<string, unknown> },
+    )]);
   };
 
-  // Create getInstanceMessages function that filters by sourceInstanceId
-  const getInstanceMessages = (): Message[] => {
+  // Create getInstanceMessages function that filters by source.instanceId
+  const getInstanceMessages = (): MachineMessage[] => {
     return history.filter(
-      (msg) => msg.metadata?.sourceInstanceId === instanceId
+      (msg) => msg.metadata?.source?.instanceId === instanceId
     );
   };
 
@@ -84,25 +89,13 @@ export async function executeCommand(
     // Execute the command
     const cmdResult = await command.execute(parsed.data, ctx);
 
-    // Handle value result - just state update + value return
-    if (isValueResult(cmdResult)) {
+    // Handle command result - returns optional messages to enqueue and optional payload
+    if (isCommandValueResult(cmdResult)) {
       const updatedInstance: Instance = { ...instance, state: currentState };
       return {
-        result: { success: true, value: cmdResult.value },
+        result: { success: true, value: cmdResult.payload },
         instance: updatedInstance,
-      };
-    }
-
-    // Handle tool reply - returns messages for user and LLM
-    if (isToolReply(cmdResult)) {
-      const updatedInstance: Instance = { ...instance, state: currentState };
-      return {
-        result: { success: true },
-        instance: updatedInstance,
-        replyMessages: {
-          userMessage: cmdResult.userMessage,
-          llmMessage: cmdResult.llmMessage,
-        },
+        messages: cmdResult.messages,
       };
     }
 

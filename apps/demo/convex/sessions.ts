@@ -131,3 +131,19 @@ export const timeTravel = mutation({
     await ctx.db.patch(sessionId, { currentTurnId: targetTurnId });
   },
 });
+
+export const updateInstance = mutation({
+  args: {
+    sessionId: v.id("sessions"),
+    instance: v.any(),
+    displayInstance: v.optional(v.any()),
+  },
+  handler: async (ctx, { sessionId, instance, displayInstance }) => {
+    const session = await ctx.db.get(sessionId);
+    if (!session?.currentTurnId) {
+      throw new Error("Session has no current turn");
+    }
+
+    await ctx.db.patch(session.currentTurnId, { instance, displayInstance });
+  },
+});

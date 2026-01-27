@@ -57,6 +57,7 @@ export function createNode<M, S>(
  */
 export function createNode<M = never, S = unknown>(config: NodeConfig<M, S>): Node<M, S> {
   const {
+    name,
     instructions,
     tools = {},
     validator,
@@ -72,6 +73,7 @@ export function createNode<M = never, S = unknown>(config: NodeConfig<M, S>): No
 
   return {
     id: uuid(),
+    name,
     instructions,
     tools,
     validator,
@@ -114,6 +116,7 @@ export function createWorkerNode<M = never, S = unknown>(
   config: WorkerNodeConfig<M, S>,
 ): WorkerNode<M, S> {
   const {
+    name,
     instructions,
     tools = {},
     validator,
@@ -128,6 +131,7 @@ export function createWorkerNode<M = never, S = unknown>(
 
   return {
     id: uuid(),
+    name,
     instructions,
     tools,
     validator,

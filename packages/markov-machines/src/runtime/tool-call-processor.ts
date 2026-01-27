@@ -2,7 +2,7 @@ import type { Charter } from "../types/charter.js";
 import type { Instance } from "../types/instance.js";
 import type { Node } from "../types/node.js";
 import type {
-  Message,
+  MachineMessage,
   ToolResultBlock,
   TextBlock,
   OutputBlock,
@@ -32,7 +32,7 @@ export interface ToolCallContext {
   currentState: unknown;
   currentNode: Node<any, unknown>;
   /** Conversation history for getInstanceMessages */
-  history?: Message<unknown>[];
+  history?: MachineMessage<unknown>[];
 }
 
 export interface ToolCallResult<AppMessage = unknown> {

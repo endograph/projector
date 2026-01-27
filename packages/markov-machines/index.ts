@@ -8,8 +8,8 @@ export { createMachine } from "./src/core/machine.js";
 export { createTransition } from "./src/core/transition.js";
 export { cede, spawn, suspend } from "./src/helpers/cede-spawn.js";
 export type { TransitionConfig } from "./src/core/transition.js";
-export { runMachine, runMachineToCompletion, mergeLeafResults } from "./src/core/run.js";
-export type { RunMachineInput, LeafResult, MergedResult } from "./src/core/run.js";
+export { runMachine, runMachineToCompletion, mergeLeafResults, drainQueue, applyInstanceMessages } from "./src/core/run.js";
+export type { LeafResult, LegacyLeafResult, MergedResult, DrainResult } from "./src/core/run.js";
 export { createPack } from "./src/core/pack.js";
 export { getAvailableCommands, runCommand, createCommand } from "./src/core/commands.js";
 export type { CommandConfig } from "./src/core/commands.js";
@@ -18,8 +18,10 @@ export type { CommandConfig } from "./src/core/commands.js";
 export {
   createDryClientNode,
   createDryClientInstance,
+  createDryClientPack,
   hydrateClientNode,
   hydrateClientInstance,
+  hydrateClientPack,
 } from "./src/core/client.js";
 
 // Executors
@@ -33,6 +35,7 @@ export type {
   MachineStep,
   YieldReason,
   SuspendedInstanceInfo,
+  EnqueueFn,
 } from "./src/executor/types.js";
 
 // Tools
@@ -61,6 +64,7 @@ export type {
   // Machine
   Machine,
   MachineConfig,
+  OnMessageEnqueue,
   SerializedMachine,
   SerializedInstance,
   SerializedSuspendInfo,
@@ -90,14 +94,26 @@ export type {
   AnthropicBuiltinTool,
   ToolReply,
   // Messages
-  Message,
+  MachineMessage,
+  ConversationMessage,
+  InstanceMessage,
   MessageMetadata,
-  ContentBlock,
+  MessageSource,
+  SourceInstanceId,
+  MachineItem,
   TextBlock,
   ToolUseBlock,
   ToolResultBlock,
   ThinkingBlock,
   OutputBlock,
+  // Instance payloads
+  InstancePayload,
+  StateUpdatePayload,
+  PackStateUpdatePayload,
+  TransitionPayload,
+  SpawnPayload,
+  CedePayload,
+  SuspendPayload,
   // Pack
   Pack,
   PackConfig,
@@ -109,7 +125,7 @@ export type {
   CommandDefinition,
   AnyCommandDefinition,
   CommandResult,
-  ValueResult,
+  CommandValueResult,
   ResumeResult,
   CommandInfo,
   CommandExecutionResult,
@@ -123,6 +139,8 @@ export type {
   ClientNode,
   DryClientInstance,
   ClientInstance,
+  DryClientPack,
+  ClientPack,
 } from "./src/types/index.js";
 
 // Type guards and helpers
@@ -157,8 +175,8 @@ export {
   isAnthropicBuiltinTool,
   isToolReply,
   toolReply,
-  isValueResult,
-  commandValue,
+  isCommandValueResult,
+  commandResult,
   commandResume,
   isCommand,
   isResume,
@@ -169,13 +187,24 @@ export {
 export {
   userMessage,
   assistantMessage,
+  commandMessage,
+  systemMessage,
+  instanceMessage,
   toolResult,
   getMessageText,
+  isConversationMessage,
+  isInstanceMessage,
+  isModelMessage,
 } from "./src/types/messages.js";
 
 // System prompt helpers
 export type { SystemPromptOptions } from './src/runtime/system-prompt.js';
 export { buildSystemPrompt, buildDefaultSystemPrompt } from './src/runtime/system-prompt.js';
+
+// Tool pipeline (for custom executors like LiveKitExecutor)
+export { runToolPipeline } from './src/runtime/tool-pipeline.js';
+export type { ToolPipelineContext, ToolPipelineResult } from './src/runtime/tool-pipeline.js';
+export type { ToolCall } from './src/runtime/tool-call-processor.js';
 
 // State helpers
 export { shallowMerge } from "./src/types/state.js";

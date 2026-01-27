@@ -1,22 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { useAction } from "convex/react";
-import { api } from "@/convex/_generated/api";
-import type { Id } from "@/convex/_generated/dataModel";
+import { useAtomValue } from "jotai";
+import { liveClientAtom } from "@/src/atoms";
+import type { CommandMeta, JSONSchema } from "markov-machines/client";
 
-interface SerializedCommandInfo {
-  name: string;
-  description: string;
-  inputSchema: { type: string; properties?: Record<string, unknown> };
-}
+type CommandSchema = JSONSchema & {
+  type?: string;
+  properties?: Record<string, unknown>;
+};
+
+type SerializedCommandInfo = Omit<CommandMeta, "inputSchema"> & {
+  inputSchema: CommandSchema;
+};
 
 interface CommandsTabProps {
-  sessionId: Id<"sessions">;
   commands: SerializedCommandInfo[];
 }
 
-export function CommandsTab({ sessionId, commands }: CommandsTabProps) {
+export function CommandsTab({ commands }: CommandsTabProps) {
+  const liveClient = useAtomValue(liveClientAtom);
+
   if (commands.length === 0) {
     return (
       <div className="text-terminal-green-dimmer italic">
@@ -25,28 +29,34 @@ export function CommandsTab({ sessionId, commands }: CommandsTabProps) {
     );
   }
 
+  if (!liveClient) {
+    return (
+      <div className="text-terminal-green-dimmer italic">
+        Connecting to agent...
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {commands.map((cmd) => (
-        <CommandCard key={cmd.name} sessionId={sessionId} command={cmd} />
+        <CommandCard key={cmd.name} command={cmd} liveClient={liveClient} />
       ))}
     </div>
   );
 }
 
 function CommandCard({
-  sessionId,
   command,
+  liveClient,
 }: {
-  sessionId: Id<"sessions">;
   command: SerializedCommandInfo;
+  liveClient: NonNullable<ReturnType<typeof useAtomValue<typeof liveClientAtom>>>;
 }) {
   const [input, setInput] = useState("{}");
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
-
-  const executeCommand = useAction(api.commands.executeCommand);
 
   // Check if the input schema has any properties
   const hasInput = command.inputSchema.properties &&
@@ -69,14 +79,10 @@ function CommandCard({
         }
       }
 
-      const res = await executeCommand({
-        sessionId,
-        commandName: command.name,
-        input: parsedInput,
-      });
+      const res = await liveClient.executeCommand(command.name, parsedInput);
 
       if (res.success) {
-        setResult(JSON.stringify(res.value, null, 2));
+        setResult(JSON.stringify({ success: true, value: res.value }, null, 2));
       } else {
         setError(res.error || "Command failed");
       }

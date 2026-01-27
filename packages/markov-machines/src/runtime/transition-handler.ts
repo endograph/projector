@@ -1,6 +1,6 @@
 import type { Instance, SuspendInfo } from "../types/instance.js";
 import type { Node } from "../types/node.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage } from "../types/messages.js";
 import type { TransitionResult } from "../types/transitions.js";
 import {
   isTransitionToResult,
@@ -17,8 +17,8 @@ export interface TransitionOutcome {
   children: Instance[] | undefined;
   executorConfig?: StandardNodeConfig;
   yieldReason: "tool_use" | "cede" | "suspend";
-  /** Content from cede (string or Message[]) */
-  cedeContent?: string | Message<unknown>[];
+  /** Content from cede (string or MachineMessage[]) */
+  cedeContent?: string | MachineMessage<unknown>[];
   /** Suspend info if yieldReason is "suspend" */
   suspendInfo?: SuspendInfo;
 }

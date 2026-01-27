@@ -1,6 +1,6 @@
 import type { Charter } from "../types/charter.js";
 import type { Instance } from "../types/instance.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage } from "../types/messages.js";
 
 
 /**
@@ -12,7 +12,13 @@ export type YieldReason =
   | "max_tokens"
   | "cede"
   | "suspend"          // Instance just suspended
-  | "awaiting_resume"; // All leaves suspended, waiting for resume
+  | "awaiting_resume"  // All leaves suspended, waiting for resume
+  | "external";        // Inference delegated to external system (e.g., LiveKit)
+
+/**
+ * Function to enqueue messages to the machine queue.
+ */
+export type EnqueueFn<AppMessage = unknown> = (messages: MachineMessage<AppMessage>[]) => void;
 
 /**
  * Options for executor run.
@@ -21,30 +27,39 @@ export type YieldReason =
 export interface RunOptions<AppMessage = unknown> {
   maxTurns?: number;
   /** Previous conversation history to include */
-  history?: Message<AppMessage>[];
+  history?: MachineMessage<AppMessage>[];
   /** Max execution steps (for cede continuation). Default 50. */
   maxSteps?: number;
   /** Current step number (1-indexed) */
   currentStep?: number;
   /** Enable debug logging */
   debug?: boolean;
+  /** 
+   * Function to enqueue messages directly to machine queue.
+   * When provided, executor will enqueue messages instead of returning them.
+   */
+  enqueue?: EnqueueFn<AppMessage>;
+  /**
+   * Instance ID of the leaf being executed.
+   * Used for source attribution on enqueued messages.
+   */
+  instanceId?: string;
+  /**
+   * Whether this is a worker (non-primary) instance.
+   * Used for source.isPrimary attribution.
+   */
+  isWorker?: boolean;
 }
 
 /**
  * Result returned from executor run (single API call).
+ * When enqueue is provided in options, messages are enqueued directly
+ * and this result only contains the yield reason.
  * @typeParam AppMessage - The application message type for structured outputs (defaults to unknown).
  */
 export interface RunResult<AppMessage = unknown> {
-  /** Updated instance tree */
-  instance: Instance;
-  /** New messages from this turn */
-  messages: Message<AppMessage>[];
   /** Why the run yielded */
   yieldReason: YieldReason;
-  /** Content from cede - string or Message[] (only set when yieldReason is "cede") */
-  cedeContent?: string | Message<AppMessage>[];
-  /** Updated pack states (to be applied to root instance) */
-  packStates?: Record<string, unknown>;
 }
 
 /**
@@ -65,14 +80,14 @@ export interface SuspendedInstanceInfo {
 export interface MachineStep<AppMessage = unknown> {
   /** Updated instance tree after this step */
   instance: Instance;
-  /** Messages generated in this step */
-  messages: Message<AppMessage>[];
+  /** History generated in this step */
+  history: MachineMessage<AppMessage>[];
   /** Why this step yielded */
-  yieldReason: "end_turn" | "tool_use" | "cede" | "max_tokens" | "command" | "suspend" | "awaiting_resume";
+  yieldReason: "end_turn" | "tool_use" | "cede" | "max_tokens" | "command" | "suspend" | "awaiting_resume" | "external";
   /** True if this is the final step (has response or hit limit) */
   done: boolean;
-  /** Cede content if yieldReason is "cede" - string or Message[] */
-  cedeContent?: string | Message<AppMessage>[];
+  /** Cede content if yieldReason is "cede" - string or MachineMessage[] */
+  cedeContent?: string | MachineMessage<AppMessage>[];
   /** Info about suspended instances (when yieldReason is "suspend" or "awaiting_resume") */
   suspendedInstances?: SuspendedInstanceInfo[];
 }
@@ -84,7 +99,7 @@ export interface MachineStep<AppMessage = unknown> {
  */
 export interface Executor<AppMessage = unknown> {
   /** Executor type identifier */
-  type: "standard";
+  type: string;
 
   /**
    * Run the executor for a node instance.

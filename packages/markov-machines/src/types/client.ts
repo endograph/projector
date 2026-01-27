@@ -14,6 +14,29 @@ export interface CommandMeta {
 }
 
 /**
+ * Wire format pack (JSON-serializable).
+ * Contains pack name, state, validator schema, and command metadata.
+ */
+export interface DryClientPack {
+  name: string;
+  description: string;
+  state: unknown;
+  validator: JSONSchema;
+  commands: Record<string, CommandMeta>;
+}
+
+/**
+ * Hydrated pack with callable command functions.
+ */
+export interface ClientPack {
+  name: string;
+  description: string;
+  state: unknown;
+  validator: JSONSchema;
+  commands: Record<string, (input: unknown) => Command>;
+}
+
+/**
  * Derive typed command functions from Node's command definitions.
  * Maps each command to a function that takes typed input and returns a Command.
  */
@@ -53,13 +76,13 @@ export interface ClientNode<N extends Node<any, any> = Node<any, any>> {
 
 /**
  * Wire format instance (JSON-serializable).
- * Contains id, state, packStates, and a DryClientNode.
+ * Contains id, state, packs (with state, validator, commands), and a DryClientNode.
  * Sent over the wire to clients.
  */
 export interface DryClientInstance<N extends Node<any, any> = Node<any, any>> {
   id: string;
   state: NodeState<N>;
-  packStates?: Record<string, unknown>;
+  packs?: DryClientPack[];
   node: DryClientNode<N>;
 }
 
@@ -70,6 +93,6 @@ export interface DryClientInstance<N extends Node<any, any> = Node<any, any>> {
 export interface ClientInstance<N extends Node<any, any> = Node<any, any>> {
   id: string;
   state: NodeState<N>;
-  packStates?: Record<string, unknown>;
+  packs?: ClientPack[];
   node: ClientNode<N>;
 }

@@ -70,7 +70,7 @@ http.route({
     }
 
     // Look up session by room name
-    const session = await ctx.runQuery(internal.voice.getSessionByRoom, { roomName });
+    const session = await ctx.runQuery(internal.livekitAgent.getSessionByRoom, { roomName });
     if (!session) {
       return new Response(JSON.stringify({ error: "Room not found" }), {
         status: 404,
@@ -82,7 +82,7 @@ http.route({
     const idempotencyKey = `${roomName}:${segmentId}:${role}`;
 
     // Append transcript with idempotency
-    const messageId = await ctx.runMutation(internal.voice.appendTranscript, {
+    const messageId = await ctx.runMutation(internal.livekitAgent.appendTranscript, {
       sessionId: session._id,
       role,
       content,

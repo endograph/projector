@@ -1,6 +1,9 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import type { Ref, SerialNode, SerializedInstance } from "markov-machines/client";
+import { isRef, isSerialTransition } from "markov-machines/client";
+import type { DisplayNode, DisplayPack } from "@/src/types/display";
 
 // ============================================================================
 // Shared Tree Components (exported for reuse)
@@ -149,64 +152,13 @@ export function TreeNode<T extends { id: string; children?: T[] }>({
 // Server TreeView Types & Implementation
 // ============================================================================
 
-interface SerializedSuspendInfo {
-  suspendId: string;
-  reason: string;
-  suspendedAt: string;
-  metadata?: Record<string, unknown>;
-}
-
-interface DisplayCommand {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-interface DisplayNode {
-  name: string;
-  instructions: string;
-  validator: Record<string, unknown>;
-  tools: string[];
-  transitions: Record<string, string>;
-  commands: Record<string, DisplayCommand>;
-  initialState?: unknown;
-  packs?: string[];
-  worker?: boolean;
-}
-
-interface SerialNode {
-  instructions: string;
-  validator: Record<string, unknown>;
-  transitions: Record<string, unknown>;
-  tools?: Record<string, unknown>;
-  initialState?: unknown;
-}
-
-interface Ref {
-  ref: string;
-}
-
 type NodeType = DisplayNode | SerialNode | Ref;
 
-export interface ServerInstance {
-  id: string;
+export type ServerInstance = Omit<SerializedInstance, "node" | "children"> & {
   node: NodeType;
-  state: unknown;
   children?: ServerInstance[];
-  packStates?: Record<string, unknown>;
-  executorConfig?: Record<string, unknown>;
-  suspended?: SerializedSuspendInfo;
-}
-
-function isRef(value: unknown): value is Ref {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "ref" in value &&
-    typeof (value as Ref).ref === "string" &&
-    Object.keys(value).length === 1
-  );
-}
+  packs?: DisplayPack[];
+};
 
 function isDisplayNode(node: NodeType): node is DisplayNode {
   return (
@@ -286,10 +238,10 @@ function NodeSection({ node }: { node: NodeType }) {
           </Expander>
         )}
 
-        {node.packs && node.packs.length > 0 && (
-          <Expander label="packs" badge={node.packs.length} preview={node.packs}>
+        {node.packNames && node.packNames.length > 0 && (
+          <Expander label="packs" badge={node.packNames.length} preview={node.packNames}>
             <div className="text-terminal-green-dim space-y-0.5">
-              {node.packs.map((name) => (
+              {node.packNames.map((name) => (
                 <div key={name}>• {name}</div>
               ))}
             </div>
@@ -340,8 +292,8 @@ function NodeSection({ node }: { node: NodeType }) {
               const t = serialNode.transitions[name];
               const target = isRef(t)
                 ? t.ref
-                : typeof t === "object" && t && "node" in t && isRef((t as { node: unknown }).node)
-                  ? (((t as { node: Ref }).node) as Ref).ref
+                : isSerialTransition(t) && isRef(t.node)
+                  ? t.node.ref
                   : "inline";
               return (
                 <div key={name}>
@@ -363,8 +315,7 @@ function NodeSection({ node }: { node: NodeType }) {
 }
 
 function ServerInstanceContent({ instance }: { instance: ServerInstance }) {
-  const hasPackStates =
-    instance.packStates && Object.keys(instance.packStates).length > 0;
+  const hasPacks = instance.packs && instance.packs.length > 0;
   const isSuspended = !!instance.suspended;
 
   return (
@@ -373,16 +324,34 @@ function ServerInstanceContent({ instance }: { instance: ServerInstance }) {
         <JsonBlock data={instance.state} />
       </Expander>
 
-      {hasPackStates && (
+      {hasPacks && (
         <Expander
-          label="packStates"
-          badge={Object.keys(instance.packStates!).length}
-          preview={instance.packStates}
+          label="packs"
+          badge={instance.packs!.length}
+          preview={instance.packs}
         >
           <div className="space-y-1">
-            {Object.entries(instance.packStates!).map(([name, state]) => (
-              <Expander key={name} label={name} preview={state}>
-                <JsonBlock data={state} />
+            {instance.packs!.map((pack) => (
+              <Expander key={pack.name} label={pack.name} preview={pack.state}>
+                <div className="space-y-1">
+                  <Expander label="state" preview={pack.state}>
+                    <JsonBlock data={pack.state} />
+                  </Expander>
+                  <Expander label="validator" preview={pack.validator}>
+                    <JsonBlock data={pack.validator} />
+                  </Expander>
+                  {Object.keys(pack.commands).length > 0 && (
+                    <Expander label="commands" badge={Object.keys(pack.commands).length} preview={pack.commands}>
+                      <div className="text-terminal-green-dim space-y-0.5">
+                        {Object.entries(pack.commands).map(([cmdName, cmd]) => (
+                          <div key={cmdName}>
+                            • {cmdName}: <span className="italic">{cmd.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </Expander>
+                  )}
+                </div>
               </Expander>
             ))}
           </div>

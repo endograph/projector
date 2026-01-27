@@ -2,9 +2,6 @@
 
 import { forwardRef } from "react";
 import { useAtomValue } from "jotai";
-import { useAction } from "convex/react";
-import { useEffect, useState } from "react";
-import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { activeAgentTabAtom, shiftHeldAtom } from "@/src/atoms";
 import { TabNav } from "./TabNav";
@@ -13,58 +10,21 @@ import { StateTab } from "./StateTab";
 import { HistoryTab } from "./HistoryTab";
 import { CommandsTab } from "./CommandsTab";
 import { DevTab } from "./DevTab";
+import type {
+  CommandMeta,
+  JSONSchema,
+  SerializedInstance,
+} from "markov-machines/client";
+import type { DisplayInstance } from "@/src/types/display";
 
-interface SerializedInstance {
-  id: string;
-  node: Record<string, unknown>;
-  state: unknown;
-  children?: SerializedInstance[];
-  packStates?: Record<string, unknown>;
-  executorConfig?: Record<string, unknown>;
-  suspended?: {
-    suspendId: string;
-    reason: string;
-    suspendedAt: string;
-    metadata?: Record<string, unknown>;
-  };
-}
+type CommandSchema = JSONSchema & {
+  type?: string;
+  properties?: Record<string, unknown>;
+};
 
-interface SerializedCommandInfo {
-  name: string;
-  description: string;
-  inputSchema: { type: string; properties?: Record<string, unknown> };
-}
-
-interface DisplayCommand {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-interface DisplayInstance {
-  id: string;
-  node: {
-    name: string;
-    instructions: string;
-    validator: Record<string, unknown>;
-    tools: string[];
-    transitions: Record<string, string>;
-    commands: Record<string, DisplayCommand>;
-    initialState?: unknown;
-    packs?: string[];
-    worker?: boolean;
-  };
-  state: unknown;
-  children?: DisplayInstance[];
-  packStates?: Record<string, unknown>;
-  executorConfig?: Record<string, unknown>;
-  suspended?: {
-    suspendId: string;
-    reason: string;
-    suspendedAt: string;
-    metadata?: Record<string, unknown>;
-  };
-}
+type SerializedCommandInfo = Omit<CommandMeta, "inputSchema"> & {
+  inputSchema: CommandSchema;
+};
 
 interface AgentPaneProps {
   sessionId: Id<"sessions">;
@@ -73,18 +33,50 @@ interface AgentPaneProps {
   onResetSession: () => void;
 }
 
+// Helper to get active instance (follows children to deepest)
+function getActiveDisplayInstance(instance: DisplayInstance): DisplayInstance {
+  if (!instance.children || instance.children.length === 0) {
+    return instance;
+  }
+  const lastChild = instance.children[instance.children.length - 1];
+  if (!lastChild) return instance;
+  return getActiveDisplayInstance(lastChild);
+}
+
+// Extract commands from active instance (includes node commands and pack commands)
+function getCommandsFromInstance(instance: DisplayInstance | undefined): SerializedCommandInfo[] {
+  if (!instance) return [];
+  const active = getActiveDisplayInstance(instance);
+  
+  // Get node commands
+  const nodeCommands = Object.values(active.node.commands).map(cmd => ({
+    name: cmd.name,
+    description: cmd.description,
+    inputSchema: cmd.inputSchema as CommandSchema,
+  }));
+
+  // Get pack commands from root instance (packs are stored on root)
+  const packCommands: SerializedCommandInfo[] = [];
+  if (instance.packs) {
+    for (const pack of instance.packs) {
+      for (const cmd of Object.values(pack.commands)) {
+        packCommands.push({
+          name: cmd.name,
+          description: cmd.description,
+          inputSchema: cmd.inputSchema as CommandSchema,
+        });
+      }
+    }
+  }
+
+  return [...nodeCommands, ...packCommands];
+}
+
 export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
   function AgentPane({ sessionId, instance, displayInstance, onResetSession }, ref) {
     const activeTab = useAtomValue(activeAgentTabAtom);
     const shiftHeld = useAtomValue(shiftHeldAtom);
-    const getCommands = useAction(api.commands.getCommands);
-    const [commands, setCommands] = useState<SerializedCommandInfo[]>([]);
-
-    useEffect(() => {
-      if (sessionId) {
-        getCommands({ sessionId }).then((cmds) => setCommands(cmds as SerializedCommandInfo[])).catch(console.error);
-      }
-    }, [sessionId, instance, getCommands]);
+    const commands = getCommandsFromInstance(displayInstance);
 
     return (
       <div
@@ -110,7 +102,7 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
           {activeTab === "state" && <StateTab instance={instance ?? null} />}
           {activeTab === "history" && <HistoryTab sessionId={sessionId} />}
           {activeTab === "commands" && (
-            <CommandsTab sessionId={sessionId} commands={commands} />
+            <CommandsTab commands={commands} />
           )}
           {activeTab === "dev" && <DevTab onResetSession={onResetSession} />}
         </div>

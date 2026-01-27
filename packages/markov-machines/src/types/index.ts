@@ -77,27 +77,46 @@ export type { Charter, CharterConfig } from "./charter.js";
 
 // Messages
 export type {
-  Message,
+  MachineMessage,
+  ConversationMessage,
+  InstanceMessage,
   MessageMetadata,
-  ContentBlock,
+  MessageSource,
+  SourceInstanceId,
+  MachineItem,
   TextBlock,
   ToolUseBlock,
   ToolResultBlock,
   ThinkingBlock,
   OutputBlock,
+  // Instance payloads
+  InstancePayload,
+  StateUpdatePayload,
+  PackStateUpdatePayload,
+  TransitionPayload,
+  SpawnPayload,
+  CedePayload,
+  SuspendPayload,
 } from "./messages.js";
 export {
   userMessage,
   assistantMessage,
+  systemMessage,
+  commandMessage,
+  instanceMessage,
   toolResult,
   getMessageText,
   isOutputBlock,
+  isConversationMessage,
+  isInstanceMessage,
+  isModelMessage,
 } from "./messages.js";
 
 // Machine
 export type {
   Machine,
   MachineConfig,
+  OnMessageEnqueue,
   SerializedMachine,
   SerializedInstance,
   SerializedSuspendInfo,
@@ -123,7 +142,7 @@ export type {
   CommandDefinition,
   AnyCommandDefinition,
   CommandResult,
-  ValueResult,
+  CommandValueResult,
   ResumeResult,
   CommandInfo,
   CommandExecutionResult,
@@ -131,7 +150,7 @@ export type {
   Resume,
   SuspendOptions,
 } from "./commands.js";
-export { isValueResult, commandValue, commandResume, isCommand, isResume, isResumeResult } from "./commands.js";
+export { isCommandValueResult, commandResult, commandResume, isCommand, isResume, isResumeResult } from "./commands.js";
 
 // Client
 export type {
@@ -141,4 +160,6 @@ export type {
   ClientNode,
   DryClientInstance,
   ClientInstance,
+  DryClientPack,
+  ClientPack,
 } from "./client.js";

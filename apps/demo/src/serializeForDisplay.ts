@@ -1,6 +1,11 @@
 import { z } from "zod";
-import type { Instance } from "markov-machines";
-import type { Charter } from "markov-machines";
+import type { Charter, Instance, Pack } from "markov-machines";
+import type {
+  DisplayCommand,
+  DisplayInstance,
+  DisplayNode,
+  DisplayPack,
+} from "./types/display";
 
 /**
  * Custom serialization for display purposes.
@@ -8,39 +13,6 @@ import type { Charter } from "markov-machines";
  * (showing instructions, validator, etc.) instead of converting to refs.
  * Tools and transitions are shown as refs/names only.
  */
-
-interface DisplayCommand {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-interface DisplayNode {
-  name: string; // Node name from charter, or "[inline]"
-  instructions: string;
-  validator: Record<string, unknown>;
-  tools: string[]; // Just tool names
-  transitions: Record<string, string>; // name -> target ref or "inline"
-  commands: Record<string, DisplayCommand>; // Command metadata
-  initialState?: unknown;
-  packs?: string[]; // Pack names
-  worker?: boolean;
-}
-
-interface DisplayInstance {
-  id: string;
-  node: DisplayNode;
-  state: unknown;
-  children?: DisplayInstance[];
-  packStates?: Record<string, unknown>;
-  executorConfig?: Record<string, unknown>;
-  suspended?: {
-    suspendId: string;
-    reason: string;
-    suspendedAt: string;
-    metadata?: Record<string, unknown>;
-  };
-}
 
 /**
  * Sanitize an object for Convex storage by replacing $ prefixed keys.
@@ -137,7 +109,7 @@ function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): Dis
   }
 
   // Get pack names
-  const packs = node.packs?.map((p) => p.name);
+  const packNames = node.packs?.map((p) => p.name);
 
   // Serialize commands (name, description, inputSchema)
   const commands: Record<string, DisplayCommand> = {};
@@ -168,8 +140,50 @@ function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): Dis
     transitions,
     commands,
     ...(node.initialState !== undefined ? { initialState: sanitizeForConvex(node.initialState) } : {}),
-    ...(packs && packs.length > 0 ? { packs } : {}),
+    ...(packNames && packNames.length > 0 ? { packNames } : {}),
     ...(node.worker ? { worker: true } : {}),
+  };
+}
+
+function serializePackForDisplay(pack: Pack, state: unknown): DisplayPack {
+  // Convert validator to JSON schema
+  let validator: Record<string, unknown> = {};
+  try {
+    const rawValidator = z.toJSONSchema(pack.validator, {
+      target: "draft-2020-12",
+    }) as Record<string, unknown>;
+    validator = sanitizeForConvex(rawValidator) as Record<string, unknown>;
+  } catch {
+    validator = { error: "Could not serialize validator" };
+  }
+
+  // Serialize pack commands
+  const commands: Record<string, DisplayCommand> = {};
+  if (pack.commands) {
+    for (const [cmdName, cmd] of Object.entries(pack.commands)) {
+      let inputSchema: Record<string, unknown> = {};
+      try {
+        const rawSchema = z.toJSONSchema(cmd.inputSchema, {
+          target: "draft-2020-12",
+        }) as Record<string, unknown>;
+        inputSchema = sanitizeForConvex(rawSchema) as Record<string, unknown>;
+      } catch {
+        inputSchema = { error: "Could not serialize schema" };
+      }
+      commands[cmdName] = {
+        name: cmd.name,
+        description: cmd.description,
+        inputSchema,
+      };
+    }
+  }
+
+  return {
+    name: pack.name,
+    description: pack.description,
+    state,
+    validator,
+    commands,
   };
 }
 
@@ -184,12 +198,23 @@ export function serializeInstanceForDisplay(
     children = instance.children.map((c) => serializeInstanceForDisplay(c, charter));
   }
 
+  // Build packs array with full info
+  let packs: DisplayPack[] | undefined;
+  const nodePacks = instance.node.packs ?? [];
+  const packStates = instance.packStates ?? {};
+  if (nodePacks.length > 0) {
+    packs = nodePacks.map((pack) => {
+      const state = packStates[pack.name] ?? pack.initialState ?? {};
+      return serializePackForDisplay(pack, state);
+    });
+  }
+
   const result = {
     id: instance.id,
     node,
     state: instance.state,
     ...(children ? { children } : {}),
-    ...(instance.packStates ? { packStates: instance.packStates } : {}),
+    ...(packs ? { packs } : {}),
     ...(instance.executorConfig ? { executorConfig: { ...instance.executorConfig } } : {}),
     ...(instance.suspended
       ? {

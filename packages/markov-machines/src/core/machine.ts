@@ -3,6 +3,7 @@ import type { Charter } from "../types/charter.js";
 import type { Machine, MachineConfig } from "../types/machine.js";
 import type { Instance } from "../types/instance.js";
 import type { Pack } from "../types/pack.js";
+import type { MachineMessage } from "../types/messages.js";
 
 /**
  * Validate a node instance tree recursively.
@@ -66,7 +67,7 @@ export function createMachine<AppMessage = unknown>(
   charter: Charter<AppMessage>,
   config: MachineConfig<AppMessage>,
 ): Machine<AppMessage> {
-  const { instance: inputInstance, history = [] } = config;
+  const { instance: inputInstance, history = [], onMessageEnqueue } = config;
 
   // Initialize pack states on root instance if not present (immutably)
   const instance =
@@ -77,9 +78,45 @@ export function createMachine<AppMessage = unknown>(
   // Validate the entire instance tree
   validateInstance(instance);
 
+  // Create mutable queue for enqueuing messages
+  const queue: MachineMessage<AppMessage>[] = [];
+
+  // Queue notification system for waitForQueue
+  let queueResolvers: Array<() => void> = [];
+
+  const notifyQueue = () => {
+    const resolvers = queueResolvers;
+    queueResolvers = [];
+    for (const resolve of resolvers) {
+      resolve();
+    }
+  };
+
+  const waitForQueue = (): Promise<void> => {
+    if (queue.length > 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      queueResolvers.push(resolve);
+    });
+  };
+
   return {
     charter,
     instance,
     history,
+    queue,
+    enqueue: (messages: MachineMessage<AppMessage>[]) => {
+      queue.push(...messages);
+      // Call onMessageEnqueue for each message
+      if (onMessageEnqueue) {
+        for (const message of messages) {
+          onMessageEnqueue(message);
+        }
+      }
+      notifyQueue();
+    },
+    waitForQueue,
+    notifyQueue,
   };
 }

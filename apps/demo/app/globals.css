@@ -174,3 +174,18 @@ textarea::placeholder {
 .tab-indicator.active::after {
   transform: scaleX(1);
 }
+
+/* Live mode mic button glow */
+@keyframes mic-glow {
+  0%, 100% {
+    filter: drop-shadow(0 0 3px rgba(0, 255, 0, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(0, 255, 0, 0.8));
+  }
+}
+
+.mic-live {
+  animation: mic-glow 2s ease-in-out infinite;
+  color: var(--terminal-green);
+}

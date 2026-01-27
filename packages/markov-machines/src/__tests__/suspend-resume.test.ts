@@ -7,11 +7,13 @@ import { createMachine } from "../core/machine.js";
 import { runMachine, runMachineToCompletion } from "../core/run.js";
 import { runCommand } from "../core/commands.js";
 import { suspend } from "../helpers/cede-spawn.js";
-import { commandResume, commandValue } from "../types/commands.js";
-import type { Executor, RunResult, RunOptions, MachineStep, SuspendedInstanceInfo } from "../executor/types.js";
+import { commandResume, commandResult } from "../types/commands.js";
+import type { Executor, RunResult, RunOptions, MachineStep, SuspendedInstanceInfo, YieldReason } from "../executor/types.js";
 import type { Charter } from "../types/charter.js";
 import type { Instance, SuspendInfo } from "../types/instance.js";
 import type { Resume, Command } from "../types/commands.js";
+import type { MachineMessage } from "../types/messages.js";
+import { userMessage, systemMessage, assistantMessage, instanceMessage } from "../types/messages.js";
 
 /**
  * Helper to collect all steps from the async generator.
@@ -27,7 +29,19 @@ async function collectSteps<T = unknown>(
 }
 
 /**
+ * Legacy behavior result for mock executors (pre-refactor format).
+ */
+interface LegacyBehaviorResult {
+  instance?: Instance;
+  history?: MachineMessage<unknown>[];
+  yieldReason?: YieldReason;
+  cedeContent?: string | MachineMessage<unknown>[];
+  packStates?: Record<string, unknown>;
+}
+
+/**
  * Mock executor that simulates agent behavior for testing.
+ * Uses the new enqueue-based flow.
  */
 function createMockExecutor(
   behavior: (
@@ -35,7 +49,7 @@ function createMockExecutor(
     instance: Instance,
     ancestors: Instance[],
     input: string,
-  ) => Partial<RunResult<unknown>>,
+  ) => LegacyBehaviorResult,
 ): Executor<unknown> {
   return {
     type: "standard",
@@ -44,15 +58,88 @@ function createMockExecutor(
       instance: Instance,
       ancestors: Instance[],
       input: string,
-      _options?: RunOptions<unknown>,
+      options?: RunOptions<unknown>,
     ): Promise<RunResult<unknown>> => {
+      const enqueue = options?.enqueue;
+      if (!enqueue) {
+        throw new Error("Mock executor requires options.enqueue");
+      }
+
+      const source = {
+        instanceId: options?.instanceId ?? instance.id,
+        isPrimary: !(options?.isWorker ?? false),
+      };
+
       const result = behavior(charter, instance, ancestors, input);
+      
+      // Enqueue assistant message
+      if (result.history && result.history.length > 0) {
+        for (const msg of result.history) {
+          enqueue([{ ...msg, metadata: { ...msg.metadata, source } }]);
+        }
+      } else {
+        enqueue([assistantMessage("", source)]);
+      }
+
+      // Convert instance changes to instance messages
+      if (result.instance && result.instance !== instance) {
+        // Check if suspended
+        if (result.instance.suspended && !instance.suspended) {
+          enqueue([instanceMessage({
+            kind: "suspend",
+            instanceId: instance.id,
+            suspendInfo: result.instance.suspended,
+          }, source)]);
+        }
+        
+        // Check if children changed (spawn)
+        if (result.instance.children && 
+            (!instance.children || result.instance.children.length > instance.children.length)) {
+          const newChildren = result.instance.children.slice(instance.children?.length ?? 0);
+          enqueue([instanceMessage({
+            kind: "spawn",
+            parentInstanceId: instance.id,
+            children: newChildren.map(c => ({
+              node: c.node,
+              state: c.state,
+              executorConfig: c.executorConfig,
+            })),
+          }, source)]);
+        }
+        
+        // Check if state changed
+        if (result.instance.state !== instance.state) {
+          enqueue([instanceMessage({
+            kind: "state",
+            instanceId: instance.id,
+            patch: result.instance.state as Record<string, unknown>,
+          }, source)]);
+        }
+      }
+
+      // Handle cede
+      if (result.yieldReason === "cede") {
+        enqueue([instanceMessage({
+          kind: "cede",
+          instanceId: instance.id,
+          content: result.cedeContent,
+        }, source)]);
+      }
+
+      // Handle suspend yield reason
+      if (result.yieldReason === "suspend") {
+        // Check if instance has suspended info from transition
+        if (result.instance?.suspended) {
+          enqueue([instanceMessage({
+            kind: "suspend",
+            instanceId: instance.id,
+            suspendInfo: result.instance.suspended,
+          }, source)]);
+        }
+      }
+
       return {
-        instance: result.instance ?? instance,
-        messages: result.messages ?? [],
         yieldReason: result.yieldReason ?? "end_turn",
-        cedeContent: result.cedeContent,
-        packStates: result.packStates,
       };
     },
   };
@@ -247,7 +334,7 @@ describe("all-suspended state", () => {
       return {
         instance: suspendedInstance,
         yieldReason: "end_turn",
-        messages: [],
+        history: [],
       };
     });
 
@@ -262,14 +349,16 @@ describe("all-suspended state", () => {
     });
 
     // First run: executor returns, then machine checks leaves
-    const step1 = await runMachineToCompletion(machine, "test input");
+    machine.enqueue([userMessage("test input")]);
+    const step1 = await runMachineToCompletion(machine);
     expect(step1.instance.suspended).toBeDefined();
 
     // Second run: all leaves are suspended
     const machine2 = createMachine(charter, {
       instance: step1.instance,
     });
-    const step2 = await runMachineToCompletion(machine2, "another input");
+    machine2.enqueue([userMessage("another input")]);
+    const step2 = await runMachineToCompletion(machine2);
 
     expect(step2.yieldReason).toBe("awaiting_resume");
     expect(step2.done).toBe(true);
@@ -292,7 +381,7 @@ describe("Resume input", () => {
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Hello!" }],
+        history: [{ role: "assistant" as const, items: "Hello!" }],
       };
     });
 
@@ -323,7 +412,8 @@ describe("Resume input", () => {
       suspendId: "suspend-789",
     };
 
-    const steps = await collectSteps(runMachine(machine, resume));
+    machine.enqueue([systemMessage([resume])]);
+    const steps = await collectSteps(runMachine(machine));
 
     expect(steps.length).toBe(1);
     expect(steps[0]?.instance.suspended).toBeUndefined();
@@ -367,8 +457,9 @@ describe("Resume input", () => {
       suspendId: "wrong-id",
     };
 
+    machine.enqueue([systemMessage([resume])]);
     await expect(
-      collectSteps(runMachine(machine, resume))
+      collectSteps(runMachine(machine))
     ).rejects.toThrow("Suspend ID mismatch");
   });
 
@@ -398,8 +489,9 @@ describe("Resume input", () => {
       suspendId: "any-id",
     };
 
+    machine.enqueue([systemMessage([resume])]);
     await expect(
-      collectSteps(runMachine(machine, resume))
+      collectSteps(runMachine(machine))
     ).rejects.toThrow("is not suspended");
   });
 });
@@ -519,7 +611,7 @@ describe("command with instanceId targeting", () => {
           inputSchema: z.object({ newValue: z.string() }),
           execute: (input, ctx) => {
             ctx.updateState({ value: input.newValue });
-            return commandValue("ok");
+            return commandResult("ok");
           },
         },
       },

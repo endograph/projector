@@ -8,15 +8,14 @@
  * @module
  */
 
-import type * as chat from "../chat.js";
-import type * as commands from "../commands.js";
 import type * as http from "../http.js";
+import type * as livekitAgent from "../livekitAgent.js";
+import type * as livekitAgentActions from "../livekitAgentActions.js";
 import type * as machineSteps from "../machineSteps.js";
 import type * as machineTurns from "../machineTurns.js";
 import type * as messages from "../messages.js";
+import type * as sessionActions from "../sessionActions.js";
 import type * as sessions from "../sessions.js";
-import type * as voice from "../voice.js";
-import type * as voiceActions from "../voiceActions.js";
 
 import type {
   ApiFromModules,
@@ -25,15 +24,14 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  chat: typeof chat;
-  commands: typeof commands;
   http: typeof http;
+  livekitAgent: typeof livekitAgent;
+  livekitAgentActions: typeof livekitAgentActions;
   machineSteps: typeof machineSteps;
   machineTurns: typeof machineTurns;
   messages: typeof messages;
+  sessionActions: typeof sessionActions;
   sessions: typeof sessions;
-  voice: typeof voice;
-  voiceActions: typeof voiceActions;
 }>;
 
 /**

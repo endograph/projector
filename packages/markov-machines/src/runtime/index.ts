@@ -26,9 +26,16 @@ export {
 export type {
   ToolCallContext,
   ToolCallResult,
-  ToolCall,
 } from "./tool-call-processor.js";
+export type { ToolCall } from "./tool-call-processor.js";
 export {
   handleTransitionResult,
 } from "./transition-handler.js";
 export type { TransitionOutcome } from "./transition-handler.js";
+export {
+  runToolPipeline,
+} from "./tool-pipeline.js";
+export type {
+  ToolPipelineContext,
+  ToolPipelineResult,
+} from "./tool-pipeline.js";

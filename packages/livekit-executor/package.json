@@ -1,0 +1,25 @@
+{
+  "name": "@markov-machines/livekit-executor",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.0.21",
+    "@livekit/agents-plugin-openai": "^1.0.21",
+    "markov-machines": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "^4.0.17",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "zod": "catalog:"
+  }
+}

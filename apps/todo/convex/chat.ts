@@ -11,9 +11,10 @@ import {
   deserializeInstance,
   createInstance,
   getMessageText,
+  userMessage,
   type Instance,
   type Node,
-  type Message,
+  type MachineMessage,
   type MachineStep,
 } from "markov-machines";
 import { todoCharter, mainNode, createInitialState } from "../src/agent/charter";
@@ -24,11 +25,11 @@ function getActiveNodeInstructions(instance: Instance): string {
   return instructions.slice(0, 100);
 }
 
-// Helper to extract response text from step messages
+// Helper to extract response text from step history
 function getStepResponse(step: MachineStep<unknown>): string {
   // Find the last assistant message and extract its text
-  for (let i = step.messages.length - 1; i >= 0; i--) {
-    const msg = step.messages[i];
+  for (let i = step.history.length - 1; i >= 0; i--) {
+    const msg = step.history[i];
     if (msg && msg.role === "assistant") {
       return getMessageText(msg);
     }
@@ -57,7 +58,7 @@ export const send = action({
     // Create machine with history
     const machine = createMachine(todoCharter, {
       instance,
-      history: history as Message[],
+      history: history as MachineMessage[],
     });
 
     // Add user message to UI
@@ -78,12 +79,13 @@ export const send = action({
 
     let stepNumber = 0;
     let lastStep: MachineStep | null = null;
-    const allMessages: Message[] = [];
+    const allMessages: MachineMessage[] = [];
 
     // Iterate through each step and store it
-    for await (const step of runMachine(machine, message, { maxSteps: 10 })) {
+    machine.enqueue([userMessage(message)]);
+    for await (const step of runMachine(machine, { maxSteps: 10 })) {
       stepNumber++;
-      allMessages.push(...step.messages);
+      allMessages.push(...step.history);
 
       // Store each step with full instance snapshot
       await ctx.runMutation(api.machineSteps.add, {
@@ -93,7 +95,7 @@ export const send = action({
         yieldReason: step.yieldReason,
         response: getStepResponse(step),
         done: step.done,
-        messages: step.messages,
+        messages: step.history,
         instance: serializeInstance(step.instance, todoCharter),
         activeNodeInstructions: getActiveNodeInstructions(step.instance),
       });

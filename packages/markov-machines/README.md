@@ -76,3 +76,5 @@ Public APIs are exported from `packages/markov-machines/index.ts` including:
 - Allowing packs to be provided at any level of the instance tree (maybe packBoundary option?)
 - Allowing non-current node tools to operate on their respective tool owner's state. Or is this an anti-pattern and should rely on packs instead of inherited tools?
 - State patch semantics: currently `updateState` and helpers use a shallow merge (nested objects are replaced). Revisit whether deep merge is the right default and/or add an opt-in deep merge helper.
+- Consider merging system and command message roles into a single "immediate" event role. The role distinction may not be about message type but rather precedence in handling.
+- Should commands execute outside of the step loop, and trust that any effects they generate are enqueue'd for the next step run?

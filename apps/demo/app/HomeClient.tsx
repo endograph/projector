@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
-import { useAction, useQuery } from "convex/react";
+import { useAction, useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
@@ -13,13 +13,19 @@ import {
   isPreviewingAtom,
   activeAgentTabAtom,
   shiftHeldAtom,
+  isLiveModeAtom,
+  liveClientAtom,
+  voiceAgentConnectedAtom,
   type AgentTab,
 } from "@/src/atoms";
 import { useSessionId } from "@/src/hooks";
 import { TerminalPane } from "./components/terminal/TerminalPane";
 import { AgentPane } from "./components/agent/AgentPane";
 import { ThemeProvider } from "./components/ThemeProvider";
-import { LiveVoiceClient } from "@/src/voice/LiveVoiceClient";
+import { LiveVoiceClient, type LiveVoiceClientHandle } from "@/src/voice/LiveVoiceClient";
+
+// Note: All messages are now sent via LiveKit RPC to the agent.
+// The agent handles both live (voice) and non-live (text) modes.
 
 export function HomeClient({
   initialSessionId,
@@ -34,12 +40,22 @@ export function HomeClient({
   const isPreviewing = useAtomValue(isPreviewingAtom);
   const setActiveTab = useSetAtom(activeAgentTabAtom);
   const setShiftHeld = useSetAtom(shiftHeldAtom);
+  const isLiveMode = useAtomValue(isLiveModeAtom);
+  const setLiveClient = useSetAtom(liveClientAtom);
+  const voiceAgentConnected = useAtomValue(voiceAgentConnectedAtom);
 
   const terminalInputRef = useRef<HTMLTextAreaElement>(null);
   const agentPaneRef = useRef<HTMLDivElement>(null);
+  const liveClientRef = useRef<LiveVoiceClientHandle>(null);
 
-  const createSession = useAction(api.chat.createSession);
-  const sendMessage = useAction(api.chat.send);
+  // Expose liveClient to atom when ref is set (via callback ref pattern)
+  const handleLiveClientRef = useCallback((handle: LiveVoiceClientHandle | null) => {
+    (liveClientRef as React.MutableRefObject<LiveVoiceClientHandle | null>).current = handle;
+    setLiveClient(handle);
+  }, [setLiveClient]);
+
+  const createSession = useAction(api.sessionActions.createSession);
+  const addMessage = useMutation(api.messages.add);
 
   // Query the previewed step to get its turnId for filtering messages
   const previewedStep = useQuery(
@@ -78,12 +94,17 @@ export function HomeClient({
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if typing in an input/textarea (except for M which focuses the input)
-      const target = e.target as HTMLElement;
-      const isTyping = target.tagName === "INPUT" || target.tagName === "TEXTAREA";
+      // Skip if typing in an input/textarea/contenteditable
+      const target = e.target as HTMLElement | null;
+      const isTyping =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
 
       // M - focus left pane (terminal input)
       if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (isTyping) return;
         e.preventDefault();
         terminalInputRef.current?.focus();
         return;
@@ -142,12 +163,25 @@ export function HomeClient({
   const handleSend = async () => {
     if (!sessionId || !input.trim() || isLoading) return;
 
+    // Check agent connection before clearing input
+    if (!voiceAgentConnected) {
+      alert("No agent is connected. Please try again later.");
+      return;
+    }
+
     const message = input.trim();
     setInput("");
     setIsLoading(true);
 
     try {
-      await sendMessage({ sessionId, message });
+      if (!liveClientRef.current?.isConnected()) {
+        console.error("Not connected to agent - cannot send message");
+        return;
+      }
+
+      // Send via RPC to the agent (agent handles persistence)
+      const result = await liveClientRef.current.sendMessage(message);
+      console.log('message send result', result)
     } catch (error) {
       console.error("Failed to send message:", error);
     } finally {
@@ -160,10 +194,37 @@ export function HomeClient({
     setSessionId(null);
   }, [setSessionId]);
 
-  // Extract theme from session instance pack states
-  const theme = session?.instance?.packStates?.theme as
-    | { hue: number; saturation: number; animated: boolean; gradient: boolean }
-    | undefined;
+  // Extract theme from session instance packs (supports array or keyed map)
+  const theme = (() => {
+    type ThemeState = { hue: number; saturation: number; animated: boolean; gradient: boolean };
+    const getThemeFromInstance = (instance: unknown): ThemeState | undefined => {
+      if (!instance || typeof instance !== "object") return undefined;
+      const packs = (instance as { packs?: unknown }).packs;
+      if (!packs) return undefined;
+
+      if (Array.isArray(packs)) {
+        const themePack = packs.find((p) => (p as { name?: string })?.name === "theme");
+        return (themePack as { state?: ThemeState } | undefined)?.state;
+      }
+
+      if (typeof packs === "object") {
+        const themePack = (packs as Record<string, unknown>)["theme"];
+        if (!themePack || typeof themePack !== "object") return undefined;
+        return ("state" in themePack
+          ? (themePack as { state?: ThemeState }).state
+          : (themePack as ThemeState));
+      }
+
+      return undefined;
+    };
+
+    return (
+      getThemeFromInstance(session?.instance) ??
+      getThemeFromInstance(session?.displayInstance) ??
+      ((session as { instance?: { packStates?: Record<string, unknown> } })?.instance?.packStates
+        ?.theme as ThemeState | undefined)
+    );
+  })();
 
   if (!sessionId) {
     return (
@@ -177,8 +238,8 @@ export function HomeClient({
 
   return (
     <ThemeProvider theme={theme}>
-      {/* Voice mode client - manages LiveKit connection */}
-      <LiveVoiceClient sessionId={sessionId} />
+      {/* Live mode client - manages LiveKit connection for voice and text */}
+      <LiveVoiceClient ref={handleLiveClientRef} sessionId={sessionId} />
 
       <div className="h-screen flex">
         {/* Left side - Terminal pane */}

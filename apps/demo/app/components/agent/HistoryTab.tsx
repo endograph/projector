@@ -1,10 +1,16 @@
 "use client";
 
-import type { JSX } from "react";
+import { useState, type JSX } from "react";
 import { useAtom, useSetAtom } from "jotai";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id, Doc } from "@/convex/_generated/dataModel";
+import type {
+  ConversationMessage,
+  TextBlock,
+  ToolResultBlock,
+  ToolUseBlock,
+} from "markov-machines/client";
 import {
   activeHistorySubtabAtom,
   selectedStepIdAtom,
@@ -40,10 +46,9 @@ export function HistoryTab({ sessionId }: HistoryTabProps) {
             onClick={() => setActiveSubtab(tab.id)}
             className={`
               px-3 py-1 text-xs font-mono transition-colors
-              ${
-                activeSubtab === tab.id
-                  ? "text-terminal-green border-b border-terminal-green"
-                  : "text-terminal-green-dim hover:text-terminal-green"
+              ${activeSubtab === tab.id
+                ? "text-terminal-green border-b border-terminal-green"
+                : "text-terminal-green-dim hover:text-terminal-green"
               }
             `}
           >
@@ -68,6 +73,20 @@ function StepsView({ sessionId }: { sessionId: Id<"sessions"> }) {
   const [selectedStepId, setSelectedStepId] = useAtom(selectedStepIdAtom);
   const setPreviewInstance = useSetAtom(stepPreviewInstanceAtom);
   const setIsPreviewing = useSetAtom(isPreviewingAtom);
+  const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+
+  const toggleExpand = (stepId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedSteps(prev => {
+      const next = new Set(prev);
+      if (next.has(stepId)) {
+        next.delete(stepId);
+      } else {
+        next.add(stepId);
+      }
+      return next;
+    });
+  };
 
   const handleStepClick = (step: MachineStep) => {
     if (selectedStepId === step._id) {
@@ -105,31 +124,48 @@ function StepsView({ sessionId }: { sessionId: Id<"sessions"> }) {
           [Clear Preview]
         </button>
       )}
-      {steps.map((step) => (
-        <div
-          key={step._id}
-          onClick={() => handleStepClick(step)}
-          className={`
-            p-2 rounded border cursor-pointer transition-colors
-            ${
-              selectedStepId === step._id
+      {steps.map((step) => {
+        const isExpanded = expandedSteps.has(step._id);
+        return (
+          <div
+            key={step._id}
+            onClick={() => handleStepClick(step)}
+            className={`
+              p-2 rounded border cursor-pointer transition-colors
+              ${selectedStepId === step._id
                 ? "border-terminal-green bg-terminal-bg-lighter"
                 : "border-terminal-green-dimmer hover:border-terminal-green-dim"
-            }
-          `}
-        >
-          <div className="flex items-center gap-2">
-            <span className="text-terminal-cyan">#{step.stepNumber}</span>
-            <span className="text-terminal-green-dim">{step.yieldReason}</span>
-            {step.done && <span className="text-terminal-yellow">[done]</span>}
-          </div>
-          {step.response && (
-            <div className="text-terminal-green-dimmer text-xs mt-1 truncate">
-              {step.response.slice(0, 60)}...
+              }
+            `}
+          >
+            <div className="flex items-center gap-2">
+              <button
+                onClick={(e) => toggleExpand(step._id, e)}
+                className="text-terminal-green-dim hover:text-terminal-green w-4 text-left"
+              >
+                {isExpanded ? "v" : ">"}
+              </button>
+              <span className="text-terminal-cyan">#{step.stepNumber}</span>
+              <span className="text-terminal-green-dim">{step.yieldReason}</span>
+              {step.done && <span className="text-terminal-yellow">[done]</span>}
+              <span className="text-terminal-green-dimmer">[{step.messages.length} msgs]</span>
             </div>
-          )}
-        </div>
-      ))}
+            {step.response && (
+              <div className="text-terminal-green-dimmer text-xs mt-1 truncate ml-6">
+                {step.response.slice(0, 60)}...
+              </div>
+            )}
+            {isExpanded && (
+              <pre
+                onClick={(e) => e.stopPropagation()}
+                className="mt-2 ml-6 p-2 text-xs bg-terminal-bg border border-terminal-green-dimmer rounded overflow-auto max-h-64 text-terminal-green-dim cursor-text"
+              >
+                {JSON.stringify(step.messages, null, 2)}
+              </pre>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -137,6 +173,20 @@ function StepsView({ sessionId }: { sessionId: Id<"sessions"> }) {
 function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
   const turnTree = useQuery(api.sessions.getTurnTree, { sessionId });
   const timeTravel = useMutation(api.sessions.timeTravel);
+  const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set());
+
+  const toggleExpand = (turnId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedTurns(prev => {
+      const next = new Set(prev);
+      if (next.has(turnId)) {
+        next.delete(turnId);
+      } else {
+        next.add(turnId);
+      }
+      return next;
+    });
+  };
 
   if (!turnTree) {
     return <div className="text-terminal-green-dimmer">Loading...</div>;
@@ -154,6 +204,7 @@ function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
     <div className="space-y-2">
       {turnTree.turns.map((turn) => {
         const isCurrent = turn._id === turnTree.currentTurnId;
+        const isExpanded = expandedTurns.has(turn._id);
         const date = new Date(turn.createdAt);
         const timeStr = date.toLocaleTimeString();
 
@@ -162,17 +213,23 @@ function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
             key={turn._id}
             className={`
               p-2 rounded border
-              ${
-                isCurrent
-                  ? "border-terminal-green bg-terminal-bg-lighter"
-                  : "border-terminal-green-dimmer"
+              ${isCurrent
+                ? "border-terminal-green bg-terminal-bg-lighter"
+                : "border-terminal-green-dimmer"
               }
             `}
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
+                <button
+                  onClick={(e) => toggleExpand(turn._id, e)}
+                  className="text-terminal-green-dim hover:text-terminal-green w-4 text-left"
+                >
+                  {isExpanded ? "v" : ">"}
+                </button>
                 <span className="text-terminal-green-dim text-xs">{timeStr}</span>
                 {isCurrent && <span className="text-terminal-green">[current]</span>}
+                <span className="text-terminal-green-dimmer">[{turn.messages.length} msgs]</span>
               </div>
               {!isCurrent && (
                 <button
@@ -183,9 +240,14 @@ function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
                 </button>
               )}
             </div>
-            <div className="text-terminal-green-dimmer text-xs mt-1">
-              {turn.messages.length} messages
-            </div>
+            {isExpanded && (
+              <pre
+                onClick={(e) => e.stopPropagation()}
+                className="mt-2 ml-6 p-2 text-xs bg-terminal-bg border border-terminal-green-dimmer rounded overflow-auto max-h-64 text-terminal-green-dim cursor-text"
+              >
+                {JSON.stringify(turn.messages, null, 2)}
+              </pre>
+            )}
           </div>
         );
       })}
@@ -194,30 +256,18 @@ function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
 }
 
 // Content block types from Anthropic API
-interface TextBlock {
-  type: "text";
-  text: string;
-}
+type DemoToolResultBlock = ToolResultBlock & { content: string | unknown[] };
 
-interface ToolUseBlock {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
+type ContentBlock =
+  | TextBlock
+  | ToolUseBlock
+  | DemoToolResultBlock
+  | { type: string; [key: string]: unknown };
 
-interface ToolResultBlock {
-  type: "tool_result";
-  tool_use_id: string;
-  content: string | unknown[];
-}
-
-type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | { type: string; [key: string]: unknown };
-
-interface APIMessage {
+type APIMessage = Omit<ConversationMessage, "role" | "items"> & {
   role: "user" | "assistant";
-  content: string | ContentBlock[];
-}
+  items: string | ContentBlock[];
+};
 
 function ContentBlockView({ block }: { block: ContentBlock }) {
   if (block.type === "text") {
@@ -244,7 +294,7 @@ function ContentBlockView({ block }: { block: ContentBlock }) {
   }
 
   if (block.type === "tool_result") {
-    const toolResult = block as ToolResultBlock;
+    const toolResult = block as DemoToolResultBlock;
     const content = typeof toolResult.content === "string"
       ? toolResult.content
       : JSON.stringify(toolResult.content, null, 2);
@@ -288,10 +338,9 @@ function MessagesView({ sessionId }: { sessionId: Id<"sessions"> }) {
   return (
     <div className="space-y-3">
       {allMessages.map(({ stepId, stepNumber, message, index }) => {
-        const content = message.content;
-        const blocks: ContentBlock[] = typeof content === "string"
-          ? [{ type: "text", text: content }]
-          : (content as ContentBlock[]);
+        const blocks: ContentBlock[] = typeof message.items === "string"
+          ? [{ type: "text", text: message.items }]
+          : (message.items);
 
         return (
           <div
@@ -299,9 +348,8 @@ function MessagesView({ sessionId }: { sessionId: Id<"sessions"> }) {
             className="p-2 rounded border border-terminal-green-dimmer"
           >
             <div className="flex items-center gap-2 mb-2">
-              <span className={`text-xs font-bold ${
-                message.role === "user" ? "text-terminal-cyan" : "text-terminal-green"
-              }`}>
+              <span className={`text-xs font-bold ${message.role === "user" ? "text-terminal-cyan" : "text-terminal-green"
+                }`}>
                 {message.role}
               </span>
               <span className="text-terminal-green-dimmer text-xs">

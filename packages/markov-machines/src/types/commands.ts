@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { Node } from "./node.js";
-import type { Message } from "./messages.js";
+import type { MachineMessage } from "./messages.js";
 import type {
   CedeResult,
   SpawnResult,
@@ -9,7 +9,6 @@ import type {
   TransitionToResult,
   SuspendResult,
 } from "./transitions.js";
-import type { ToolReply } from "./tools.js";
 
 /**
  * Options for suspend helper in commands.
@@ -33,9 +32,9 @@ export interface CommandContext<S = unknown> {
   /** ID of the instance executing this command */
   instanceId: string;
   /** Get messages from the conversation history that belong to this instance */
-  getInstanceMessages: () => Message[];
-  /** Cede control back to parent with optional content (string or Message[]) */
-  cede: <M = unknown>(content?: string | Message<M>[]) => CedeResult<M>;
+  getInstanceMessages: () => MachineMessage[];
+  /** Cede control back to parent with optional content (string or MachineMessage[]) */
+  cede: <M = unknown>(content?: string | MachineMessage<M>[]) => CedeResult<M>;
   /** Spawn one or more child instances */
   spawn: <T = unknown>(
     nodeOrTargets: Node<any, T> | SpawnTarget<T>[],
@@ -74,14 +73,6 @@ export interface CommandDefinition<
 export type AnyCommandDefinition<S = unknown> = CommandDefinition<any, any, S>;
 
 /**
- * Value result - command completed with a return value.
- */
-export interface ValueResult<T = unknown> {
-  type: "value";
-  value: T;
-}
-
-/**
  * Resume result - command resumes the current instance from suspension.
  */
 export interface ResumeResult {
@@ -89,35 +80,38 @@ export interface ResumeResult {
 }
 
 /**
+ * Standard command result - returns optional messages to enqueue and optional payload.
+ */
+export interface CommandValueResult<T = unknown> {
+  type: "command_result";
+  /** Messages to enqueue (user messages, assistant messages, etc.) */
+  messages?: MachineMessage[];
+  /** Optional payload/return value */
+  payload?: T;
+}
+
+/**
  * Union of all command results.
- * Commands can return a value, transition, spawn, cede, suspend, resume, or tool reply.
+ * Commands can return a result with messages/payload, transition, spawn, cede, suspend, or resume.
  */
 export type CommandResult<T = unknown> =
-  | ValueResult<T>
+  | CommandValueResult<T>
   | TransitionToResult
   | SpawnResult
   | CedeResult
   | SuspendResult
-  | ResumeResult
-  | ToolReply<T>;
+  | ResumeResult;
 
 /**
- * Type guard for ValueResult.
+ * Type guard for CommandValueResult.
  */
-export function isValueResult<T>(result: CommandResult<T>): result is ValueResult<T> {
+export function isCommandValueResult<T>(result: CommandResult<T>): result is CommandValueResult<T> {
   return (
     typeof result === "object" &&
     result !== null &&
     "type" in result &&
-    result.type === "value"
+    result.type === "command_result"
   );
-}
-
-/**
- * Helper to create a value result.
- */
-export function commandValue<T>(value: T): ValueResult<T> {
-  return { type: "value", value };
 }
 
 /**
@@ -126,6 +120,18 @@ export function commandValue<T>(value: T): ValueResult<T> {
  */
 export function commandResume(): ResumeResult {
   return { type: "resume" };
+}
+
+/**
+ * Helper to create a command result.
+ * @param payload - Optional payload/return value
+ * @param messages - Optional messages to enqueue
+ */
+export function commandResult<T = unknown>(
+  payload?: T,
+  messages?: MachineMessage[],
+): CommandValueResult<T> {
+  return { type: "command_result", messages, payload };
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { ToolReply } from "./tools.js";
+import type { CommandValueResult } from "./commands.js";
 
 /**
  * Context provided to pack tool execute functions.
@@ -14,7 +14,7 @@ export interface PackToolContext<S = unknown> {
 
 /**
  * Context provided to pack command execute functions.
- * Pack commands have access to pack state and can return tool replies.
+ * Pack commands have access to pack state.
  */
 export interface PackCommandContext<S = unknown> {
   /** Current pack state */
@@ -25,9 +25,9 @@ export interface PackCommandContext<S = unknown> {
 
 /**
  * Result of a pack command execution.
- * Can be a ToolReply for user feedback, or void for silent updates.
+ * Can be a CommandValueResult with optional messages/payload, or void for silent updates.
  */
-export type PackCommandResult<T = unknown> = ToolReply<T> | void;
+export type PackCommandResult<T = unknown> = CommandValueResult<T> | void;
 
 /**
  * Pack command definition.
@@ -40,7 +40,7 @@ export interface PackCommandDefinition<S = unknown, TInput = unknown, TOutput = 
   description: string;
   /** Zod schema for command input */
   inputSchema: z.ZodType<TInput>;
-  /** Execute function - returns ToolReply for user feedback, or void for silent updates */
+  /** Execute function - returns CommandValueResult for messages/payload, or void for silent updates */
   execute: (input: TInput, ctx: PackCommandContext<S>) => Promise<PackCommandResult<TOutput>> | PackCommandResult<TOutput>;
 }
 

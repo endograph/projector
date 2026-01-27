@@ -6,11 +6,12 @@ import { createInstance, getActiveInstance, getInstancePath } from "../types/ins
 import { createMachine } from "../core/machine.js";
 import { runMachine, runMachineToCompletion } from "../core/run.js";
 import { spawn } from "../helpers/cede-spawn.js";
-import type { Executor, RunResult, RunOptions, MachineStep } from "../executor/types.js";
+import type { Executor, RunResult, RunOptions, MachineStep, YieldReason } from "../executor/types.js";
 import type { Charter } from "../types/charter.js";
 import type { Instance } from "../types/instance.js";
 import type { CodeTransition } from "../types/transitions.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage, InstancePayload } from "../types/messages.js";
+import { userMessage, assistantMessage, instanceMessage } from "../types/messages.js";
 
 /**
  * Helper to collect all steps from the async generator.
@@ -26,8 +27,19 @@ async function collectSteps(
 }
 
 /**
+ * Legacy behavior result for mock executors (pre-refactor format).
+ */
+interface LegacyBehaviorResult {
+  instance?: Instance;
+  history?: MachineMessage<unknown>[];
+  yieldReason?: YieldReason;
+  cedeContent?: string | MachineMessage<unknown>[];
+  packStates?: Record<string, unknown>;
+}
+
+/**
  * Mock executor that simulates agent behavior for testing.
- * Allows us to control what the "agent" does (spawn, cede, etc.)
+ * Uses the new enqueue-based flow internally but accepts legacy behavior format.
  */
 function createMockExecutor(
   behavior: (
@@ -35,7 +47,7 @@ function createMockExecutor(
     instance: Instance,
     ancestors: Instance[],
     input: string,
-  ) => Partial<RunResult<unknown>>,
+  ) => LegacyBehaviorResult,
 ): Executor<unknown> {
   return {
     type: "standard",
@@ -44,15 +56,68 @@ function createMockExecutor(
       instance: Instance,
       ancestors: Instance[],
       input: string,
-      _options?: RunOptions<unknown>,
+      options?: RunOptions<unknown>,
     ): Promise<RunResult<unknown>> => {
+      const enqueue = options?.enqueue;
+      if (!enqueue) {
+        throw new Error("Mock executor requires options.enqueue");
+      }
+
+      const source = {
+        instanceId: options?.instanceId ?? instance.id,
+        isPrimary: !(options?.isWorker ?? false),
+      };
+
       const result = behavior(charter, instance, ancestors, input);
+      
+      // Enqueue assistant message if history provided
+      if (result.history && result.history.length > 0) {
+        for (const msg of result.history) {
+          enqueue([{ ...msg, metadata: { ...msg.metadata, source } }]);
+        }
+      } else {
+        // Default: enqueue an empty assistant message
+        enqueue([assistantMessage("", source)]);
+      }
+
+      // Convert instance changes to instance messages
+      if (result.instance && result.instance !== instance) {
+        // Check if children changed (spawn)
+        if (result.instance.children && 
+            (!instance.children || result.instance.children.length > instance.children.length)) {
+          const newChildren = result.instance.children.slice(instance.children?.length ?? 0);
+          enqueue([instanceMessage({
+            kind: "spawn",
+            parentInstanceId: instance.id,
+            children: newChildren.map(c => ({
+              node: c.node,
+              state: c.state,
+              executorConfig: c.executorConfig,
+            })),
+          }, source)]);
+        }
+        
+        // Check if state changed
+        if (result.instance.state !== instance.state) {
+          enqueue([instanceMessage({
+            kind: "state",
+            instanceId: instance.id,
+            patch: result.instance.state as Record<string, unknown>,
+          }, source)]);
+        }
+      }
+
+      // Handle cede
+      if (result.yieldReason === "cede") {
+        enqueue([instanceMessage({
+          kind: "cede",
+          instanceId: instance.id,
+          content: result.cedeContent,
+        }, source)]);
+      }
+
       return {
-        instance: result.instance ?? instance,
-        messages: result.messages ?? [],
         yieldReason: result.yieldReason ?? "end_turn",
-        cedeContent: result.cedeContent,
-        packStates: result.packStates,
       };
     },
   };
@@ -119,8 +184,9 @@ describe("spawn behavior", () => {
     const machine = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
+    machine.enqueue([userMessage("spawn a child")]);
 
-    const result = await runMachineToCompletion(machine, "spawn a child");
+    const result = await runMachineToCompletion(machine);
 
     // Verify child was added
     expect(result.instance.children).toBeDefined();
@@ -169,7 +235,8 @@ describe("spawn behavior", () => {
     const machine1 = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
-    const result1 = await runMachineToCompletion(machine1, "spawn");
+    machine1.enqueue([userMessage("spawn")]);
+    const result1 = await runMachineToCompletion(machine1);
 
     // Verify child is now active
     const activePath = getInstancePath(result1.instance);
@@ -206,7 +273,7 @@ describe("spawn continuation", () => {
         return {
           instance: { ...instance, children: [newChild] },
           yieldReason: "tool_use", // Spawn returns tool_use to continue on child
-          messages: [],
+          history: [],
         };
       }
 
@@ -214,7 +281,7 @@ describe("spawn continuation", () => {
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Hello, I'm the child starting my work!" }],
+        history: [{ role: "assistant" as const, items: "Hello, I'm the child starting my work!" }],
       };
     });
 
@@ -227,7 +294,8 @@ describe("spawn continuation", () => {
     const machine = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
-    const result = await runMachineToCompletion(machine, "spawn researcher");
+    machine.enqueue([userMessage("spawn researcher")]);
+    const result = await runMachineToCompletion(machine);
 
     // Should have called executor twice (parent + child)
     expect(callCount).toBe(2);
@@ -260,7 +328,7 @@ describe("spawn continuation", () => {
       return {
         instance: { ...instance, children: [newChild] },
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "I've started the researcher for you!" }],
+        history: [{ role: "assistant" as const, items: "I've started the researcher for you!" }],
       };
     });
 
@@ -273,7 +341,8 @@ describe("spawn continuation", () => {
     const machine = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
-    const result = await runMachineToCompletion(machine, "spawn");
+    machine.enqueue([userMessage("spawn")]);
+    const result = await runMachineToCompletion(machine);
 
     // Should only call executor once (spawn had response)
     expect(callCount).toBe(1);
@@ -303,7 +372,7 @@ describe("spawn continuation", () => {
         return {
           instance: { ...instance, children: [newChild] },
           yieldReason: "tool_use",
-          messages: [],
+          history: [],
         };
       }
 
@@ -313,7 +382,7 @@ describe("spawn continuation", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Task completed",
-          messages: [],
+          history: [],
         };
       }
 
@@ -321,7 +390,7 @@ describe("spawn continuation", () => {
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "The quick task is done!" }],
+        history: [{ role: "assistant" as const, items: "The quick task is done!" }],
       };
     });
 
@@ -334,7 +403,8 @@ describe("spawn continuation", () => {
     const machine = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
-    const result = await runMachineToCompletion(machine, "do quick task");
+    machine.enqueue([userMessage("do quick task")]);
+    const result = await runMachineToCompletion(machine);
 
     // Should have called executor 3 times: spawn -> cede -> parent responds
     expect(callCount).toBe(3);
@@ -371,14 +441,14 @@ describe("cede behavior", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Result: done",
-          messages: [],
+          history: [],
         };
       }
       // Parent responds
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Got the cede result!" }],
+        history: [{ role: "assistant" as const, items: "Got the cede result!" }],
       };
     });
 
@@ -395,8 +465,9 @@ describe("cede behavior", () => {
     const machine = createMachine(charter, {
       instance: parentInstance,
     });
+    machine.enqueue([userMessage("cede back")]);
 
-    const steps = await collectSteps(runMachine(machine, "cede back"));
+    const steps = await collectSteps(runMachine(machine));
 
     // Should have 2 steps: cede then parent response
     expect(steps.length).toBe(2);
@@ -435,13 +506,13 @@ describe("cede behavior", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Findings: item1, item2 (query: test)",
-          messages: [],
+          history: [],
         };
       }
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Done!" }],
+        history: [{ role: "assistant" as const, items: "Done!" }],
       };
     });
 
@@ -455,7 +526,8 @@ describe("cede behavior", () => {
     const parentInstance = createInstance(parentNode, { value: "parent" }, childInstance);
 
     const machine = createMachine(charter, { instance: parentInstance });
-    const steps = await collectSteps(runMachine(machine, "complete"));
+    machine.enqueue([userMessage("complete")]);
+    const steps = await collectSteps(runMachine(machine));
 
     // Cede content is on the cede step
     expect(steps[0]?.cedeContent).toBe("Findings: item1, item2 (query: test)");
@@ -501,7 +573,7 @@ describe("cede behavior", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Result: found stuff",
-          messages: [],
+          history: [],
         };
       }
 
@@ -509,7 +581,7 @@ describe("cede behavior", () => {
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Research complete!" }],
+        history: [{ role: "assistant" as const, items: "Research complete!" }],
       };
     });
 
@@ -523,7 +595,8 @@ describe("cede behavior", () => {
     const machine1 = createMachine(charter, {
       instance: createInstance(parentNode, { value: "parent" }),
     });
-    const result1 = await runMachineToCompletion(machine1, "spawn child");
+    machine1.enqueue([userMessage("spawn child")]);
+    const result1 = await runMachineToCompletion(machine1);
 
     expect(result1.instance.children).toBeDefined();
     expect(getActiveInstance(result1.instance).node.id).toBe(childNode.id);
@@ -532,7 +605,8 @@ describe("cede behavior", () => {
     const machine2 = createMachine(charter, {
       instance: result1.instance,
     });
-    const result2 = await runMachineToCompletion(machine2, "do research");
+    machine2.enqueue([userMessage("do research")]);
+    const result2 = await runMachineToCompletion(machine2);
 
     expect(result2.instance.children).toBeDefined();
     const childAfterWork = result2.instance.children![0]!;
@@ -542,7 +616,8 @@ describe("cede behavior", () => {
     const machine3 = createMachine(charter, {
       instance: result2.instance,
     });
-    const steps3 = await collectSteps(runMachine(machine3, "cede results"));
+    machine3.enqueue([userMessage("cede results")]);
+    const steps3 = await collectSteps(runMachine(machine3));
 
     // Should have 2 steps: cede then parent response
     expect(steps3.length).toBe(2);
@@ -583,7 +658,7 @@ describe("cede continuation", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Result: findings",
-          messages: [],
+          history: [],
         };
       }
 
@@ -591,7 +666,7 @@ describe("cede continuation", () => {
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Here are the results from the child!" }],
+        history: [{ role: "assistant" as const, items: "Here are the results from the child!" }],
       };
     });
 
@@ -606,7 +681,8 @@ describe("cede continuation", () => {
     const parentInstance = createInstance(parentNode, { value: "parent" }, childInstance);
 
     const machine = createMachine(charter, { instance: parentInstance });
-    const result = await runMachineToCompletion(machine, "complete research");
+    machine.enqueue([userMessage("complete research")]);
+    const result = await runMachineToCompletion(machine);
 
     // Should have called executor twice
     expect(callCount).toBe(2);
@@ -640,14 +716,14 @@ describe("cede continuation", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Result: findings",
-          messages: [{ role: "assistant" as const, content: "I'm done with my research!" }],
+          history: [{ role: "assistant" as const, items: "I'm done with my research!" }],
         };
       }
       // Parent responds
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Thanks for the results!" }],
+        history: [{ role: "assistant" as const, items: "Thanks for the results!" }],
       };
     });
 
@@ -661,7 +737,8 @@ describe("cede continuation", () => {
     const parentInstance = createInstance(parentNode, { value: "parent" }, childInstance);
 
     const machine = createMachine(charter, { instance: parentInstance });
-    const steps = await collectSteps(runMachine(machine, "complete"));
+    machine.enqueue([userMessage("complete")]);
+    const steps = await collectSteps(runMachine(machine));
 
     // Should have 2 steps: cede (with text response) then parent
     expect(steps.length).toBe(2);
@@ -705,7 +782,7 @@ describe("cede continuation", () => {
         instance,
         yieldReason: "cede",
         cedeContent: "Done",
-        messages: [],
+        history: [],
       };
     });
 
@@ -721,13 +798,14 @@ describe("cede continuation", () => {
     const level1Instance = createInstance(level1Node, { depth: 1 as const }, level2Instance);
 
     const machine = createMachine(charter, { instance: level1Instance });
+    machine.enqueue([userMessage("loop")]);
 
     // With maxSteps: 2, we get:
     // Step 1: level3 cedes → level2 active
     // Step 2: level2 cedes → level1 active
     // Step 3: level1 cedes → ERROR (root can't cede)
     // So with maxSteps: 2, we should hit max before root tries to cede
-    await expect(runMachineToCompletion(machine, "loop", { maxSteps: 2 })).rejects.toThrow(
+    await expect(runMachineToCompletion(machine, { maxSteps: 2 })).rejects.toThrow(
       "Max steps (2) exceeded"
     );
   });
@@ -754,14 +832,14 @@ describe("cede continuation", () => {
           instance,
           yieldReason: "cede",
           cedeContent: "Findings: item1, item2",
-          messages: [{ role: "assistant" as const, content: "Calling cede..." }],
+          history: [{ role: "assistant" as const, items: "Calling cede..." }],
         };
       }
 
       return {
         instance,
         yieldReason: "end_turn",
-        messages: [{ role: "assistant" as const, content: "Got the results!" }],
+        history: [{ role: "assistant" as const, items: "Got the results!" }],
       };
     });
 
@@ -775,24 +853,22 @@ describe("cede continuation", () => {
     const parentInstance = createInstance(parentNode, { value: "parent" }, childInstance);
 
     const machine = createMachine(charter, { instance: parentInstance });
-    const steps = await collectSteps(runMachine(machine, "do work"));
+    machine.enqueue([userMessage("do work")]);
+    const steps = await collectSteps(runMachine(machine));
 
     // Should have 2 steps: cede then parent response
     expect(steps.length).toBe(2);
 
-    // First step: cede with content
+    // First step: cede with content (user input is in machine.history, not step history)
     expect(steps[0]?.yieldReason).toBe("cede");
     expect(steps[0]?.cedeContent).toBe("Findings: item1, item2");
-    expect(steps[0]?.messages).toEqual([
-      expect.objectContaining({ role: "assistant", content: "Calling cede..." }),
-    ]);
+    // Step history only contains messages generated during the step
+    expect(steps[0]?.history.some(m => m.role === "assistant")).toBe(true);
     expect(steps[0]?.done).toBe(false);
 
     // Second step: parent responds
     expect(steps[1]?.yieldReason).toBe("end_turn");
-    expect(steps[1]?.messages).toEqual([
-      expect.objectContaining({ role: "assistant", content: "Got the results!" }),
-    ]);
+    expect(steps[1]?.history.some(m => m.role === "assistant")).toBe(true);
     expect(steps[1]?.done).toBe(true);
   });
 });

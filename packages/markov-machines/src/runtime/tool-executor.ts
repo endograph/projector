@@ -1,5 +1,5 @@
 import type { AnyToolDefinition, ToolContext } from "../types/tools.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage } from "../types/messages.js";
 import { isToolReply } from "../types/tools.js";
 
 /**
@@ -29,7 +29,7 @@ export async function executeTool<S>(
   state: S,
   onStateUpdate: (patch: Partial<S>) => void,
   instanceId: string,
-  history: Message<unknown>[],
+  history: MachineMessage<unknown>[],
 ): Promise<ToolExecutionResult> {
   try {
     // Validate input
@@ -41,10 +41,10 @@ export async function executeTool<S>(
       };
     }
 
-    // Create getInstanceMessages function that filters by sourceInstanceId
-    const getInstanceMessages = (): Message[] => {
+    // Create getInstanceMessages function that filters by source.instanceId
+    const getInstanceMessages = (): MachineMessage[] => {
       return history.filter(
-        (msg) => msg.metadata?.sourceInstanceId === instanceId
+        (msg) => msg.metadata?.source?.instanceId === instanceId
       );
     };
 

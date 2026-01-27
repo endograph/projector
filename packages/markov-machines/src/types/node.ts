@@ -30,6 +30,8 @@ export interface OutputConfig<M> {
  * @typeParam S - The node's state type.
  */
 export interface NodeConfig<M = never, S = unknown> {
+  /** Optional human-readable name for this node */
+  name?: string;
   instructions: string;
   /** Node tools (state access via context) */
   tools?: Record<string, NodeToolEntry<S>>;
@@ -58,6 +60,8 @@ export interface NodeConfig<M = never, S = unknown> {
  * @typeParam S - The node's state type.
  */
 export interface WorkerNodeConfig<M = never, S = unknown> {
+  /** Optional human-readable name for this node */
+  name?: string;
   instructions: string;
   /** Node tools (state access via context) */
   tools?: Record<string, NodeToolEntry<S>>;
@@ -83,6 +87,8 @@ export interface WorkerNodeConfig<M = never, S = unknown> {
 export interface Node<M = never, S = unknown> {
   /** Unique identifier for this node instance */
   id: string;
+  /** Optional human-readable name for this node */
+  name?: string;
   /** Instructions for the agent in this node */
   instructions: string;
   /** Node tools (state access via context) */

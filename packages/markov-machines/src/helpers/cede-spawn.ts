@@ -7,14 +7,14 @@ import type {
   SpawnOptions,
   SuspendResult,
 } from "../types/transitions.js";
-import type { Message } from "../types/messages.js";
+import type { MachineMessage } from "../types/messages.js";
 import type { SuspendOptions } from "../types/commands.js";
 
 /**
  * Cede control back to parent with optional content.
  * The current instance is REMOVED from the tree.
  *
- * @param content - Optional string message or array of Messages to pass to parent
+ * @param content - Optional string message or array of MachineMessages to pass to parent
  * @returns CedeResult to return from transition execute
  *
  * @example
@@ -41,7 +41,7 @@ import type { SuspendOptions } from "../types/commands.js";
  * });
  */
 export function cede<M = unknown>(
-  content?: string | Message<M>[],
+  content?: string | MachineMessage<M>[],
 ): CedeResult<M> {
   return { type: "cede", content };
 }

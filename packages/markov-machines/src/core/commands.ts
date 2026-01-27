@@ -8,10 +8,12 @@ import type {
   CommandResult,
 } from "../types/commands.js";
 import type { PackCommandContext } from "../types/pack.js";
+import type { MachineMessage } from "../types/messages.js";
+import { userMessage, instanceMessage, commandMessage } from "../types/messages.js";
 import { getActiveInstance, findInstanceById } from "../types/instance.js";
 import { executeCommand as executeCommandOnInstance } from "../runtime/command-executor.js";
 import { isCedeResult } from "../types/transitions.js";
-import { isToolReply } from "../types/tools.js";
+import { isCommandValueResult } from "../types/commands.js";
 import { shallowMerge } from "../types/state.js";
 
 /**
@@ -63,8 +65,12 @@ export async function runCommand<AppMessage = unknown>(
 ): Promise<{
   machine: Machine<AppMessage>;
   result: CommandExecutionResult;
-  replyMessages?: { userMessage: unknown; llmMessage: string };
+  messages?: MachineMessage<AppMessage>[];
 }> {
+  // Enqueue the command message for history tracking
+  const command = { type: "command" as const, name: commandName, input, instanceId };
+  machine.enqueue([commandMessage([command])]);
+
   // Find the target instance
   let target: Instance;
   if (instanceId) {
@@ -84,11 +90,30 @@ export async function runCommand<AppMessage = unknown>(
   const nodeCommand = target.node.commands?.[commandName];
   if (nodeCommand) {
     // Execute as node command
-    const { result, instance: updatedInstance, transitionResult, replyMessages } =
-      await executeCommandOnInstance(target, commandName, input, target.id, machine.history);
+    const { result, instance: updatedInstance, transitionResult, messages: rawMessages } =
+      await executeCommandOnInstance(
+        target,
+        commandName,
+        input,
+        target.id,
+        machine.history as MachineMessage<unknown>[],
+        machine.enqueue as (msgs: MachineMessage<unknown>[]) => void,
+      );
 
     if (!result.success) {
       return { machine, result };
+    }
+
+    // Enqueue messages if any, and convert string to MachineMessage for return
+    const targetInstanceId = instanceId ?? machine.instance.id;
+    let messages: MachineMessage<AppMessage>[] | undefined;
+    if (rawMessages) {
+      if (typeof rawMessages === "string") {
+        messages = [userMessage<AppMessage>(rawMessages, { source: { instanceId: targetInstanceId } })];
+      } else {
+        messages = rawMessages as MachineMessage<AppMessage>[];
+      }
+      machine.enqueue(messages);
     }
 
     // Handle cede - need to remove the target instance from the tree
@@ -103,7 +128,7 @@ export async function runCommand<AppMessage = unknown>(
       return {
         machine: { ...machine, instance: updatedRoot },
         result,
-        replyMessages,
+        messages,
       };
     }
 
@@ -112,7 +137,7 @@ export async function runCommand<AppMessage = unknown>(
     return {
       machine: { ...machine, instance: updatedRoot },
       result,
-      replyMessages,
+      messages,
     };
   }
 
@@ -121,28 +146,33 @@ export async function runCommand<AppMessage = unknown>(
   for (const pack of packs) {
     if (pack.commands?.[commandName]) {
       // Pass ROOT's packStates (pack states are only stored on root instance)
-      const packResult = await executePackCommand(
+      const packResult = await executePackCommand<AppMessage>(
         target,
         pack.name,
         commandName,
         input,
         machine.instance.packStates ?? {},
+        machine.enqueue,
       );
 
       if (!packResult.success) {
         return { machine, result: packResult };
       }
 
-      // Update ROOT's packStates (not target's - pack states are only on root)
-      const updatedRoot: Instance = {
-        ...machine.instance,
-        packStates: packResult.packStates,
-      };
+      // Enqueue messages if any
+      let messages: MachineMessage<AppMessage>[] | undefined;
+      if (packResult.messages) {
+        // Pack commands always return MachineMessage[] (never string)
+        messages = packResult.messages;
+        machine.enqueue(messages);
+      }
 
+      // State updates are now handled via instanceMessage queue
+      // They will be applied when the queue is drained in runMachine
       return {
-        machine: { ...machine, instance: updatedRoot },
+        machine,
         result: packResult,
-        replyMessages: packResult.replyMessages,
+        messages,
       };
     }
   }
@@ -161,16 +191,17 @@ export async function runCommand<AppMessage = unknown>(
  * @param commandName - The command name
  * @param input - The command input
  * @param rootPackStates - Pack states from the ROOT instance (pack states are only stored on root)
+ * @param enqueue - Function to enqueue messages (for state updates via instanceMessage)
  */
-async function executePackCommand(
+async function executePackCommand<AppMessage = unknown>(
   instance: Instance,
   packName: string,
   commandName: string,
   input: unknown,
   rootPackStates: Record<string, unknown>,
+  enqueue: (msgs: MachineMessage<AppMessage>[]) => void,
 ): Promise<CommandExecutionResult & {
-  packStates?: Record<string, unknown>;
-  replyMessages?: { userMessage: unknown; llmMessage: string };
+  messages?: MachineMessage<AppMessage>[];
 }> {
   // Find the pack on the node
   const pack = instance.node.packs?.find((p) => p.name === packName);
@@ -201,34 +232,28 @@ async function executePackCommand(
         packState as Record<string, unknown>,
         patch as Record<string, unknown>,
       );
+      // Enqueue state update message
+      enqueue([instanceMessage<AppMessage>(
+        { kind: "packState", packName, patch: patch as Record<string, unknown> },
+      )]);
     },
   };
 
   try {
     const cmdResult = await command.execute(parsed.data, ctx);
 
-    // Handle toolReply result (with user feedback)
-    if (isToolReply(cmdResult)) {
+    // Handle command result (with optional messages to enqueue)
+    if (cmdResult && isCommandValueResult(cmdResult)) {
       return {
         success: true,
-        packStates: {
-          ...rootPackStates,
-          [packName]: packState,
-        },
-        replyMessages: {
-          userMessage: cmdResult.userMessage,
-          llmMessage: cmdResult.llmMessage,
-        },
+        value: cmdResult.payload,
+        messages: cmdResult.messages as MachineMessage<AppMessage>[] | undefined,
       };
     }
 
     // Handle void/undefined result (silent update)
     return {
       success: true,
-      packStates: {
-        ...rootPackStates,
-        [packName]: packState,
-      },
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

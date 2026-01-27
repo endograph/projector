@@ -1,0 +1,8 @@
+{
+    "node": {
+        "externalPackages": [
+            "@livekit/rtc-node",
+            "@livekit/rtc-node-darwin-arm64"
+        ]
+    }
+}

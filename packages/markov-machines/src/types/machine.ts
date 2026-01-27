@@ -1,8 +1,16 @@
 import type { Charter } from "./charter.js";
 import type { Instance, SuspendInfo } from "./instance.js";
-import type { Message } from "./messages.js";
+import type { MachineMessage } from "./messages.js";
 import type { Ref, SerialNode } from "./refs.js";
 import type { StandardNodeConfig } from "../executor/types.js";
+
+/**
+ * Callback invoked when a message is enqueued.
+ * Called once per message, immediately when enqueue() is called.
+ */
+export type OnMessageEnqueue<AppMessage = unknown> = (
+  message: MachineMessage<AppMessage>
+) => void | Promise<void>;
 
 /**
  * Machine configuration for createMachine.
@@ -12,7 +20,9 @@ export interface MachineConfig<AppMessage = unknown> {
   /** Root node instance (may have nested children) */
   instance: Instance;
   /** Conversation history */
-  history?: Message<AppMessage>[];
+  history?: MachineMessage<AppMessage>[];
+  /** Callback invoked for each message when enqueue() is called */
+  onMessageEnqueue?: OnMessageEnqueue<AppMessage>;
 }
 
 /**
@@ -26,7 +36,15 @@ export interface Machine<AppMessage = unknown> {
   /** Root node instance (may have nested children) */
   instance: Instance;
   /** Conversation history */
-  history: Message<AppMessage>[];
+  history: MachineMessage<AppMessage>[];
+  /** Queued messages to be processed on next runMachine call */
+  queue: MachineMessage<AppMessage>[];
+  /** Enqueue messages to be processed on next runMachine call */
+  enqueue: (messages: MachineMessage<AppMessage>[]) => void;
+  /** Wait until queue has content. Resolves immediately if queue is non-empty. */
+  waitForQueue: () => Promise<void>;
+  /** Notify any waiters that queue has content (called automatically by enqueue) */
+  notifyQueue: () => void;
 }
 
 /**
@@ -69,5 +87,5 @@ export interface SerializedMachine<AppMessage = unknown> {
   /** Root instance tree */
   instance: SerializedInstance;
   /** Full conversation history */
-  history: Message<AppMessage>[];
+  history: MachineMessage<AppMessage>[];
 }

@@ -52,6 +52,11 @@ export default defineSchema({
     sessionId: v.id("sessions"),
     roomName: v.string(),
     createdAt: v.number(),
+    // Last explicit agent dispatch created for this room (best-effort; used for de-duping dispatches).
+    agentDispatchId: v.optional(v.string()),
+    agentDispatchCreatedAt: v.optional(v.number()),
+    // Simple in-DB lock to prevent concurrent dispatch attempts from creating duplicates.
+    agentDispatchLockExpiresAt: v.optional(v.number()),
   })
     .index("by_session", ["sessionId"])
     .index("by_room", ["roomName"]),

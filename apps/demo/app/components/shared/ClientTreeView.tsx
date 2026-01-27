@@ -7,47 +7,19 @@ import {
   KeyValue,
   truncate,
 } from "./TreeView";
+import type { Ref, SerialNode } from "markov-machines/client";
+import type { DisplayNode, DisplayPack } from "@/src/types/display";
 
 // ============================================================================
 // Client TreeView Types & Implementation
 // ============================================================================
-
-interface DisplayCommand {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-interface DisplayNode {
-  name: string;
-  instructions: string;
-  validator: Record<string, unknown>;
-  tools: string[];
-  transitions: Record<string, string>;
-  commands: Record<string, DisplayCommand>;
-  initialState?: unknown;
-  packs?: string[];
-  worker?: boolean;
-}
-
-interface SerialNode {
-  instructions: string;
-  validator: Record<string, unknown>;
-  transitions: Record<string, unknown>;
-  tools?: Record<string, unknown>;
-  initialState?: unknown;
-}
-
-interface Ref {
-  ref: string;
-}
 
 export interface ClientInstance {
   id: string;
   node: DisplayNode | SerialNode | Ref;
   state: unknown;
   children?: ClientInstance[];
-  packStates?: Record<string, unknown>;
+  packs?: DisplayPack[];
 }
 
 function isDisplayNode(node: unknown): node is DisplayNode {
@@ -86,7 +58,7 @@ function ClientNodeSection({ node }: { node: DisplayNode }) {
               const cmd = node.commands[name];
               return (
                 <div key={name}>
-                  • {name}: <span className="italic">{cmd.description}</span>
+                  • {name}: <span className="italic">{cmd?.description}</span>
                 </div>
               );
             })}
@@ -98,8 +70,7 @@ function ClientNodeSection({ node }: { node: DisplayNode }) {
 }
 
 function ClientInstanceContent({ instance }: { instance: ClientInstance }) {
-  const hasPackStates =
-    instance.packStates && Object.keys(instance.packStates).length > 0;
+  const hasPacks = instance.packs && instance.packs.length > 0;
 
   return (
     <>
@@ -107,16 +78,34 @@ function ClientInstanceContent({ instance }: { instance: ClientInstance }) {
         <JsonBlock data={instance.state} />
       </Expander>
 
-      {hasPackStates && (
+      {hasPacks && (
         <Expander
-          label="packStates"
-          badge={Object.keys(instance.packStates!).length}
-          preview={instance.packStates}
+          label="packs"
+          badge={instance.packs!.length}
+          preview={instance.packs}
         >
           <div className="space-y-1">
-            {Object.entries(instance.packStates!).map(([name, state]) => (
-              <Expander key={name} label={name} preview={state}>
-                <JsonBlock data={state} />
+            {instance.packs!.map((pack) => (
+              <Expander key={pack.name} label={pack.name} preview={pack.state}>
+                <div className="space-y-1">
+                  <Expander label="state" preview={pack.state}>
+                    <JsonBlock data={pack.state} />
+                  </Expander>
+                  <Expander label="validator" preview={pack.validator}>
+                    <JsonBlock data={pack.validator} />
+                  </Expander>
+                  {Object.keys(pack.commands).length > 0 && (
+                    <Expander label="commands" badge={Object.keys(pack.commands).length} preview={pack.commands}>
+                      <div className="text-terminal-green-dim space-y-0.5">
+                        {Object.entries(pack.commands).map(([cmdName, cmd]) => (
+                          <div key={cmdName}>
+                            • {cmdName}: <span className="italic">{cmd?.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </Expander>
+                  )}
+                </div>
               </Expander>
             ))}
           </div>

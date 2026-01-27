@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { Tool } from "@anthropic-ai/sdk/resources/messages";
-import type { Message } from "./messages.js";
+import type { MachineMessage } from "./messages.js";
 
 /**
  * Context passed to tool execute functions.
@@ -14,7 +14,7 @@ export interface ToolContext<S = unknown> {
   /** ID of the instance executing this tool */
   instanceId: string;
   /** Get messages from the conversation history that belong to this instance */
-  getInstanceMessages: () => Message[];
+  getInstanceMessages: () => MachineMessage[];
 }
 
 /**

@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { Ref, SerialNode, SerialTransition } from "./refs.js";
 import type { Node } from "./node.js";
 import type { StandardNodeConfig } from "../executor/types.js";
-import type { Message } from "./messages.js";
+import type { MachineMessage } from "./messages.js";
 
 /**
  * Context passed to code transition execute functions.
@@ -54,8 +54,8 @@ export interface SpawnResult<T = unknown> {
  */
 export interface CedeResult<M = unknown> {
   type: "cede";
-  /** String or Message[] to pass to parent */
-  content?: string | Message<M>[];
+  /** String or MachineMessage[] to pass to parent */
+  content?: string | MachineMessage<M>[];
 }
 
 /**
