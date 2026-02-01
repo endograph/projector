@@ -162,18 +162,11 @@ export interface MessageSource {
 }
 
 /**
- * @deprecated Use MessageSource instead
- */
-export type SourceInstanceId = string | "user";
-
-/**
  * Metadata attached to messages for attribution and tracking.
  */
 export interface MessageMetadata {
   /** Source attribution for this message */
   source?: MessageSource;
-  /** @deprecated Use source.instanceId instead */
-  sourceInstanceId?: SourceInstanceId;
   /**
    * If true, this message is added to history for context but does not trigger
    * leaf execution (LLM inference). Use for logging/context messages that

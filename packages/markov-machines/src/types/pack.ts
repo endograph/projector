@@ -2,8 +2,8 @@ import type { z } from "zod";
 import type { CommandValueResult } from "./commands.js";
 
 /**
- * Context provided to pack tool execute functions.
- * Pack tools only have access to pack state, not node state.
+ * Context provided to pack tool and command execute functions.
+ * Pack tools/commands only have access to pack state, not node state.
  */
 export interface PackToolContext<S = unknown> {
   /** Current pack state */
@@ -13,15 +13,9 @@ export interface PackToolContext<S = unknown> {
 }
 
 /**
- * Context provided to pack command execute functions.
- * Pack commands have access to pack state.
+ * Alias for PackToolContext - pack commands use the same context as pack tools.
  */
-export interface PackCommandContext<S = unknown> {
-  /** Current pack state */
-  state: S;
-  /** Update pack state with a partial patch */
-  updateState: (patch: Partial<S>) => void;
-}
+export type PackCommandContext<S = unknown> = PackToolContext<S>;
 
 /**
  * Result of a pack command execution.

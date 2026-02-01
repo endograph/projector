@@ -82,7 +82,6 @@ export type {
   InstanceMessage,
   MessageMetadata,
   MessageSource,
-  SourceInstanceId,
   MachineItem,
   TextBlock,
   ToolUseBlock,

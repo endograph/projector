@@ -78,3 +78,4 @@ Public APIs are exported from `packages/markov-machines/index.ts` including:
 - State patch semantics: currently `updateState` and helpers use a shallow merge (nested objects are replaced). Revisit whether deep merge is the right default and/or add an opt-in deep merge helper.
 - Consider merging system and command message roles into a single "immediate" event role. The role distinction may not be about message type but rather precedence in handling.
 - Should commands execute outside of the step loop, and trust that any effects they generate are enqueue'd for the next step run?
+- Revisit `getActiveLeaves` traversal logic: the relationship between suspension, worker/primary invariants, and which nodes count as "active leaves" needs careful design. Current algorithm may not handle all edge cases correctly (e.g., when the primary node is suspended but workers are active).

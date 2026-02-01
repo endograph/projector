@@ -50,10 +50,10 @@ function filterUnpairedToolUse(messages: MessageParam[]): MessageParam[] {
     }
   }
 
-  // Filter messages, removing unpaired tool_use blocks
-  return messages.map((msg) => {
+  // Filter messages, removing unpaired tool_use blocks and empty messages
+  return messages.flatMap((msg) => {
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
-      return msg;
+      return [msg];
     }
 
     const filteredContent = msg.content.filter((block) => {
@@ -67,21 +67,11 @@ function filterUnpairedToolUse(messages: MessageParam[]): MessageParam[] {
       return true;
     });
 
-    // If all content was filtered, return empty text to avoid empty message
     if (filteredContent.length === 0) {
-      return { role: msg.role, content: [{ type: "text" as const, text: "" }] };
+      return [];
     }
 
-    return { ...msg, content: filteredContent };
-  }).filter((msg) => {
-    // Remove messages that are just empty text
-    if (Array.isArray(msg.content) && msg.content.length === 1) {
-      const block = msg.content[0];
-      if (typeof block === "object" && "type" in block && block.type === "text" && "text" in block && block.text === "") {
-        return false;
-      }
-    }
-    return true;
+    return [{ ...msg, content: filteredContent }];
   });
 }
 
@@ -107,24 +97,6 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
     this.model = config.model ?? "claude-sonnet-4-5";
     this.maxTokens = config.maxTokens ?? 4096;
     this.debug = config.debug ?? false;
-
-  }
-
-  async test() {
-    try {
-      const msg = await this.client.messages.create({
-        model: this.model,
-        max_tokens: this.maxTokens,
-        messages: [{ role: "user", content: "ping" }],
-      });
-
-    } catch (err: any) {
-      console.error("Anthropic error name:", err?.name);
-      console.error("Anthropic error status:", err?.status);
-      console.error("Anthropic error message:", err?.message);
-      console.error("Anthropic error:", err);
-      throw err;
-    }
   }
 
   /**

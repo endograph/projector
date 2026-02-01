@@ -186,6 +186,7 @@ async function handleRegularTool(
           const parseResult = pack.validator.safeParse(merged);
           if (parseResult.success) {
             packStates[packName] = parseResult.data;
+            packStateError = undefined; // Clear any prior error
           } else {
             packStateError = `Pack state validation failed: ${parseResult.error.message}`;
           }
@@ -223,7 +224,6 @@ async function handleRegularTool(
   // Check if this is a current-node tool (charter-level or same node as current)
   const isCurrentNodeTool =
     owner === "charter" ||
-    owner === ctx.instance ||
     owner.node.id === ctx.currentNode.id;
 
   let toolState: unknown;

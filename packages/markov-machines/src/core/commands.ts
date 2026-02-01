@@ -1,10 +1,10 @@
-import type { z } from "zod";
 import type { Machine } from "../types/machine.js";
 import type { Instance } from "../types/instance.js";
 import type {
   CommandInfo,
   CommandExecutionResult,
   CommandContext,
+  CommandDefinition,
   CommandResult,
 } from "../types/commands.js";
 import type { PackCommandContext } from "../types/pack.js";
@@ -105,7 +105,7 @@ export async function runCommand<AppMessage = unknown>(
     }
 
     // Enqueue messages if any, and convert string to MachineMessage for return
-    const targetInstanceId = instanceId ?? machine.instance.id;
+    const targetInstanceId = target.id;
     let messages: MachineMessage<AppMessage>[] | undefined;
     if (rawMessages) {
       if (typeof rawMessages === "string") {
@@ -315,17 +315,9 @@ function removeActiveInstance(
 
 /**
  * Configuration for creating a command.
- * S is the node state type.
+ * Alias for CommandDefinition.
  */
-export interface CommandConfig<TInput, TOutput, S> {
-  name: string;
-  description: string;
-  inputSchema: z.ZodType<TInput>;
-  execute: (
-    input: TInput,
-    ctx: CommandContext<S>,
-  ) => Promise<CommandResult<TOutput>> | CommandResult<TOutput>;
-}
+export type CommandConfig<TInput, TOutput, S> = CommandDefinition<TInput, TOutput, S>;
 
 /**
  * Create a command definition.
@@ -333,6 +325,6 @@ export interface CommandConfig<TInput, TOutput, S> {
  */
 export function createCommand<TInput, TOutput, S>(
   config: CommandConfig<TInput, TOutput, S>,
-): CommandConfig<TInput, TOutput, S> {
+): CommandDefinition<TInput, TOutput, S> {
   return config;
 }

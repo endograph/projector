@@ -54,13 +54,18 @@ export async function executeCommand(
     };
   }
 
-  // Track state updates
+  // Track state updates (with validation matching the tool code path)
   let currentState = instance.state;
   const updateState = (patch: Partial<unknown>) => {
-    currentState = shallowMerge(
+    const merged = shallowMerge(
       currentState as Record<string, unknown>,
       patch as Record<string, unknown>,
     );
+    const result = instance.node.validator.safeParse(merged);
+    if (!result.success) {
+      throw new Error(`Command state update validation failed: ${result.error.message}`);
+    }
+    currentState = result.data;
     // Enqueue state update message
     enqueue([instanceMessage(
       { kind: "state", instanceId, patch: patch as Record<string, unknown> },

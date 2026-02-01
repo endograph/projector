@@ -205,7 +205,8 @@ export function isResumeResult(value: unknown): value is ResumeResult {
     typeof value === "object" &&
     value !== null &&
     "type" in value &&
-    (value as ResumeResult).type === "resume"
+    (value as ResumeResult).type === "resume" &&
+    !("instanceId" in value) // Distinguish from Resume which also has type: "resume"
   );
 }
 

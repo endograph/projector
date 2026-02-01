@@ -13,6 +13,26 @@ import { resolveTransitionRef } from "../runtime/ref-resolver.js";
 import { ZOD_JSON_SCHEMA_TARGET_OPENAPI_3 } from "../helpers/json-schema.js";
 
 /**
+ * Try to create a partial version of a validator.
+ * Unwraps ZodEffects/ZodPipe wrappers (from .refine(), .transform(), .pipe())
+ * to find the underlying ZodObject, then calls .partial() on it.
+ * Falls back to the original validator if no ZodObject is found.
+ */
+function getPartialValidator(validator: z.ZodTypeAny): z.ZodTypeAny {
+  // Direct check: does this validator have .partial()?
+  if (typeof (validator as any).partial === "function") {
+    return (validator as z.ZodObject<Record<string, z.ZodTypeAny>>).partial();
+  }
+  // Unwrap: check _def.schema (ZodEffects) or _def.in (ZodPipe)
+  const def = (validator as any)._def;
+  if (def && typeof def === "object") {
+    if (def.schema) return getPartialValidator(def.schema);
+    if (def.in) return getPartialValidator(def.in);
+  }
+  return validator;
+}
+
+/**
  * Track tool sources for collision detection.
  * Maps tool name to its source for error messages.
  */
@@ -54,10 +74,8 @@ export function generateToolDefinitions<S>(
   }
 
   // 1. Add updateState tool
-  const patchValidator: z.ZodTypeAny =
-    typeof (node.validator as { partial?: () => z.ZodTypeAny }).partial === "function"
-      ? (node.validator as z.ZodObject<Record<string, z.ZodTypeAny>>).partial()
-      : node.validator;
+  // Try to get a partial validator — unwrap effects/pipes if needed
+  const patchValidator: z.ZodTypeAny = getPartialValidator(node.validator);
   const stateSchema: Record<string, unknown> = z.toJSONSchema(patchValidator, {
     target: ZOD_JSON_SCHEMA_TARGET_OPENAPI_3,
   }) as Record<string, unknown>;

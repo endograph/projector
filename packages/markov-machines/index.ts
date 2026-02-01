@@ -8,8 +8,8 @@ export { createMachine } from "./src/core/machine.js";
 export { createTransition } from "./src/core/transition.js";
 export { cede, spawn, suspend } from "./src/helpers/cede-spawn.js";
 export type { TransitionConfig } from "./src/core/transition.js";
-export { runMachine, runMachineToCompletion, mergeLeafResults, drainQueue, applyInstanceMessages } from "./src/core/run.js";
-export type { LeafResult, LegacyLeafResult, MergedResult, DrainResult } from "./src/core/run.js";
+export { runMachine, runMachineToCompletion, drainQueue, applyInstanceMessages } from "./src/core/run.js";
+export type { LeafResult, DrainResult } from "./src/core/run.js";
 export { createPack } from "./src/core/pack.js";
 export { getAvailableCommands, runCommand, createCommand } from "./src/core/commands.js";
 export type { CommandConfig } from "./src/core/commands.js";
@@ -51,7 +51,7 @@ export { serializeInstanceForDisplay } from "./src/serialization/serialize-displ
 export { escapeSchemaKeys, restoreSchemaKeys, toSafeJsonSchema, fromSafeJsonSchema } from "./src/helpers/json-schema.js";
 
 // Ref resolution
-export { resolveNodeRef, resolveNestedTransitionRef, resolvePackToolRef } from "./src/runtime/transition-executor.js";
+export { resolveNodeRef } from "./src/runtime/transition-executor.js";
 
 // Types
 export type {
@@ -107,7 +107,6 @@ export type {
   InstanceMessage,
   MessageMetadata,
   MessageSource,
-  SourceInstanceId,
   MachineItem,
   TextBlock,
   ToolUseBlock,

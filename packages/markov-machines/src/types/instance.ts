@@ -103,7 +103,9 @@ export function getChildren(inst: Instance): Instance[] {
 
 /**
  * Get the primary active instance by following the last child at each level.
- * Used for operations that need a single target (e.g., command routing when no instanceId specified).
+ * Returns the deepest non-worker node (the primary), even if it is suspended.
+ * Suspension does not change which node is primary — callers should check
+ * `instance.suspended` if they need to handle that case.
  * Note: For parallel execution, use getActiveLeaves() which returns ALL non-suspended leaves.
  */
 export function getActiveInstance(instance: Instance): Instance {

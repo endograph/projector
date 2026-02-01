@@ -44,7 +44,7 @@ function resolveNodeToolRef(charter: Charter<any>, ref: string): AnyToolDefiniti
  * Flat: charter.tools[ref] (charter tools are shared). Dotted: charter.packs by name.
  * Does NOT search node tools.
  */
-export function resolvePackToolRef(
+function resolvePackToolRef(
   charter: Charter<any>,
   ref: string,
 ): AnyToolDefinition | AnyPackToolDefinition {
@@ -65,25 +65,14 @@ export function resolvePackToolRef(
 
 /**
  * Resolve a transition ref (flat or dotted).
- * Flat: charter.transitions[ref]. Dotted: charter.nodes[source].transitions[name].
+ * Delegates to resolveTransitionRef from ref-resolver.
  */
-export function resolveNestedTransitionRef(
+function resolveNestedTransitionRef(
   charter: Charter<any>,
   ref: string,
 ): Transition<unknown> {
-  const dotIdx = ref.indexOf(".");
-  if (dotIdx === -1) {
-    const t = charter.transitions[ref];
-    if (!t) throw new Error(`Unknown transition ref: ${ref}`);
-    return t;
-  }
-  const source = ref.slice(0, dotIdx);
-  const name = ref.slice(dotIdx + 1);
-  const node = charter.nodes[source];
-  if (!node) throw new Error(`Unknown node in transition ref: ${ref}`);
-  const t = node.transitions[name];
-  if (!t) throw new Error(`Unknown transition on node ${source}: ${name}`);
-  return t;
+  // Create a Ref object and delegate to the canonical resolver
+  return resolveTransitionRef(charter, { ref } as unknown as Transition<unknown>);
 }
 
 /**

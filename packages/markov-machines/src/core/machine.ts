@@ -8,28 +8,31 @@ import type { MachineMessage } from "../types/messages.js";
 /**
  * Validate a node instance tree recursively.
  * Ensures all states are valid according to their node validators.
- * Also ensures all instances have IDs.
+ * Also ensures all instances have IDs (returns a new instance if ID was missing).
  */
-function validateInstance(instance: Instance): void {
-  // Ensure instance has ID
-  if (!instance.id) {
-    (instance as { id: string }).id = uuid();
-  }
+function validateInstance(instance: Instance): Instance {
+  // Ensure instance has ID (immutably)
+  const withId = instance.id ? instance : { ...instance, id: uuid() };
 
   // Validate this instance's state
-  const stateResult = instance.node.validator.safeParse(instance.state);
+  const stateResult = withId.node.validator.safeParse(withId.state);
   if (!stateResult.success) {
     throw new Error(
-      `Invalid state for node "${instance.node.id}": ${stateResult.error.message}`,
+      `Invalid state for node "${withId.node.id}": ${stateResult.error.message}`,
     );
   }
 
   // Recursively validate children
-  if (instance.children) {
-    for (const child of instance.children) {
-      validateInstance(child);
+  if (withId.children) {
+    const validatedChildren = withId.children.map(child => validateInstance(child));
+    // Only create new object if children changed
+    const childrenChanged = validatedChildren.some((c, i) => c !== withId.children![i]);
+    if (childrenChanged) {
+      return { ...withId, children: validatedChildren };
     }
   }
+
+  return withId;
 }
 
 /**
@@ -75,8 +78,8 @@ export function createMachine<AppMessage = unknown>(
       ? { ...inputInstance, packStates: initializePackStates(charter) }
       : inputInstance;
 
-  // Validate the entire instance tree
-  validateInstance(instance);
+  // Validate the entire instance tree (may return new instance with generated IDs)
+  const validatedInstance = validateInstance(instance);
 
   // Create mutable queue for enqueuing messages
   const queue: MachineMessage<AppMessage>[] = [];
@@ -103,7 +106,7 @@ export function createMachine<AppMessage = unknown>(
 
   return {
     charter,
-    instance,
+    instance: validatedInstance,
     history,
     queue,
     enqueue: (messages: MachineMessage<AppMessage>[]) => {
