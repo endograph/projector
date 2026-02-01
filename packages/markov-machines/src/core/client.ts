@@ -18,7 +18,7 @@ import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema.js"
 
 /**
  * Create a DryClientNode from a Node.
- * Extracts instructions, validator (as JSON Schema), and command metadata.
+ * Extracts instructions, validator (as JSON Schema), command metadata, and pack definitions.
  */
 export function createDryClientNode<N extends Node<any, any>>(
   node: N,
@@ -43,20 +43,26 @@ export function createDryClientNode<N extends Node<any, any>>(
     }
   }
 
+  // Build packs array from node.packs
+  const nodePacks = node.packs ?? [];
+  let packs: DryClientPack[] | undefined;
+  if (nodePacks.length > 0) {
+    packs = nodePacks.map((pack) => createDryClientPack(pack));
+  }
+
   return {
     instructions: node.instructions,
     validator,
     commands,
+    ...(packs ? { packs } : {}),
   };
 }
 
 /**
- * Create a DryClientPack from a Pack and its current state.
+ * Create a DryClientPack from a Pack.
+ * State is stored separately in instance.packStates.
  */
-export function createDryClientPack(
-  pack: Pack,
-  state: unknown,
-): DryClientPack {
+export function createDryClientPack(pack: Pack): DryClientPack {
   // Convert validator to JSON Schema
   const validator = z.toJSONSchema(pack.validator, {
     target: ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12,
@@ -78,7 +84,6 @@ export function createDryClientPack(
   return {
     name: pack.name,
     description: pack.description,
-    state,
     validator,
     commands,
   };
@@ -86,27 +91,15 @@ export function createDryClientPack(
 
 /**
  * Create a DryClientInstance from a full Instance.
- * Extracts id, state, packs (with state/validator/commands), and converts node to DryClientNode.
+ * Extracts id, state, packStates, and converts node to DryClientNode (which includes pack definitions).
  */
 export function createDryClientInstance<N extends Node<any, any>>(
   instance: Instance<N>,
 ): DryClientInstance<N> {
-  // Build packs array from node.packs and instance.packStates
-  const nodePacks = instance.node.packs ?? [];
-  const packStates = instance.packStates ?? {};
-
-  let packs: DryClientPack[] | undefined;
-  if (nodePacks.length > 0) {
-    packs = nodePacks.map((pack) => {
-      const state = packStates[pack.name] ?? pack.initialState ?? {};
-      return createDryClientPack(pack, state);
-    });
-  }
-
   return {
     id: instance.id,
     state: instance.state as NodeState<N>,
-    ...(packs ? { packs } : {}),
+    ...(instance.packStates ? { packStates: instance.packStates } : {}),
     node: createDryClientNode(instance.node),
   };
 }
@@ -128,10 +121,17 @@ export function hydrateClientNode<N extends Node<any, any>>(
     });
   }
 
+  // Hydrate packs if present
+  let packs: ClientPack[] | undefined;
+  if (dry.packs && dry.packs.length > 0) {
+    packs = dry.packs.map(hydrateClientPack);
+  }
+
   return {
     instructions: dry.instructions,
     validator: dry.validator,
     commands: commands as NodeCommands<N>,
+    ...(packs ? { packs } : {}),
   };
 }
 
@@ -152,7 +152,6 @@ export function hydrateClientPack(dry: DryClientPack): ClientPack {
   return {
     name: dry.name,
     description: dry.description,
-    state: dry.state,
     validator: dry.validator,
     commands,
   };
@@ -165,16 +164,10 @@ export function hydrateClientPack(dry: DryClientPack): ClientPack {
 export function hydrateClientInstance<N extends Node<any, any>>(
   dry: DryClientInstance<N>,
 ): ClientInstance<N> {
-  // Hydrate packs if present
-  let packs: ClientPack[] | undefined;
-  if (dry.packs && dry.packs.length > 0) {
-    packs = dry.packs.map(hydrateClientPack);
-  }
-
   return {
     id: dry.id,
     state: dry.state,
-    ...(packs ? { packs } : {}),
+    ...(dry.packStates ? { packStates: dry.packStates } : {}),
     node: hydrateClientNode(dry.node),
   };
 }

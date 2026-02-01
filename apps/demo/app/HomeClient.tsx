@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
-import { useAction, useQuery, useMutation } from "convex/react";
+import { useAction, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
@@ -48,6 +48,9 @@ export function HomeClient({
   const agentPaneRef = useRef<HTMLDivElement>(null);
   const liveClientRef = useRef<LiveVoiceClientHandle>(null);
 
+  // Optimistic pending message for instant feedback
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+
   // Expose liveClient to atom when ref is set (via callback ref pattern)
   const handleLiveClientRef = useCallback((handle: LiveVoiceClientHandle | null) => {
     (liveClientRef as React.MutableRefObject<LiveVoiceClientHandle | null>).current = handle;
@@ -55,7 +58,6 @@ export function HomeClient({
   }, [setLiveClient]);
 
   const createSession = useAction(api.sessionActions.createSession);
-  const addMessage = useMutation(api.messages.add);
 
   // Query the previewed step to get its turnId for filtering messages
   const previewedStep = useQuery(
@@ -68,11 +70,38 @@ export function HomeClient({
     isPreviewing && previewedStep?.turnId ? previewedStep.turnId : undefined;
 
   // Use turn-aware messages query for time travel support
-  const messages = useQuery(
+  const serverMessages = useQuery(
     api.messages.listForTurnPath,
     sessionId ? { sessionId, upToTurnId: effectiveTurnId } : "skip"
   );
   const session = useQuery(api.sessions.get, sessionId ? { id: sessionId } : "skip");
+
+  // Clear pending message when we see it in the server messages
+  useEffect(() => {
+    if (pendingMessage && serverMessages) {
+      const found = serverMessages.some(
+        (msg) => msg.role === "user" && msg.content === pendingMessage
+      );
+      if (found) {
+        setPendingMessage(null);
+      }
+    }
+  }, [serverMessages, pendingMessage]);
+
+  // Combine server messages with pending optimistic message
+  const messages = useMemo(() => {
+    const base = serverMessages ?? [];
+    if (!pendingMessage) return base;
+    return [
+      ...base,
+      {
+        _id: `pending-${Date.now()}`,
+        role: "user" as const,
+        content: pendingMessage,
+        createdAt: Date.now(),
+      },
+    ];
+  }, [serverMessages, pendingMessage]);
 
   // Create session on mount if none exists or if stale
   useEffect(() => {
@@ -161,7 +190,7 @@ export function HomeClient({
   }, [setShiftHeld]);
 
   const handleSend = async () => {
-    if (!sessionId || !input.trim() || isLoading) return;
+    if (!sessionId || !input.trim()) return;
 
     // Check agent connection before clearing input
     if (!voiceAgentConnected) {
@@ -171,21 +200,20 @@ export function HomeClient({
 
     const message = input.trim();
     setInput("");
-    setIsLoading(true);
+    setPendingMessage(message); // Optimistic update - show immediately
 
     try {
       if (!liveClientRef.current?.isConnected()) {
         console.error("Not connected to agent - cannot send message");
+        setPendingMessage(null); // Clear optimistic message on error
         return;
       }
 
       // Send via RPC to the agent (agent handles persistence)
-      const result = await liveClientRef.current.sendMessage(message);
-      console.log('message send result', result)
+      await liveClientRef.current.sendMessage(message);
     } catch (error) {
       console.error("Failed to send message:", error);
-    } finally {
-      setIsLoading(false);
+      setPendingMessage(null); // Clear optimistic message on error
     }
   };
 
@@ -247,6 +275,7 @@ export function HomeClient({
           {scanlinesEnabled && <div className="terminal-scanlines absolute inset-0" />}
           <TerminalPane
             ref={terminalInputRef}
+            sessionId={sessionId}
             messages={messages ?? []}
             input={input}
             onInputChange={setInput}

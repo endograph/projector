@@ -3,27 +3,19 @@ import { mutation, query } from "./_generated/server";
 import type { Id, Doc } from "./_generated/dataModel";
 
 /**
- * Time Travel & Branching Implementation
- * ======================================
+ * Branching & Message Index
+ * =========================
  *
- * Messages are filtered by "turn ancestry" - we walk up the turn tree via parentId
- * and only show messages belonging to turns in that chain.
+ * Messages are associated with branches via the `messageIndex` table.
+ * Each branch has a `branchRootTurnId` and the messageIndex maps
+ * (messageId, branchRootTurnId) for O(1) branch message lookups.
  *
- * Branching is implicit via the turn tree:
- * - Each turn has a parentId pointing to its predecessor
- * - When time-traveling back and sending a new message, a new turn branches off
- * - The original branch remains intact with its messages
+ * When a new branch is created (in machineTurns.create), all ancestor
+ * messages are copied into the messageIndex for the new branch.
+ * New messages are added to the index on insert.
  *
- * Limitations of this approach:
- * - Walking up the tree for every query is O(depth) per query
- * - No explicit branch visualization or naming
- * - Messages without turnId are shown in all branches (legacy behavior)
- *
- * TODO: Revisit this approach if we need:
- * - Named/labeled branches
- * - Branch merging
- * - More efficient ancestry queries (denormalized path field)
- * - Explicit branch management UI
+ * Fallback: when branchRootTurnId is undefined (transient time-travel
+ * state before first message), we walk the turn ancestry tree.
  */
 
 export const list = query({
@@ -44,20 +36,31 @@ export const add = mutation({
     turnId: v.optional(v.id("machineTurns")),
   },
   handler: async (ctx, { sessionId, role, content, turnId }) => {
-    return await ctx.db.insert("messages", {
+    const messageId = await ctx.db.insert("messages", {
       sessionId,
       role,
       content,
       turnId,
       createdAt: Date.now(),
     });
+
+    // Add to messageIndex for the current branch
+    const session = await ctx.db.get(sessionId);
+    if (session?.branchRootTurnId) {
+      await ctx.db.insert("messageIndex", {
+        messageId,
+        branchRootTurnId: session.branchRootTurnId,
+      });
+    }
+
+    return messageId;
   },
 });
 
 /**
- * List messages filtered by turn ancestry.
- * Only returns messages belonging to turns in the ancestry chain of the target turn.
- * This enables time travel - viewing only messages relevant to a specific point in history.
+ * List messages for the current branch path.
+ * Uses the messageIndex for efficient lookup when branchRootTurnId is set.
+ * Falls back to turn-ancestry walking when in transient time-travel state.
  */
 export const listForTurnPath = query({
   args: {
@@ -68,16 +71,33 @@ export const listForTurnPath = query({
     const session = await ctx.db.get(sessionId);
     if (!session) return [];
 
+    // Fast path: use messageIndex when branch is established and no preview filter
+    if (session.branchRootTurnId && !upToTurnId) {
+      const indexEntries = await ctx.db
+        .query("messageIndex")
+        .withIndex("by_branch", (q) =>
+          q.eq("branchRootTurnId", session.branchRootTurnId!)
+        )
+        .collect();
+
+      const messages = await Promise.all(
+        indexEntries.map((entry) => ctx.db.get(entry.messageId))
+      );
+
+      return messages
+        .filter((msg): msg is Doc<"messages"> => msg !== null)
+        .sort((a, b) => a.createdAt - b.createdAt);
+    }
+
+    // Slow path: walk turn ancestry (time-travel state or preview mode)
     const targetTurnId = upToTurnId ?? session.currentTurnId;
     if (!targetTurnId) {
-      // No turns yet - return all messages (initial state)
       return await ctx.db
         .query("messages")
         .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
         .collect();
     }
 
-    // Build set of ancestor turn IDs by walking up the tree
     const ancestorTurnIds = new Set<Id<"machineTurns">>();
     let currentId: Id<"machineTurns"> | undefined = targetTurnId;
 
@@ -88,7 +108,6 @@ export const listForTurnPath = query({
       currentId = turn.parentId ?? undefined;
     }
 
-    // Get all messages and filter to turn path
     const allMessages = await ctx.db
       .query("messages")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))

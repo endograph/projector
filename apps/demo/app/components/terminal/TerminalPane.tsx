@@ -6,6 +6,8 @@ import { shiftHeldAtom, isLiveModeAtom, voiceConnectionStatusAtom, voiceAgentCon
 import { TerminalMessage } from "./TerminalMessage";
 import { TerminalInput } from "./TerminalInput";
 import { ScanlinesToggle } from "./Scanlines";
+import { ThinkingSpinner } from "./ThinkingSpinner";
+import type { Id } from "@/convex/_generated/dataModel";
 
 interface Message {
   _id: string;
@@ -16,6 +18,7 @@ interface Message {
 }
 
 interface TerminalPaneProps {
+  sessionId: Id<"sessions">;
   messages: Message[];
   input: string;
   onInputChange: (value: string) => void;
@@ -25,7 +28,7 @@ interface TerminalPaneProps {
 
 export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
   function TerminalPane(
-    { messages, input, onInputChange, onSend, isLoading },
+    { sessionId, messages, input, onInputChange, onSend, isLoading },
     ref
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -62,24 +65,26 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
           ref={containerRef}
           className="flex-1 overflow-y-auto p-4 pb-0 terminal-scrollbar"
         >
-          {messages.length === 0 ? (
-            <div className="text-terminal-green-dimmer italic">
-              Waiting for input...
+          {/* Messages with reserved spinner space */}
+          <div className="relative pb-8">
+            {messages.length === 0 ? (
+              <div className="text-terminal-green-dimmer italic">
+                Waiting for input...
+              </div>
+            ) : (
+              messages.map((msg) => (
+                <TerminalMessage
+                  key={msg._id}
+                  role={msg.role}
+                  content={msg.content}
+                />
+              ))
+            )}
+            {/* Spinner in reserved space - absolute to avoid layout shift */}
+            <div className="absolute bottom-0 left-0">
+              <ThinkingSpinner sessionId={sessionId} />
             </div>
-          ) : (
-            messages.map((msg) => (
-              <TerminalMessage
-                key={msg._id}
-                role={msg.role}
-                content={msg.content}
-              />
-            ))
-          )}
-          {isLoading && (
-            <div className="text-terminal-green-dim animate-pulse">
-              Processing<span className="terminal-cursor">_</span>
-            </div>
-          )}
+          </div>
 
           {/* Sticky input inside scrollable area */}
           <TerminalInput

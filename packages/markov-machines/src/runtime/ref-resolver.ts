@@ -83,7 +83,7 @@ export function resolveTransition(
 /**
  * Resolve a transition reference to the actual transition object.
  * If the transition is already a concrete transition, returns it as-is.
- * If it's a Ref, looks up the transition in the charter's transitions registry.
+ * If it's a Ref, resolves it (supports dotted nested refs like "nodeName.transitionName").
  *
  * @param charter - The charter containing the transitions registry
  * @param transition - The transition or ref to resolve
@@ -95,11 +95,22 @@ export function resolveTransitionRef<S>(
   transition: Transition<S>,
 ): Transition<S> {
   if (isRef(transition)) {
-    const resolved = charter.transitions[transition.ref];
-    if (!resolved) {
-      throw new Error(`Unknown transition ref: ${transition.ref}`);
+    const ref = transition.ref;
+    const dotIdx = ref.indexOf(".");
+    if (dotIdx === -1) {
+      const resolved = charter.transitions[ref];
+      if (!resolved) {
+        throw new Error(`Unknown transition ref: ${ref}`);
+      }
+      return resolved as Transition<S>;
     }
-    return resolved as Transition<S>;
+    const source = ref.slice(0, dotIdx);
+    const name = ref.slice(dotIdx + 1);
+    const node = charter.nodes[source];
+    if (!node) throw new Error(`Unknown node in transition ref: ${ref}`);
+    const t = node.transitions[name];
+    if (!t) throw new Error(`Unknown transition on node ${source}: ${name}`);
+    return t as Transition<S>;
   }
   return transition;
 }

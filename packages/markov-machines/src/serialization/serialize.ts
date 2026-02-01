@@ -11,25 +11,36 @@ import type { Charter } from "../types/charter.js";
 import type { Transition } from "../types/transitions.js";
 import { isRef, isSerialTransition } from "../types/refs.js";
 import { isCodeTransition, isGeneralTransition } from "../types/transitions.js";
-import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema.js";
+import { toSafeJsonSchema } from "../helpers/json-schema.js";
 
 export interface SerializeNodeOptions {
-  /** If true, always serialize the full node even if it's registered in the charter */
-  noRefs?: boolean;
+  /** If true, always inline this node even if registered in charter. Tool/transition refs are unaffected. */
+  noNodeRef?: boolean;
+}
+
+/**
+ * Check if a value is a Zod schema (has safeParse method) vs already-serialized JSONSchema.
+ */
+function isZodSchema(value: unknown): value is z.ZodType {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as z.ZodType).safeParse === "function"
+  );
 }
 
 /**
  * Serialize a node to a SerialNode or Ref.
- * If the node is registered in the charter, returns a Ref (unless noRefs is true).
- * Otherwise, serializes the full node.
+ * If the node is registered in the charter, returns a Ref (unless noNodeRef is true).
+ * Otherwise, serializes the full node with tool/transition refs.
  */
 export function serializeNode<S>(
   node: Node<any, S>,
   charter?: Charter<any>,
   options?: SerializeNodeOptions,
 ): SerialNode<S> | Ref {
-  // Check if this node is registered in the charter (unless noRefs is set)
-  if (charter && !options?.noRefs) {
+  // Check if this node is registered in the charter (unless noNodeRef is set)
+  if (charter && !options?.noNodeRef) {
     for (const [name, registeredNode] of Object.entries(charter.nodes)) {
       if (registeredNode.id === node.id) {
         return { ref: name };
@@ -37,10 +48,10 @@ export function serializeNode<S>(
     }
   }
 
-  // Serialize the validator to JSON Schema
-  const validator: Record<string, unknown> = z.toJSONSchema(node.validator, {
-    target: ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12,
-  }) as Record<string, unknown>;
+  // Serialize the validator to JSON Schema (pass through if already JSONSchema)
+  const validator: Record<string, unknown> = isZodSchema(node.validator)
+    ? toSafeJsonSchema(node.validator)
+    : (node.validator as Record<string, unknown>);
 
   // Serialize transitions
   const transitions: Record<string, Ref | SerialTransition> = {};
@@ -58,10 +69,37 @@ export function serializeNode<S>(
     }
   }
 
+  // Serialize tool refs (node tools only — not packs)
+  const toolRefs: Record<string, Ref> = {};
+  if (charter) {
+    for (const [name, tool] of Object.entries(node.tools)) {
+      // 1. Check charter.tools (flat ref)
+      let found = false;
+      for (const [regName, regTool] of Object.entries(charter.tools)) {
+        if (regTool === tool) {
+          toolRefs[name] = { ref: regName };
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
+      // 2. Check charter.nodes (nested ref)
+      for (const [nodeName, regNode] of Object.entries(charter.nodes)) {
+        if (regNode.tools[name] === tool) {
+          toolRefs[name] = { ref: `${nodeName}.${name}` };
+          found = true;
+          break;
+        }
+      }
+      // Unregistered inline tools are skipped (can't be serialized)
+    }
+  }
+
   return {
     instructions: node.instructions,
     validator,
     transitions,
+    ...(Object.keys(toolRefs).length > 0 ? { tools: toolRefs } : {}),
     initialState: node.initialState,
   };
 }
@@ -81,13 +119,21 @@ function serializeTransition<S>(
   // Code transitions and general transitions can't be fully serialized
   // They must be registered in the charter
   if (isCodeTransition(transition) || isGeneralTransition(transition)) {
-    // Check if registered
     if (charter) {
+      // 1. Check charter.transitions (flat ref)
       for (const [name, registeredTransition] of Object.entries(
         charter.transitions,
       )) {
         if (registeredTransition === transition) {
           return { ref: name };
+        }
+      }
+      // 2. Check charter.nodes (nested ref)
+      for (const [nodeName, regNode] of Object.entries(charter.nodes)) {
+        for (const [transName, regTransition] of Object.entries(regNode.transitions)) {
+          if (regTransition === transition) {
+            return { ref: `${nodeName}.${transName}` };
+          }
         }
       }
     }

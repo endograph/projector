@@ -1,9 +1,14 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import type { Ref, SerialNode, SerializedInstance } from "markov-machines/client";
 import { isRef, isSerialTransition } from "markov-machines/client";
 import type { DisplayNode, DisplayPack } from "@/src/types/display";
+import JSON5 from "json5";
+import Editor from "react-simple-code-editor";
 
 // ============================================================================
 // Shared Tree Components (exported for reuse)
@@ -157,7 +162,7 @@ type NodeType = DisplayNode | SerialNode | Ref;
 export type ServerInstance = Omit<SerializedInstance, "node" | "children"> & {
   node: NodeType;
   children?: ServerInstance[];
-  packs?: DisplayPack[];
+  packStates?: Record<string, unknown>;
 };
 
 function isDisplayNode(node: NodeType): node is DisplayNode {
@@ -177,7 +182,262 @@ function getServerNodeName(instance: ServerInstance): string {
   return "[inline]";
 }
 
-function NodeSection({ node }: { node: NodeType }) {
+type EditingNode = { instanceId: string; instructions: string } | null;
+type EditingState = { instanceId: string; state: unknown } | null;
+
+function InstructionsEditModal({
+  editing,
+  sessionId,
+  onClose,
+}: {
+  editing: NonNullable<EditingNode>;
+  sessionId: Id<"sessions">;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(editing.instructions);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editCurrentInstance = useMutation(api.sessions.editCurrentInstance);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    await editCurrentInstance({
+      sessionId,
+      instanceId: editing.instanceId,
+      patch: { node: { instructions: value } },
+    });
+    onClose();
+  }, [editCurrentInstance, sessionId, editing.instanceId, value, onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div
+        className="bg-terminal-bg border border-terminal-green-dimmer p-4 w-[600px] max-h-[80vh] flex flex-col gap-3 font-mono"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-terminal-green text-sm font-bold">
+          Edit Instructions
+        </div>
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && e.metaKey) {
+              e.preventDefault();
+              handleSave();
+            }
+          }}
+          className="bg-black border border-terminal-green-dimmer text-terminal-green text-xs p-2 w-full min-h-[200px] resize-y focus:outline-none focus:border-terminal-green terminal-scrollbar"
+          spellCheck={false}
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 text-xs text-terminal-green-dim border border-terminal-green-dimmer hover:text-terminal-green hover:border-terminal-green"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="px-3 py-1 text-xs text-terminal-green border border-terminal-green hover:bg-terminal-green hover:text-black"
+          >
+            Enter
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Insert commas between lines where a value ends and a new key/value begins. */
+function addMissingCommas(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimEnd();
+    const nextNonEmpty = lines.slice(i + 1).find((l) => l.trim().length > 0);
+    const nextTrimmed = nextNonEmpty?.trim() ?? "";
+
+    if (
+      trimmed.length > 0 &&
+      !/[,{\[:\(]$/.test(trimmed) &&
+      nextTrimmed.length > 0 &&
+      !/^[\}\]]/.test(nextTrimmed)
+    ) {
+      result.push(trimmed + ",");
+    } else {
+      result.push(lines[i]);
+    }
+  }
+
+  return result.join("\n");
+}
+
+function highlightJson(code: string): string {
+  return code.replace(
+    /("(?:[^"\\]|\\.)*")\s*:|("(?:[^"\\]|\\.)*")|(\b(?:true|false|null)\b)|(\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)/g,
+    (match, key, str, bool, num) => {
+      if (key) return `<span style="color:var(--terminal-cyan)">${key}</span>:`;
+      if (str) return `<span style="color:var(--terminal-green-dim)">${str}</span>`;
+      if (bool) return `<span style="color:var(--terminal-yellow)">${bool}</span>`;
+      if (num) return `<span style="color:var(--terminal-yellow)">${num}</span>`;
+      return match;
+    },
+  );
+}
+
+function StateEditModal({
+  editing,
+  sessionId,
+  onClose,
+}: {
+  editing: NonNullable<EditingState>;
+  sessionId: Id<"sessions">;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(() => JSON.stringify(editing.state, null, 2));
+  const [error, setError] = useState<string | null>(null);
+  const editCurrentInstance = useMutation(api.sessions.editCurrentInstance);
+
+  const handleSave = useCallback(async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON5.parse(addMissingCommas(value));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Invalid JSON");
+      return;
+    }
+    setError(null);
+    try {
+      await editCurrentInstance({
+        sessionId,
+        instanceId: editing.instanceId,
+        patch: { state: parsed },
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save");
+    }
+  }, [editCurrentInstance, sessionId, editing.instanceId, value, onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+        if (e.key === "Enter" && e.metaKey) {
+          e.preventDefault();
+          handleSave();
+        }
+      }}
+    >
+      <div
+        className="bg-terminal-bg border border-terminal-green-dimmer p-4 w-[600px] max-h-[80vh] flex flex-col gap-3 font-mono"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-terminal-green text-sm font-bold">
+          Edit State
+        </div>
+        <div className="bg-black border border-terminal-green-dimmer min-h-[200px] max-h-[50vh] overflow-auto focus-within:border-terminal-green terminal-scrollbar">
+          <Editor
+            value={value}
+            onValueChange={(code) => {
+              setValue(code);
+              setError(null);
+            }}
+            highlight={highlightJson}
+            tabSize={2}
+            padding={8}
+            style={{
+              fontFamily: "inherit",
+              fontSize: "0.75rem",
+              lineHeight: "1.25rem",
+              color: "var(--terminal-green)",
+              minHeight: "200px",
+            }}
+            textareaClassName="focus:outline-none"
+          />
+        </div>
+        {error && (
+          <div className="text-red-400 text-xs">{error}</div>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 text-xs text-terminal-green-dim border border-terminal-green-dimmer hover:text-terminal-green hover:border-terminal-green"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="px-3 py-1 text-xs text-terminal-green border border-terminal-green hover:bg-terminal-green hover:text-black"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InstructionsField({
+  instructions,
+  instanceId,
+  onEditInstructions,
+}: {
+  instructions: string;
+  instanceId?: string;
+  onEditInstructions?: (instanceId: string, instructions: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const canEdit = !!instanceId && !!onEditInstructions;
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (e.metaKey && canEdit) {
+      e.preventDefault();
+      e.stopPropagation();
+      onEditInstructions!(instanceId!, instructions);
+    } else {
+      setExpanded(!expanded);
+    }
+  };
+
+  return (
+    <div className="text-xs overflow-hidden">
+      <button
+        onClick={handleClick}
+        className={`flex items-start gap-1 text-left w-full min-w-0 ${canEdit ? "hover:bg-terminal-green/10 rounded" : ""}`}
+      >
+        <span className="w-2.5 shrink-0" />
+        <span className="text-terminal-cyan shrink-0">instructions:</span>
+        <span className={`text-terminal-green-dim italic text-left min-w-0 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>
+          "{instructions}"
+        </span>
+      </button>
+    </div>
+  );
+}
+
+function NodeSection({
+  node,
+  instanceId,
+  onEditInstructions,
+}: {
+  node: NodeType;
+  instanceId?: string;
+  onEditInstructions?: (instanceId: string, instructions: string) => void;
+}) {
   if (isRef(node)) {
     return (
       <div className="text-xs text-terminal-green-dim italic">
@@ -186,8 +446,6 @@ function NodeSection({ node }: { node: NodeType }) {
     );
   }
 
-  const instructionPreview = truncate(node.instructions.replace(/\n/g, " "), 100);
-
   if (isDisplayNode(node)) {
     const toolNames = node.tools;
     const transitions = node.transitions;
@@ -195,9 +453,10 @@ function NodeSection({ node }: { node: NodeType }) {
 
     return (
       <div className="space-y-1">
-        <KeyValue
-          k="instructions"
-          v={<span className="italic">"{instructionPreview}"</span>}
+        <InstructionsField
+          instructions={node.instructions}
+          instanceId={instanceId}
+          onEditInstructions={onEditInstructions}
         />
 
         <Expander label="validator" preview={node.validator}>
@@ -248,7 +507,7 @@ function NodeSection({ node }: { node: NodeType }) {
           </Expander>
         )}
 
-        {node.worker && <KeyValue k="worker" v="true" />}
+        {node.worker && <div className="pl-3.5"><KeyValue k="worker" v="true" /></div>}
 
         {node.initialState !== undefined && (
           <Expander label="initialState" preview={node.initialState}>
@@ -266,9 +525,10 @@ function NodeSection({ node }: { node: NodeType }) {
 
   return (
     <div className="space-y-1">
-      <KeyValue
-        k="instructions"
-        v={<span className="italic">"{instructionPreview}"</span>}
+      <InstructionsField
+        instructions={node.instructions}
+        instanceId={instanceId}
+        onEditInstructions={onEditInstructions}
       />
 
       <Expander label="validator" preview={serialNode.validator}>
@@ -314,52 +574,83 @@ function NodeSection({ node }: { node: NodeType }) {
   );
 }
 
-function ServerInstanceContent({ instance }: { instance: ServerInstance }) {
-  const hasPacks = instance.packs && instance.packs.length > 0;
+function ServerInstanceContent({
+  instance,
+  onEditInstructions,
+  onEditState,
+}: {
+  instance: ServerInstance;
+  onEditInstructions?: (instanceId: string, instructions: string) => void;
+  onEditState?: (instanceId: string, state: unknown) => void;
+}) {
+  // Get packs from node if it's a DisplayNode
+  const nodePacks = isDisplayNode(instance.node) ? (instance.node.packs || []) : [];
+  const packStates = instance.packStates || {};
+  const hasPacks = nodePacks.length > 0;
   const isSuspended = !!instance.suspended;
+
+  const handleStateClick = (e: React.MouseEvent) => {
+    if (e.metaKey && onEditState) {
+      e.preventDefault();
+      e.stopPropagation();
+      onEditState(instance.id, instance.state);
+    }
+  };
 
   return (
     <>
-      <Expander label="state" preview={instance.state}>
-        <JsonBlock data={instance.state} />
-      </Expander>
+      <div
+        onClick={handleStateClick}
+        className={onEditState ? "cursor-pointer hover:bg-terminal-green/10 -mx-1 px-1 rounded" : ""}
+      >
+        <Expander label="state" preview={instance.state}>
+          <JsonBlock data={instance.state} />
+        </Expander>
+      </div>
 
       {hasPacks && (
         <Expander
           label="packs"
-          badge={instance.packs!.length}
-          preview={instance.packs}
+          badge={nodePacks.length}
+          preview={nodePacks}
         >
           <div className="space-y-1">
-            {instance.packs!.map((pack) => (
-              <Expander key={pack.name} label={pack.name} preview={pack.state}>
-                <div className="space-y-1">
-                  <Expander label="state" preview={pack.state}>
-                    <JsonBlock data={pack.state} />
-                  </Expander>
-                  <Expander label="validator" preview={pack.validator}>
-                    <JsonBlock data={pack.validator} />
-                  </Expander>
-                  {Object.keys(pack.commands).length > 0 && (
-                    <Expander label="commands" badge={Object.keys(pack.commands).length} preview={pack.commands}>
-                      <div className="text-terminal-green-dim space-y-0.5">
-                        {Object.entries(pack.commands).map(([cmdName, cmd]) => (
-                          <div key={cmdName}>
-                            • {cmdName}: <span className="italic">{cmd.description}</span>
-                          </div>
-                        ))}
-                      </div>
+            {nodePacks.map((pack) => {
+              const packState = packStates[pack.name];
+              return (
+                <Expander key={pack.name} label={pack.name} preview={packState}>
+                  <div className="space-y-1">
+                    <Expander label="state" preview={packState}>
+                      <JsonBlock data={packState} />
                     </Expander>
-                  )}
-                </div>
-              </Expander>
-            ))}
+                    <Expander label="validator" preview={pack.validator}>
+                      <JsonBlock data={pack.validator} />
+                    </Expander>
+                    {Object.keys(pack.commands).length > 0 && (
+                      <Expander label="commands" badge={Object.keys(pack.commands).length} preview={pack.commands}>
+                        <div className="text-terminal-green-dim space-y-0.5">
+                          {Object.entries(pack.commands).map(([cmdName, cmd]) => (
+                            <div key={cmdName}>
+                              • {cmdName}: <span className="italic">{cmd.description}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </Expander>
+                    )}
+                  </div>
+                </Expander>
+              );
+            })}
           </div>
         </Expander>
       )}
 
       <Expander label="node" preview={instance.node}>
-        <NodeSection node={instance.node} />
+        <NodeSection
+          node={instance.node}
+          instanceId={instance.id}
+          onEditInstructions={onEditInstructions}
+        />
       </Expander>
 
       {instance.executorConfig && (
@@ -393,13 +684,46 @@ function getServerBadge(instance: ServerInstance): ReactNode {
   return null;
 }
 
-export function TreeView({ instance }: { instance: ServerInstance }) {
+export function TreeView({ sessionId, instance }: { sessionId: Id<"sessions">; instance: ServerInstance }) {
+  const [editing, setEditing] = useState<EditingNode>(null);
+  const [editingState, setEditingState] = useState<EditingState>(null);
+
+  const handleEditInstructions = useCallback((instanceId: string, instructions: string) => {
+    setEditing({ instanceId, instructions });
+  }, []);
+
+  const handleEditState = useCallback((instanceId: string, state: unknown) => {
+    setEditingState({ instanceId, state });
+  }, []);
+
   return (
-    <TreeNode
-      item={instance}
-      getName={getServerNodeName}
-      renderContent={(inst) => <ServerInstanceContent instance={inst} />}
-      getBadge={getServerBadge}
-    />
+    <>
+      <TreeNode
+        item={instance}
+        getName={getServerNodeName}
+        renderContent={(inst) => (
+          <ServerInstanceContent
+            instance={inst}
+            onEditInstructions={handleEditInstructions}
+            onEditState={handleEditState}
+          />
+        )}
+        getBadge={getServerBadge}
+      />
+      {editing && (
+        <InstructionsEditModal
+          editing={editing}
+          sessionId={sessionId}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editingState && (
+        <StateEditModal
+          editing={editingState}
+          sessionId={sessionId}
+          onClose={() => setEditingState(null)}
+        />
+      )}
+    </>
   );
 }

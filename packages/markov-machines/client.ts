@@ -25,3 +25,4 @@ export type {
 } from "./src/types/messages";
 export type { CommandExecutionResult } from "./src/types/commands";
 export type { StandardNodeConfig } from "./src/executor/types";
+export type { DisplayCommand, DisplayInstance, DisplayNode, DisplayPack } from "./src/types/display";

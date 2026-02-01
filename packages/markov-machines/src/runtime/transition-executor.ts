@@ -1,6 +1,6 @@
 import { v4 as uuid } from "uuid";
-import { z } from "zod";
 import type { Charter } from "../types/charter.js";
+import { fromSafeJsonSchema } from "../helpers/json-schema.js";
 import type { Node } from "../types/node.js";
 import type {
   Transition,
@@ -16,6 +16,75 @@ import {
 import { isRef, isSerialTransition } from "../types/refs.js";
 import { resolveTransitionRef } from "./ref-resolver.js";
 import type { AnyToolDefinition } from "../types/tools.js";
+import type { AnyPackToolDefinition } from "../types/pack.js";
+
+/**
+ * Resolve a node tool ref (flat or dotted).
+ * Flat: charter.tools[ref]. Dotted: charter.nodes[source].tools[name].
+ * Does NOT search pack tools — use resolvePackToolRef for those.
+ */
+function resolveNodeToolRef(charter: Charter<any>, ref: string): AnyToolDefinition {
+  const dotIdx = ref.indexOf(".");
+  if (dotIdx === -1) {
+    const tool = charter.tools[ref];
+    if (!tool) throw new Error(`Unknown tool ref: ${ref}`);
+    return tool;
+  }
+  const source = ref.slice(0, dotIdx);
+  const name = ref.slice(dotIdx + 1);
+  const node = charter.nodes[source];
+  if (!node) throw new Error(`Unknown node in tool ref: ${ref}`);
+  const tool = node.tools[name];
+  if (!tool) throw new Error(`Unknown tool on node ${source}: ${name}`);
+  return tool as AnyToolDefinition;
+}
+
+/**
+ * Resolve a pack tool ref (flat or dotted).
+ * Flat: charter.tools[ref] (charter tools are shared). Dotted: charter.packs by name.
+ * Does NOT search node tools.
+ */
+export function resolvePackToolRef(
+  charter: Charter<any>,
+  ref: string,
+): AnyToolDefinition | AnyPackToolDefinition {
+  const dotIdx = ref.indexOf(".");
+  if (dotIdx === -1) {
+    const tool = charter.tools[ref];
+    if (!tool) throw new Error(`Unknown tool ref: ${ref}`);
+    return tool;
+  }
+  const source = ref.slice(0, dotIdx);
+  const name = ref.slice(dotIdx + 1);
+  const pack = charter.packs.find((p) => p.name === source);
+  if (!pack) throw new Error(`Unknown pack in tool ref: ${ref}`);
+  const tool = pack.tools[name];
+  if (!tool) throw new Error(`Unknown tool on pack ${source}: ${name}`);
+  return tool;
+}
+
+/**
+ * Resolve a transition ref (flat or dotted).
+ * Flat: charter.transitions[ref]. Dotted: charter.nodes[source].transitions[name].
+ */
+export function resolveNestedTransitionRef(
+  charter: Charter<any>,
+  ref: string,
+): Transition<unknown> {
+  const dotIdx = ref.indexOf(".");
+  if (dotIdx === -1) {
+    const t = charter.transitions[ref];
+    if (!t) throw new Error(`Unknown transition ref: ${ref}`);
+    return t;
+  }
+  const source = ref.slice(0, dotIdx);
+  const name = ref.slice(dotIdx + 1);
+  const node = charter.nodes[source];
+  if (!node) throw new Error(`Unknown node in transition ref: ${ref}`);
+  const t = node.transitions[name];
+  if (!t) throw new Error(`Unknown transition on node ${source}: ${name}`);
+  return t;
+}
 
 /**
  * Execute a transition and return the result.
@@ -77,33 +146,23 @@ export function deserializeNode<S>(
   serialNode: SerialNode<S>,
 ): Node<never, S> {
   // Deserialize the JSON Schema validator back to a Zod schema.
-  const validator = z.fromJSONSchema(serialNode.validator) as z.ZodType<S>;
+  const validator = fromSafeJsonSchema<S>(serialNode.validator as Record<string, unknown>);
 
-  // Resolve transition refs
-  // Charter registry stores Transition<any> since it holds transitions for nodes
-  // with different state types. Cast is required when assigning to typed record.
+  // Resolve transition refs (supports dotted nested refs)
   const transitions: Record<string, Transition<S>> = {};
   for (const [name, trans] of Object.entries(serialNode.transitions)) {
     if (isRef(trans)) {
-      const resolved = charter.transitions[trans.ref];
-      if (!resolved) {
-        throw new Error(`Unknown transition ref in inline node: ${trans.ref}`);
-      }
-      transitions[name] = resolved as unknown as Transition<S>;
+      transitions[name] = resolveNestedTransitionRef(charter, trans.ref) as unknown as Transition<S>;
     } else {
       transitions[name] = trans as Transition<S>;
     }
   }
 
-  // Resolve tool refs from charter
+  // Resolve tool refs (supports dotted nested refs — node tools only)
   const tools: Record<string, AnyToolDefinition<S>> = {};
   if (serialNode.tools) {
     for (const [name, toolRef] of Object.entries(serialNode.tools)) {
-      const resolved = charter.tools[toolRef.ref];
-      if (!resolved) {
-        throw new Error(`Unknown tool ref in inline node: ${toolRef.ref}`);
-      }
-      tools[name] = resolved as AnyToolDefinition<S>;
+      tools[name] = resolveNodeToolRef(charter, toolRef.ref) as AnyToolDefinition<S>;
     }
   }
 

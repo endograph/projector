@@ -13,19 +13,23 @@
   },
   "dependencies": {
     "@livekit/components-react": "^2.9.19",
+    "cli-spinners": "^3.4.0",
     "convex": "^1.31.2",
     "jotai": "^2.16.1",
     "js-cookie": "^3.0.5",
+    "json5": "^2.2.3",
     "livekit-client": "^2.17.0",
     "livekit-server-sdk": "^2.15.0",
     "markov-machines": "workspace:*",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-simple-code-editor": "^0.14.1",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/cli-spinners": "^2.0.0",
     "@types/js-cookie": "^3.0.6",
     "@types/node": "^20",
     "@types/react": "^19",

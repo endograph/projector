@@ -69,7 +69,7 @@ export const TerminalInput = forwardRef<HTMLTextAreaElement, TerminalInputProps>
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isLoading || isLiveMode}
+            disabled={isLiveMode}
             placeholder={
               isLiveMode
                 ? "Voice mode active..."

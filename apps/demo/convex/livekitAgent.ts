@@ -94,38 +94,6 @@ export const recordAgentDispatch = internalMutation({
   },
 });
 
-// Append transcript with idempotency - used by voice agent via HTTP
-export const appendTranscript = internalMutation({
-  args: {
-    sessionId: v.id("sessions"),
-    role: v.union(v.literal("user"), v.literal("assistant")),
-    content: v.string(),
-    idempotencyKey: v.string(),
-  },
-  handler: async (ctx, { sessionId, role, content, idempotencyKey }) => {
-    // Check for duplicate using idempotency key
-    const existing = await ctx.db
-      .query("messages")
-      .withIndex("by_idempotency_key", (q) => q.eq("idempotencyKey", idempotencyKey))
-      .first();
-
-    if (existing) {
-      // Already processed - return existing message ID
-      return existing._id;
-    }
-
-    // Insert new message
-    return await ctx.db.insert("messages", {
-      sessionId,
-      role,
-      content,
-      mode: "voice",
-      idempotencyKey,
-      createdAt: Date.now(),
-    });
-  },
-});
-
 // Query voice room for a session
 export const getVoiceRoom = query({
   args: { sessionId: v.id("sessions") },
@@ -134,20 +102,6 @@ export const getVoiceRoom = query({
       .query("voiceRooms")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .first();
-  },
-});
-
-// Lookup session by room name (for agent to resolve sessionId)
-export const getSessionByRoom = internalQuery({
-  args: { roomName: v.string() },
-  handler: async (ctx, { roomName }) => {
-    const voiceRoom = await ctx.db
-      .query("voiceRooms")
-      .withIndex("by_room", (q) => q.eq("roomName", roomName))
-      .first();
-
-    if (!voiceRoom) return null;
-    return await ctx.db.get(voiceRoom.sessionId);
   },
 });
 
@@ -212,6 +166,8 @@ export const getAgentInit = query({
     return {
       sessionId,
       turnId: session.currentTurnId,
+      branchRootTurnId: session.branchRootTurnId,
+      branchAncestors: session.branchAncestors,
       instanceId: currentTurn.instanceId,
       instance: currentTurn.instance,
       displayInstance: currentTurn.displayInstance,

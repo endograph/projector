@@ -79,6 +79,12 @@ export class LiveKitExecutor implements Executor {
   /** Track the last history length we bootstrapped from, to avoid re-bootstrapping unchanged history */
   private lastBootstrappedHistoryLength = 0;
 
+  /** Track registered event handlers for cleanup on reconnect */
+  private eventHandlers: {
+    userInputTranscribed?: (ev: any) => void;
+    conversationItemAdded?: (ev: any) => void;
+  } = {};
+
   constructor(config: LiveKitExecutorConfig = {}) {
     this.config = config;
     this.workerExecutor = createStandardExecutor({
@@ -87,6 +93,14 @@ export class LiveKitExecutor implements Executor {
       model: config.model,
       maxTokens: config.maxTokens,
     });
+  }
+
+  /**
+   * Check if we're using OpenAI Realtime mode (vs STT->LLM->TTS pipeline).
+   * Realtime mode is active when the agent's activity has an active RealtimeSession.
+   */
+  private isRealtimeMode(): boolean {
+    return !!this.agent?._agentActivity?.realtimeLLMSession;
   }
 
   /**
@@ -115,7 +129,10 @@ export class LiveKitExecutor implements Executor {
 
     // If turning on live mode, push config immediately to bootstrap history
     if (!wasLive && isLive && this.connected) {
-      this.pushConfigToLiveKit();
+      // Fire and forget - don't block setLive on async config push
+      this.pushConfigToLiveKit().catch((err) => {
+        console.error("[LiveKitExecutor] Failed to push config on setLive:", err);
+      });
     }
   }
 
@@ -141,7 +158,7 @@ export class LiveKitExecutor implements Executor {
     this.setupEventHandlers();
 
     // Push initial config to LiveKit (instructions + tools)
-    this.pushConfigToLiveKit();
+    await this.pushConfigToLiveKit();
 
     this.connected = true;
     this.log("Connected");
@@ -174,7 +191,7 @@ export class LiveKitExecutor implements Executor {
     }
 
     this.log(`Pushing primary node config to livekit. Instnace: ${instance.id}`)
-    this.pushConfigToLiveKit();
+    await this.pushConfigToLiveKit();
 
     // Primary nodes: route based on isLive flag
     if (!this.config.isLive) {
@@ -189,25 +206,47 @@ export class LiveKitExecutor implements Executor {
   }
 
   /**
+   * Clean up previously registered event handlers.
+   * Called before setting up new handlers to prevent accumulation.
+   */
+  private cleanupEventHandlers(): void {
+    if (!this.session) return;
+
+    if (this.eventHandlers.userInputTranscribed) {
+      this.session.off(voice.AgentSessionEventTypes.UserInputTranscribed, this.eventHandlers.userInputTranscribed);
+      this.log("Removed UserInputTranscribed handler");
+    }
+    if (this.eventHandlers.conversationItemAdded) {
+      this.session.off(voice.AgentSessionEventTypes.ConversationItemAdded, this.eventHandlers.conversationItemAdded);
+      this.log("Removed ConversationItemAdded handler");
+    }
+    this.eventHandlers = {};
+  }
+
+  /**
    * Set up LiveKit event handlers that enqueue messages to the machine.
    */
   private setupEventHandlers(): void {
     if (!this.session || !this.machine) return;
 
+    // Clean up any existing handlers first to prevent accumulation
+    this.cleanupEventHandlers();
+
     const session = this.session;
     const machine = this.machine;
 
-    // User speech transcription
-    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+    // User speech transcription - store reference for later cleanup
+    this.eventHandlers.userInputTranscribed = (ev) => {
       if (ev.isFinal) {
         this.log(`User transcript: "${ev.transcript}"`);
         // Mark as external (from LiveKit STT)
         machine.enqueue([userMessage(ev.transcript, { source: { external: true } })]);
       }
-    });
+    };
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, this.eventHandlers.userInputTranscribed);
 
-    // Assistant speech / conversation items
-    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
+    // Assistant speech / conversation items - store reference for later cleanup
+    this.eventHandlers.conversationItemAdded = (ev) => {
       const item = ev.item;
       const currentActiveNode = getActiveInstance(machine.instance);
       const currentToolNames = this.agent?._tools ? Object.keys(this.agent._tools) : [];
@@ -232,7 +271,8 @@ export class LiveKitExecutor implements Executor {
           machine.enqueue([assistantMessage(content, { source: { external: true } })]);
         }
       }
-    });
+    };
+    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, this.eventHandlers.conversationItemAdded);
 
     // Tool calls - handled via function_call events
     // Note: LiveKit tools are registered separately; here we intercept calls
@@ -280,8 +320,11 @@ export class LiveKitExecutor implements Executor {
   /**
    * Push current node's instructions and tools to the LiveKit agent.
    * Call this after instance mutations to ensure LiveKit has the correct config.
+   *
+   * For realtime mode (OpenAI Realtime API), uses session.updateInstructions() and updateTools().
+   * For pipeline mode (STT->LLM->TTS), directly updates agent internals.
    */
-  pushConfigToLiveKit(): void {
+  async pushConfigToLiveKit(): Promise<void> {
     if (!this.machine || !this.session || !this.agent) return;
 
     const charter = this.machine.charter;
@@ -322,10 +365,6 @@ export class LiveKitExecutor implements Executor {
       }
     }
 
-    // Update agent instructions
-    this.agent._instructions = instructions;
-    this.log(`Updated instructions (${instructions.length} chars)`);
-
     // Generate tool definitions
     const tools = generateToolDefinitions(
       charter,
@@ -333,16 +372,59 @@ export class LiveKitExecutor implements Executor {
       ancestors.map((a) => a.node),
     );
 
-    // Convert to LiveKit tool format and register
+    // Convert to LiveKit tool format
     const lkTools = this.convertToolsToLiveKit(tools);
     const toolNames = lkTools.map((t) => t.name);
 
     console.log(`[LiveKit Config Push] Active node: ${activeInstance.node.id} (${activeInstance.node.name ?? "unnamed"}), tools: [${toolNames.join(", ")}], timestamp: ${Date.now()}`);
 
-    this.log(`Updating LiveKit agent config: ${lkTools.length} tools`);
+    // Branch based on realtime vs pipeline mode
+    if (this.isRealtimeMode()) {
+      // Realtime mode: use session API to update instructions and tools
+      // Access the existing session from AgentActivity (NOT realtimeModel.session() which creates a new one)
+      const rtSession = this.agent!._agentActivity!.realtimeLLMSession!;
+      this.log(`Updating realtime session: instructions (${instructions.length} chars), ${lkTools.length} tools`);
 
-    // Register tools with the agent
-    this.registerToolsWithLiveKit(lkTools);
+      // Update instructions
+      await rtSession.updateInstructions(instructions);
+
+      // Build ToolContext for realtime session
+      const toolContext = this.buildToolContextForRealtime(lkTools);
+      await rtSession.updateTools(toolContext);
+    } else {
+      // Pipeline mode: directly update agent internals
+      this.agent._instructions = instructions;
+      this.log(`Updated instructions (${instructions.length} chars)`);
+
+      this.log(`Updating LiveKit agent config: ${lkTools.length} tools`);
+      this.registerToolsWithLiveKit(lkTools);
+    }
+  }
+
+  /**
+   * Build a ToolContext for the realtime session from our tool definitions.
+   */
+  private buildToolContextForRealtime(tools: LiveKitToolDefinition[]): llm.ToolContext {
+    const toolContext: llm.ToolContext = {};
+
+    for (const toolDef of tools) {
+      const lkTool = llm.tool({
+        description: toolDef.description,
+        parameters: toolDef.parameters as any,
+        execute: async (args: Record<string, unknown>) => {
+          const callId = generateToolCallId();
+          return this.handleToolCall({
+            id: callId,
+            name: toolDef.name,
+            input: args,
+          });
+        },
+      });
+
+      toolContext[toolDef.name] = lkTool as llm.FunctionTool<any, any, any>;
+    }
+
+    return toolContext;
   }
 
   /**

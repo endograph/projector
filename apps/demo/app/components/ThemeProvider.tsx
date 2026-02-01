@@ -34,12 +34,15 @@ export function ThemeProvider({ children, theme }: ThemeProviderProps) {
   // Sync theme from props (session instance)
   useEffect(() => {
     if (theme) {
-      setThemeHue(theme.hue);
-      setThemeSaturation(theme.saturation);
-      setThemeAnimated(theme.animated);
-      setThemeGradient(theme.gradient);
+      // Use defaults for undefined values to avoid invalid CSS like hsl(undefined, ...)
+      const hue = theme.hue ?? 120;
+      const sat = theme.saturation ?? 100;
+      setThemeHue(hue);
+      setThemeSaturation(sat);
+      setThemeAnimated(theme.animated ?? false);
+      setThemeGradient(theme.gradient ?? false);
       if (!theme.animated) {
-        setDisplayHue(theme.hue);
+        setDisplayHue(hue);
       }
     }
   }, [

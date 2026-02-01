@@ -163,3 +163,11 @@ export type {
   DryClientPack,
   ClientPack,
 } from "./client.js";
+
+// Display
+export type {
+  DisplayCommand,
+  DisplayInstance,
+  DisplayNode,
+  DisplayPack,
+} from "./display.js";

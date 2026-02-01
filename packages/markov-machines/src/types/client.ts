@@ -15,23 +15,23 @@ export interface CommandMeta {
 
 /**
  * Wire format pack (JSON-serializable).
- * Contains pack name, state, validator schema, and command metadata.
+ * Contains pack name, validator schema, and command metadata.
+ * State is stored separately in instance.packStates.
  */
 export interface DryClientPack {
   name: string;
   description: string;
-  state: unknown;
   validator: JSONSchema;
   commands: Record<string, CommandMeta>;
 }
 
 /**
  * Hydrated pack with callable command functions.
+ * State is stored separately in instance.packStates.
  */
 export interface ClientPack {
   name: string;
   description: string;
-  state: unknown;
   validator: JSONSchema;
   commands: Record<string, (input: unknown) => Command>;
 }
@@ -55,13 +55,14 @@ export type NodeCommands<N> = N extends { commands: infer C }
 
 /**
  * Wire format node (JSON-serializable).
- * Contains instructions, validator schema, and command metadata.
+ * Contains instructions, validator schema, command metadata, and pack definitions.
  * Sent over the wire to clients.
  */
 export interface DryClientNode<N extends Node<any, any> = Node<any, any>> {
   instructions: string;
   validator: JSONSchema;
   commands: Record<string, CommandMeta>;
+  packs?: DryClientPack[];
 }
 
 /**
@@ -72,17 +73,18 @@ export interface ClientNode<N extends Node<any, any> = Node<any, any>> {
   instructions: string;
   validator: JSONSchema;
   commands: NodeCommands<N>;
+  packs?: ClientPack[];
 }
 
 /**
  * Wire format instance (JSON-serializable).
- * Contains id, state, packs (with state, validator, commands), and a DryClientNode.
+ * Contains id, state, packStates, and a DryClientNode (which includes pack definitions).
  * Sent over the wire to clients.
  */
 export interface DryClientInstance<N extends Node<any, any> = Node<any, any>> {
   id: string;
   state: NodeState<N>;
-  packs?: DryClientPack[];
+  packStates?: Record<string, unknown>;
   node: DryClientNode<N>;
 }
 
@@ -93,6 +95,6 @@ export interface DryClientInstance<N extends Node<any, any> = Node<any, any>> {
 export interface ClientInstance<N extends Node<any, any> = Node<any, any>> {
   id: string;
   state: NodeState<N>;
-  packs?: ClientPack[];
+  packStates?: Record<string, unknown>;
   node: ClientNode<N>;
 }

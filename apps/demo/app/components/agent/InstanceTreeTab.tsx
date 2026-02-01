@@ -6,8 +6,10 @@ import { TreeView } from "../shared/TreeView";
 import { ClientTreeView } from "../shared/ClientTreeView";
 import type { SerializedInstance } from "markov-machines/client";
 import type { DisplayInstance } from "@/src/types/display";
+import type { Id } from "@/convex/_generated/dataModel";
 
 interface InstanceTreeTabProps {
+  sessionId: Id<"sessions">;
   instance: SerializedInstance | null;
   displayInstance: DisplayInstance | null;
 }
@@ -17,7 +19,7 @@ const subtabs: { id: TreeSubtab; label: string }[] = [
   { id: "client", label: "Client" },
 ];
 
-export function InstanceTreeTab({ instance, displayInstance }: InstanceTreeTabProps) {
+export function InstanceTreeTab({ sessionId, instance, displayInstance }: InstanceTreeTabProps) {
   const [activeSubtab, setActiveSubtab] = useAtom(activeTreeSubtabAtom);
 
   return (
@@ -49,7 +51,7 @@ export function InstanceTreeTab({ instance, displayInstance }: InstanceTreeTabPr
             No instance loaded
           </div>
         ) : activeSubtab === "server" ? (
-          <TreeView instance={displayInstance ?? instance as any} />
+          <TreeView sessionId={sessionId} instance={displayInstance ?? instance as any} />
         ) : (
           <ClientTreeView instance={displayInstance ?? instance as any} />
         )}

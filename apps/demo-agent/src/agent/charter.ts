@@ -1,12 +1,13 @@
 /**
  * Demo Agent Charter
  *
- * Base charter using StandardExecutor for serverless environments (Convex).
- * For LiveKit voice support, see livekit.ts which creates a LiveKit-enabled
- * version of this charter.
+ * Exports a factory function for creating the charter. The caller provides the executor,
+ * which allows this module to be imported in environments without process.env (e.g. Convex).
+ *
+ * For LiveKit voice support, see livekit.ts which overrides the executor.
  */
 
-import { createCharter, createStandardExecutor } from "markov-machines";
+import { createCharter, type Executor } from "markov-machines";
 
 import { memoryPack } from "./packs/memory.js";
 import { themePack } from "./packs/theme.js";
@@ -16,22 +17,21 @@ import { demoMemoryNode } from "./nodes/demo-memory.js";
 import { demoPingNode } from "./nodes/demo-ping.js";
 import { demoFavoritesNode } from "./nodes/demo-favorites.js";
 
-export const demoCharterStandard = createCharter({
-  name: "demo-assistant",
-  instructions: "Be concise. No qualifiers or flowery language. State things simply. Always respond to the user after becoming active via a transition.",
-  executor: createStandardExecutor({
-    model: "claude-sonnet-4-5",
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  }),
-  packs: [memoryPack, themePack],
-  nodes: {
-    nameGateNode,
-    fooNode,
-    demoMemoryNode,
-    demoPingNode,
-    demoFavoritesNode,
-  },
-});
+export function createDemoCharter(executor: Executor<any>) {
+  return createCharter({
+    name: "demo-assistant",
+    instructions: "Be concise. No qualifiers or flowery language. State things simply. Always respond to the user after becoming active via a transition.",
+    executor,
+    packs: [memoryPack, themePack],
+    nodes: {
+      nameGateNode,
+      fooNode,
+      demoMemoryNode,
+      demoPingNode,
+      demoFavoritesNode,
+    },
+  });
+}
 
 export { nameGateNode, fooNode, demoMemoryNode, demoPingNode, demoFavoritesNode };
 export { nameGateNode as rootNode };

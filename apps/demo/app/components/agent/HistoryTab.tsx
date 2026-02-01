@@ -340,7 +340,9 @@ function MessagesView({ sessionId }: { sessionId: Id<"sessions"> }) {
       {allMessages.map(({ stepId, stepNumber, message, index }) => {
         const blocks: ContentBlock[] = typeof message.items === "string"
           ? [{ type: "text", text: message.items }]
-          : (message.items);
+          : Array.isArray(message.items)
+            ? message.items
+            : [];
 
         return (
           <div

@@ -3,39 +3,33 @@
 import { useAtomValue } from "jotai";
 import { isPreviewingAtom, stepPreviewInstanceAtom } from "@/src/atoms";
 import { JsonViewer } from "../shared/JsonViewer";
-import type { SerializedInstance } from "markov-machines/client";
-import type { DisplayPack } from "@/src/types/display";
-
-type SerializedInstanceWithPacks = SerializedInstance & { packs?: DisplayPack[] };
+import type { DisplayInstance } from "@/src/types/display";
 
 interface StateTabProps {
-  instance: SerializedInstanceWithPacks | null;
+  instance: DisplayInstance | null;
 }
 
-function getActiveLeafState(instance: SerializedInstanceWithPacks): unknown {
-  if (!instance.children || instance.children.length === 0) {
-    return instance.state;
-  }
-  const lastChild = instance.children[instance.children.length - 1];
-  return lastChild ? getActiveLeafState(lastChild) : instance.state;
-}
-
-function getActiveLeafNodeName(instance: SerializedInstanceWithPacks): string {
-  if (!instance.children || instance.children.length === 0) {
-    // Check if node is a ref (has 'ref' property) or inline
-    const node = instance.node;
-    if ("ref" in node && typeof node.ref === "string") {
-      return node.ref;
+function flattenInstances(instance: DisplayInstance): DisplayInstance[] {
+  const result: DisplayInstance[] = [instance];
+  if (instance.children) {
+    for (const child of instance.children) {
+      result.push(...flattenInstances(child));
     }
-    return "inline";
+  }
+  return result;
+}
+
+function getActiveInstance(instance: DisplayInstance): DisplayInstance {
+  if (!instance.children || instance.children.length === 0) {
+    return instance;
   }
   const lastChild = instance.children[instance.children.length - 1];
-  return lastChild ? getActiveLeafNodeName(lastChild) : "unknown";
+  return lastChild ? getActiveInstance(lastChild) : instance;
 }
 
 export function StateTab({ instance }: StateTabProps) {
   const isPreviewing = useAtomValue(isPreviewingAtom);
-  const previewInstance = useAtomValue(stepPreviewInstanceAtom) as SerializedInstanceWithPacks | null;
+  const previewInstance = useAtomValue(stepPreviewInstanceAtom) as DisplayInstance | null;
 
   const displayInstance = isPreviewing && previewInstance ? previewInstance : instance;
 
@@ -47,12 +41,13 @@ export function StateTab({ instance }: StateTabProps) {
     );
   }
 
-  const activeState = getActiveLeafState(displayInstance);
-  const activeNodeName = getActiveLeafNodeName(displayInstance);
-  const packs = displayInstance.packs || [];
+  const allInstances = flattenInstances(displayInstance);
+  const activeInstance = getActiveInstance(displayInstance);
+  const packStates = displayInstance.packStates || {};
+  const packs = displayInstance.node.packs || [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Preview indicator */}
       {isPreviewing && (
         <div className="text-terminal-yellow text-sm border border-terminal-yellow px-2 py-1 inline-block">
@@ -60,33 +55,36 @@ export function StateTab({ instance }: StateTabProps) {
         </div>
       )}
 
-      {/* Current Instance State */}
-      <div>
-        <h3 className="text-terminal-green text-sm mb-2 terminal-glow">
-          Current Instance State ({activeNodeName})
-        </h3>
-        <div className="bg-terminal-bg-lighter p-3 rounded border border-terminal-green-dimmer">
-          <JsonViewer data={activeState} />
-        </div>
-      </div>
-
-      {/* Packs */}
-      {packs.length > 0 && (
-        <div>
-          <h3 className="text-terminal-green text-sm mb-2 terminal-glow">
-            Packs
-          </h3>
-          {packs.map((pack) => (
-            <div
-              key={pack.name}
-              className="bg-terminal-bg-lighter p-3 rounded border border-terminal-green-dimmer mb-2"
-            >
-              <div className="text-terminal-cyan text-xs mb-2">{pack.name}</div>
-              <JsonViewer data={pack.state} />
+      {/* Instance States */}
+      {allInstances.map((inst) => {
+        const isActive = inst.id === activeInstance.id;
+        return (
+          <div key={inst.id}>
+            <h3 className={`text-sm mb-2 ${isActive ? "text-terminal-green terminal-glow" : "text-terminal-green-dim"}`}>
+              {inst.node.name} state {isActive && "[active]"}
+            </h3>
+            <div className={`p-3 rounded border ${isActive ? "border-terminal-green bg-terminal-bg-lighter" : "border-terminal-green-dimmer"}`}>
+              <JsonViewer data={inst.state} />
             </div>
-          ))}
-        </div>
-      )}
+          </div>
+        );
+      })}
+
+      {/* Pack States */}
+      {packs.map((pack) => {
+        const isActive = activeInstance.node.packNames?.includes(pack.name) ?? false;
+        const packState = packStates[pack.name];
+        return (
+          <div key={pack.name}>
+            <h3 className={`text-sm mb-2 ${isActive ? "text-terminal-green terminal-glow" : "text-terminal-green-dim"}`}>
+              {pack.name} pack state {isActive && "[active]"}
+            </h3>
+            <div className={`p-3 rounded border ${isActive ? "border-terminal-green bg-terminal-bg-lighter" : "border-terminal-green-dimmer"}`}>
+              <JsonViewer data={packState} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

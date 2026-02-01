@@ -1,51 +1,31 @@
-import { z } from "zod";
-import type { Charter, Instance, Pack } from "markov-machines";
+import type { Charter } from "../types/charter.js";
+import type { Instance } from "../types/instance.js";
 import type {
   DisplayCommand,
   DisplayInstance,
   DisplayNode,
   DisplayPack,
-} from "./types/display";
+} from "../types/display.js";
+import { toSafeJsonSchema } from "../helpers/json-schema.js";
 
 /**
  * Custom serialization for display purposes.
  * Unlike the standard serializer, this always expands nodes fully
  * (showing instructions, validator, etc.) instead of converting to refs.
  * Tools and transitions are shown as refs/names only.
+ *
+ * JSON Schema `$`-prefixed keys are automatically escaped to `__`-prefixed.
  */
-
-/**
- * Sanitize an object for Convex storage by replacing $ prefixed keys.
- * Convex doesn't allow field names starting with $.
- */
-function sanitizeForConvex(obj: unknown): unknown {
-  if (obj === null || obj === undefined) return obj;
-  if (typeof obj !== "object") return obj;
-  if (Array.isArray(obj)) {
-    return obj.map(sanitizeForConvex);
-  }
-
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-    // Replace $ prefix with _ to make it Convex-safe
-    const safeKey = key.startsWith("$") ? `_${key.slice(1)}` : key;
-    result[safeKey] = sanitizeForConvex(value);
-  }
-  return result;
-}
 
 function getTransitionTarget(transition: unknown, charter?: Charter): string {
   if (!transition) return "unknown";
 
-  // Check if it's a ref
   if (typeof transition === "object" && transition !== null && "ref" in transition) {
     return (transition as { ref: string }).ref;
   }
 
-  // Check if it's a node (has id)
   if (typeof transition === "object" && transition !== null && "id" in transition) {
     const nodeId = (transition as { id: string }).id;
-    // Try to find in charter
     if (charter) {
       for (const [name, node] of Object.entries(charter.nodes)) {
         if (node.id === nodeId) {
@@ -56,12 +36,10 @@ function getTransitionTarget(transition: unknown, charter?: Charter): string {
     return "inline";
   }
 
-  // Check if it's a transition object with a node property
   if (typeof transition === "object" && transition !== null && "node" in transition) {
     return getTransitionTarget((transition as { node: unknown }).node, charter);
   }
 
-  // Check charter transitions
   if (charter) {
     for (const [name, t] of Object.entries(charter.transitions)) {
       if (t === transition) {
@@ -84,53 +62,47 @@ function getNodeName(node: Instance["node"], charter?: Charter): string {
   return "[inline]";
 }
 
+function serializeCommandsForDisplay(
+  commands: Record<string, { name: string; description: string; inputSchema: { _def?: unknown } }> | undefined,
+): Record<string, DisplayCommand> {
+  const result: Record<string, DisplayCommand> = {};
+  if (!commands) return result;
+
+  for (const [cmdName, cmd] of Object.entries(commands)) {
+    let inputSchema: Record<string, unknown> = {};
+    try {
+      inputSchema = toSafeJsonSchema(cmd.inputSchema as any);
+    } catch {
+      inputSchema = { error: "Could not serialize schema" };
+    }
+    result[cmdName] = {
+      name: cmd.name,
+      description: cmd.description,
+      inputSchema,
+    };
+  }
+  return result;
+}
+
 function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): DisplayNode {
-  // Look up node name from charter
   const name = getNodeName(node, charter);
 
-  // Convert validator to JSON schema and sanitize for Convex
   let validator: Record<string, unknown> = {};
   try {
-    const rawValidator = z.toJSONSchema(node.validator, {
-      target: "draft-2020-12",
-    }) as Record<string, unknown>;
-    validator = sanitizeForConvex(rawValidator) as Record<string, unknown>;
+    validator = toSafeJsonSchema(node.validator);
   } catch {
     validator = { error: "Could not serialize validator" };
   }
 
-  // Get tool names
   const tools = Object.keys(node.tools || {});
 
-  // Get transition targets
   const transitions: Record<string, string> = {};
   for (const [transitionName, transition] of Object.entries(node.transitions || {})) {
     transitions[transitionName] = getTransitionTarget(transition, charter);
   }
 
-  // Get pack names
   const packNames = node.packs?.map((p) => p.name);
-
-  // Serialize commands (name, description, inputSchema)
-  const commands: Record<string, DisplayCommand> = {};
-  if (node.commands) {
-    for (const [cmdName, cmd] of Object.entries(node.commands)) {
-      let inputSchema: Record<string, unknown> = {};
-      try {
-        const rawSchema = z.toJSONSchema(cmd.inputSchema, {
-          target: "draft-2020-12",
-        }) as Record<string, unknown>;
-        inputSchema = sanitizeForConvex(rawSchema) as Record<string, unknown>;
-      } catch {
-        inputSchema = { error: "Could not serialize schema" };
-      }
-      commands[cmdName] = {
-        name: cmd.name,
-        description: cmd.description,
-        inputSchema,
-      };
-    }
-  }
+  const commands = serializeCommandsForDisplay(node.commands as any);
 
   return {
     name,
@@ -139,44 +111,24 @@ function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): Dis
     tools,
     transitions,
     commands,
-    ...(node.initialState !== undefined ? { initialState: sanitizeForConvex(node.initialState) } : {}),
+    ...(node.initialState !== undefined ? { initialState: node.initialState } : {}),
     ...(packNames && packNames.length > 0 ? { packNames } : {}),
     ...(node.worker ? { worker: true } : {}),
   };
 }
 
-function serializePackForDisplay(pack: Pack, state: unknown): DisplayPack {
-  // Convert validator to JSON schema
+function serializePackForDisplay(
+  pack: { name: string; description: string; validator: { _def?: unknown }; commands?: Record<string, { name: string; description: string; inputSchema: { _def?: unknown } }> },
+  state: unknown,
+): DisplayPack {
   let validator: Record<string, unknown> = {};
   try {
-    const rawValidator = z.toJSONSchema(pack.validator, {
-      target: "draft-2020-12",
-    }) as Record<string, unknown>;
-    validator = sanitizeForConvex(rawValidator) as Record<string, unknown>;
+    validator = toSafeJsonSchema(pack.validator as any);
   } catch {
     validator = { error: "Could not serialize validator" };
   }
 
-  // Serialize pack commands
-  const commands: Record<string, DisplayCommand> = {};
-  if (pack.commands) {
-    for (const [cmdName, cmd] of Object.entries(pack.commands)) {
-      let inputSchema: Record<string, unknown> = {};
-      try {
-        const rawSchema = z.toJSONSchema(cmd.inputSchema, {
-          target: "draft-2020-12",
-        }) as Record<string, unknown>;
-        inputSchema = sanitizeForConvex(rawSchema) as Record<string, unknown>;
-      } catch {
-        inputSchema = { error: "Could not serialize schema" };
-      }
-      commands[cmdName] = {
-        name: cmd.name,
-        description: cmd.description,
-        inputSchema,
-      };
-    }
-  }
+  const commands = serializeCommandsForDisplay(pack.commands as any);
 
   return {
     name: pack.name,
@@ -189,7 +141,7 @@ function serializePackForDisplay(pack: Pack, state: unknown): DisplayPack {
 
 export function serializeInstanceForDisplay(
   instance: Instance,
-  charter?: Charter
+  charter?: Charter,
 ): DisplayInstance {
   const node = serializeNodeForDisplay(instance.node, charter);
 
@@ -198,23 +150,24 @@ export function serializeInstanceForDisplay(
     children = instance.children.map((c) => serializeInstanceForDisplay(c, charter));
   }
 
-  // Build packs array with full info
+  // Build packs array with full info including current state
   let packs: DisplayPack[] | undefined;
   const nodePacks = instance.node.packs ?? [];
   const packStates = instance.packStates ?? {};
   if (nodePacks.length > 0) {
     packs = nodePacks.map((pack) => {
       const state = packStates[pack.name] ?? pack.initialState ?? {};
-      return serializePackForDisplay(pack, state);
+      return serializePackForDisplay(pack as any, state);
     });
   }
 
-  const result = {
+  return {
     id: instance.id,
     node,
     state: instance.state,
     ...(children ? { children } : {}),
     ...(packs ? { packs } : {}),
+    ...(instance.packStates ? { packStates: instance.packStates } : {}),
     ...(instance.executorConfig ? { executorConfig: { ...instance.executorConfig } } : {}),
     ...(instance.suspended
       ? {
@@ -227,7 +180,4 @@ export function serializeInstanceForDisplay(
         }
       : {}),
   };
-
-  // Sanitize the entire result to ensure no $ prefixed keys anywhere
-  return sanitizeForConvex(result) as DisplayInstance;
 }

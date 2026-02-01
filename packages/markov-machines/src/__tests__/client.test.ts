@@ -101,7 +101,7 @@ describe("createDryClientInstance", () => {
     expect(dryInstance.node.instructions).toBe("Test node");
   });
 
-  it("should include packs with state, validator, and commands when node has packs", () => {
+  it("should include packs on node and packStates on instance when node has packs", () => {
     const testPack = createPack({
       name: "testPack",
       description: "Test pack with commands",
@@ -143,14 +143,13 @@ describe("createDryClientInstance", () => {
 
     const dryInstance = createDryClientInstance(instance);
 
-    // Should have packs array
-    expect(dryInstance.packs).toBeDefined();
-    expect(dryInstance.packs).toHaveLength(1);
+    // Pack metadata should be on node.packs
+    expect(dryInstance.node.packs).toBeDefined();
+    expect(dryInstance.node.packs).toHaveLength(1);
 
-    const pack = dryInstance.packs![0]!;
+    const pack = dryInstance.node.packs![0]!;
     expect(pack.name).toBe("testPack");
     expect(pack.description).toBe("Test pack with commands");
-    expect(pack.state).toEqual({ counter: 42 });
     expect(pack.validator).toBeDefined();
 
     // Pack commands
@@ -160,9 +159,13 @@ describe("createDryClientInstance", () => {
     expect(pack.commands.incrementCounter!.description).toBe("Increment the counter");
     expect(pack.commands.resetCounter).toBeDefined();
     expect(pack.commands.resetCounter!.name).toBe("resetCounter");
+
+    // Pack state should be on instance.packStates
+    expect(dryInstance.packStates).toBeDefined();
+    expect(dryInstance.packStates!.testPack).toEqual({ counter: 42 });
   });
 
-  it("should use initialState when packStates not provided", () => {
+  it("should not include packStates when none provided", () => {
     const testPack = createPack({
       name: "testPack",
       description: "Test pack",
@@ -180,8 +183,10 @@ describe("createDryClientInstance", () => {
     const instance = createInstance(node, { todos: [] });
     const dryInstance = createDryClientInstance(instance);
 
-    expect(dryInstance.packs).toHaveLength(1);
-    expect(dryInstance.packs![0]!.state).toEqual({ counter: 100 });
+    // Pack metadata should still be on node
+    expect(dryInstance.node.packs).toHaveLength(1);
+    // But packStates should be undefined since none were provided
+    expect(dryInstance.packStates).toBeUndefined();
   });
 });
 
@@ -260,7 +265,7 @@ describe("hydrateClientInstance", () => {
     expect(command.name).toBe("clearAll");
   });
 
-  it("should hydrate packs with callable command functions", () => {
+  it("should hydrate packs on node with callable command functions", () => {
     const testPack = createPack({
       name: "testPack",
       description: "Test pack with commands",
@@ -295,13 +300,12 @@ describe("hydrateClientInstance", () => {
     const dryInstance = createDryClientInstance(instance);
     const clientInstance = hydrateClientInstance(dryInstance);
 
-    // Check packs are hydrated
-    expect(clientInstance.packs).toBeDefined();
-    expect(clientInstance.packs).toHaveLength(1);
+    // Pack metadata should be hydrated on node.packs
+    expect(clientInstance.node.packs).toBeDefined();
+    expect(clientInstance.node.packs).toHaveLength(1);
 
-    const pack = clientInstance.packs![0]!;
+    const pack = clientInstance.node.packs![0]!;
     expect(pack.name).toBe("testPack");
-    expect(pack.state).toEqual({ counter: 42 });
     expect(pack.validator).toBeDefined();
 
     // Pack command should be callable
@@ -310,6 +314,10 @@ describe("hydrateClientInstance", () => {
     expect(isCommand(command)).toBe(true);
     expect(command.name).toBe("incrementCounter");
     expect(command.input).toEqual({ amount: 5 });
+
+    // Pack state should be on instance.packStates
+    expect(clientInstance.packStates).toBeDefined();
+    expect(clientInstance.packStates!.testPack).toEqual({ counter: 42 });
   });
 });
 

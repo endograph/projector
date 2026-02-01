@@ -1,6 +1,13 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { createBranch } from "./branching";
+import { serializeNode, resolveNodeRef } from "markov-machines";
+import { isRef } from "markov-machines/client";
+import { createDemoCharter } from "../../../apps/demo-agent/src/agent/charter.js";
+
+// Charter for serialization ref resolution only — executor is unused
+const charter = createDemoCharter({ run: async () => ({ response: [] }) } as any);
 
 export const create = mutation({
   args: {
@@ -11,6 +18,7 @@ export const create = mutation({
   handler: async (ctx, { instanceId, instance, displayInstance }) => {
     const sessionId = await ctx.db.insert("sessions", {
       currentTurnId: undefined,
+      branchRootTurnId: undefined,
     });
 
     const turnId = await ctx.db.insert("machineTurns", {
@@ -23,7 +31,11 @@ export const create = mutation({
       createdAt: Date.now(),
     });
 
-    await ctx.db.patch(sessionId, { currentTurnId: turnId });
+    await ctx.db.patch(sessionId, {
+      currentTurnId: turnId,
+      branchRootTurnId: turnId,
+      branchAncestors: [turnId],
+    });
 
     return sessionId;
   },
@@ -41,6 +53,7 @@ export const get = query({
     return {
       sessionId: id,
       turnId: session.currentTurnId,
+      branchRootTurnId: session.branchRootTurnId,  // For time travel detection
       instanceId: currentTurn.instanceId,
       instance: currentTurn.instance,
       displayInstance: currentTurn.displayInstance,
@@ -128,7 +141,10 @@ export const timeTravel = mutation({
       throw new Error("Target turn belongs to a different session");
     }
 
-    await ctx.db.patch(sessionId, { currentTurnId: targetTurnId });
+    await ctx.db.patch(sessionId, {
+      currentTurnId: targetTurnId,
+      branchRootTurnId: undefined,  // signals time-travel mode; branch created on next turn
+    });
   },
 });
 
@@ -145,5 +161,121 @@ export const updateInstance = mutation({
     }
 
     await ctx.db.patch(session.currentTurnId, { instance, displayInstance });
+  },
+});
+
+/**
+ * Edit the current instance and create a new branch.
+ * Patches a specific node in the instance tree (identified by instanceId)
+ * with the provided fields, then branches from the current turn.
+ *
+ * Patch shape mirrors the instance: { state?, node?: { instructions?, validator? } }
+ * When patching a Ref node, it's converted to an inline SerialNode using serializeNode.
+ */
+export const editCurrentInstance = mutation({
+  args: {
+    sessionId: v.id("sessions"),
+    instanceId: v.string(),
+    patch: v.object({
+      state: v.optional(v.any()),
+      node: v.optional(v.object({
+        instructions: v.optional(v.string()),
+        validator: v.optional(v.any()),
+      })),
+    }),
+  },
+  handler: async (ctx, { sessionId, instanceId, patch }) => {
+    const session = await ctx.db.get(sessionId);
+    if (!session?.currentTurnId) {
+      throw new Error("Session has no current turn");
+    }
+
+    const currentTurn = await ctx.db.get(session.currentTurnId);
+    if (!currentTurn) throw new Error("Current turn not found");
+
+    // Deep clone instance and displayInstance
+    const modifiedInstance = JSON.parse(JSON.stringify(currentTurn.instance));
+    const modifiedDisplayInstance = currentTurn.displayInstance
+      ? JSON.parse(JSON.stringify(currentTurn.displayInstance))
+      : undefined;
+
+    // Walk serialized instance tree and apply patch
+    function patchSerializedNode(inst: any): boolean {
+      if (inst.id === instanceId) {
+        // Patch state (instance-level)
+        if (patch.state !== undefined) {
+          inst.state = patch.state;
+        }
+
+        // Patch node fields
+        if (patch.node) {
+          if (isRef(inst.node)) {
+            // Resolve Ref → runtime Node, apply edits, re-serialize as inline
+            const runtimeNode = resolveNodeRef(charter, inst.node);
+            const edited = {
+              ...runtimeNode,
+              ...(patch.node.instructions !== undefined ? { instructions: patch.node.instructions } : {}),
+              ...(patch.node.validator !== undefined ? { validator: patch.node.validator } : {}),
+            };
+            inst.node = serializeNode(edited, charter, { noNodeRef: true });
+          } else {
+            // Already inline SerialNode — patch fields directly
+            if (patch.node.instructions !== undefined) {
+              inst.node.instructions = patch.node.instructions;
+            }
+            if (patch.node.validator !== undefined) {
+              inst.node.validator = patch.node.validator;
+            }
+          }
+        }
+        return true;
+      }
+      if (inst.children) {
+        for (const child of inst.children) {
+          if (patchSerializedNode(child)) return true;
+        }
+      }
+      return false;
+    }
+
+    // Walk display instance tree and apply patch (display nodes are always resolved)
+    function patchDisplayNode(inst: any): boolean {
+      if (inst.id === instanceId) {
+        if (patch.state !== undefined) {
+          inst.state = patch.state;
+        }
+        if (patch.node) {
+          if (patch.node.instructions !== undefined) {
+            inst.node.instructions = patch.node.instructions;
+          }
+          if (patch.node.validator !== undefined) {
+            inst.node.validator = patch.node.validator;
+          }
+        }
+        return true;
+      }
+      if (inst.children) {
+        for (const child of inst.children) {
+          if (patchDisplayNode(child)) return true;
+        }
+      }
+      return false;
+    }
+
+    if (!patchSerializedNode(modifiedInstance)) {
+      throw new Error(`Instance node ${instanceId} not found in instance tree`);
+    }
+    if (modifiedDisplayInstance) {
+      patchDisplayNode(modifiedDisplayInstance);
+    }
+
+    // Create a new branch with the modified instance
+    await createBranch(ctx, {
+      sessionId,
+      session,
+      instanceId: currentTurn.instanceId,
+      instance: modifiedInstance,
+      displayInstance: modifiedDisplayInstance,
+    });
   },
 });

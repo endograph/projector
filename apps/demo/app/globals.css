@@ -42,7 +42,7 @@ body::after {
     hsl(var(--gradient-hue-1, 180), 100%, 50%) 0%,
     hsl(var(--gradient-hue-2, 280), 100%, 50%) 100%
   );
-  mix-blend-mode: hue;
+  mix-blend-mode: multiply;
   pointer-events: none;
   z-index: 9999;
   opacity: var(--gradient-intensity, 0);

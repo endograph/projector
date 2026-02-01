@@ -4,6 +4,8 @@ import { v } from "convex/values";
 export default defineSchema({
   sessions: defineTable({
     currentTurnId: v.optional(v.id("machineTurns")),
+    branchRootTurnId: v.optional(v.id("machineTurns")),
+    branchAncestors: v.optional(v.array(v.id("machineTurns"))), // ordered root→head
   }),
 
   machineTurns: defineTable({
@@ -46,6 +48,21 @@ export default defineSchema({
   })
     .index("by_session", ["sessionId"])
     .index("by_idempotency_key", ["idempotencyKey"]),
+
+  // Message index - denormalized mapping of messages to branches for efficient queries
+  messageIndex: defineTable({
+    messageId: v.id("messages"),
+    branchRootTurnId: v.id("machineTurns"),
+  })
+    .index("by_branch", ["branchRootTurnId"])
+    .index("by_message", ["messageId"]),
+
+  // Ephemeral session state (processing indicators, etc.)
+  sessionEphemera: defineTable({
+    sessionId: v.id("sessions"),
+    isProcessing: v.boolean(),
+    processingStartedAt: v.optional(v.number()),
+  }).index("by_session", ["sessionId"]),
 
   // Voice room state for tracking active voice sessions
   voiceRooms: defineTable({
