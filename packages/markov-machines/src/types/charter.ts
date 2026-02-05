@@ -1,10 +1,10 @@
-import type { AnyToolDefinition } from "./tools.js";
-import type { Transition } from "./transitions.js";
-import type { Node } from "./node.js";
-import type { Executor } from "../executor/types.js";
-import type { Pack } from "./pack.js";
-import type { Instance } from "./instance.js";
-import type { SystemPromptOptions } from "../runtime/system-prompt.js";
+import type { AnyToolDefinition } from "./tools";
+import type { Transition } from "./transitions";
+import type { Node } from "./node";
+import type { Executor } from "../executor/types";
+import type { Pack } from "./pack";
+import type { Instance } from "./instance";
+import type { SystemPromptOptions } from "../runtime/system-prompt";
 
 /**
  * Custom system prompt builder function type.

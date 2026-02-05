@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Cookies from "js-cookie";
 import type { Id } from "@/convex/_generated/dataModel";
+import type { CommandExecutionResult } from "markov-machines/client";
+import type { DisplayInstance } from "@/src/types/display";
+import type { LiveClientHandle } from "@/src/atoms";
 
 const SESSION_COOKIE_KEY = "demo-sessionId";
 
@@ -64,4 +67,112 @@ export function useAutoScrollOnNewContent<T extends HTMLElement>(
   }, [content, isScrolledUp, scrollToBottom]);
 
   return { containerRef, isScrolledUp, scrollToBottom };
+}
+
+// ---------------------------------------------------------------------------
+// Optimistic command tracking
+// ---------------------------------------------------------------------------
+
+export interface OptimisticPatch {
+  packState?: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Manages optimistic state overlays for commands.
+ * Each command is tagged with a clientId. The overlay is applied until the
+ * server confirms the command (its clientId appears in `recentCommandResidue`).
+ */
+export function useOptimisticCommands(
+  instance: DisplayInstance | undefined,
+  recentCommandResidue: string[] | undefined,
+  liveClient: LiveClientHandle | null,
+): {
+  instance: DisplayInstance | undefined;
+  executeCommand: (
+    commandName: string,
+    input: Record<string, unknown>,
+    optimistic?: OptimisticPatch,
+  ) => Promise<CommandExecutionResult>;
+} {
+  const [pending, setPending] = useState<Record<string, OptimisticPatch>>({});
+
+  // Reconcile: remove pending entries that the server has confirmed
+  useEffect(() => {
+    if (!recentCommandResidue || recentCommandResidue.length === 0) return;
+    const residueSet = new Set(recentCommandResidue);
+    setPending((prev) => {
+      let changed = false;
+      const next: Record<string, OptimisticPatch> = {};
+      for (const [id, patch] of Object.entries(prev)) {
+        if (residueSet.has(id)) {
+          changed = true;
+        } else {
+          next[id] = patch;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [recentCommandResidue]);
+
+  const executeCommand = useCallback(
+    async (
+      commandName: string,
+      input: Record<string, unknown>,
+      optimistic?: OptimisticPatch,
+    ): Promise<CommandExecutionResult> => {
+      const clientId = crypto.randomUUID();
+
+      // Apply optimistic patch immediately
+      if (optimistic) {
+        setPending((prev) => ({ ...prev, [clientId]: optimistic }));
+      }
+
+      if (!liveClient) {
+        // Rollback — no transport available
+        if (optimistic) {
+          setPending((prev) => {
+            const { [clientId]: _, ...rest } = prev;
+            return rest;
+          });
+        }
+        return { success: false, error: "Not connected to agent" };
+      }
+
+      const result = await liveClient.executeCommand(commandName, input, clientId);
+
+      // Rollback on failure
+      if (!result.success && optimistic) {
+        setPending((prev) => {
+          const { [clientId]: _, ...rest } = prev;
+          return rest;
+        });
+      }
+
+      return result;
+    },
+    [liveClient],
+  );
+
+  // Merge all pending patches onto the server instance
+  const mergedInstance = useMemo(() => {
+    const pendingEntries = Object.values(pending);
+    if (!instance || pendingEntries.length === 0) return instance;
+
+    const base = { ...instance };
+    const basePS = (base.packStates as Record<string, any>) ?? {};
+    let merged = { ...basePS };
+
+    for (const patch of pendingEntries) {
+      if (patch.packState) {
+        for (const [packName, fields] of Object.entries(patch.packState)) {
+          merged[packName] = { ...(merged[packName] ?? {}), ...fields };
+        }
+      }
+    }
+
+    base.packStates = merged;
+    return base;
+  }, [instance, pending]);
+
+  return { instance: mergedInstance, executeCommand };
 }

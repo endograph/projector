@@ -1,6 +1,7 @@
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
-import type { MachineMessage } from "../types/messages.js";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
+import type { MachineMessage } from "../types/messages";
+import type { MessageStreamEvent } from "../types/stream";
 
 
 /**
@@ -34,6 +35,12 @@ export interface RunOptions<AppMessage = unknown> {
   currentStep?: number;
   /** Enable debug logging */
   debug?: boolean;
+  /** Explicit opt-in: stream assistant output when supported by the executor/provider */
+  streamWhenAvailable?: boolean;
+  /** Optional streaming side-channel for incremental assistant output */
+  onMessageStream?: (event: MessageStreamEvent<AppMessage>) => void | Promise<void>;
+  /** Optional abort signal for cancellation */
+  signal?: AbortSignal;
   /** 
    * Function to enqueue messages directly to machine queue.
    * When provided, executor will enqueue messages instead of returning them.

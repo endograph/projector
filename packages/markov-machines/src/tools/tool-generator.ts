@@ -1,16 +1,16 @@
 import { z } from "zod";
-import type { Node } from "../types/node.js";
-import type { Charter } from "../types/charter.js";
-import type { AnthropicToolDefinition } from "../types/tools.js";
-import { isAnthropicBuiltinTool } from "../types/tools.js";
-import type { Transition } from "../types/transitions.js";
+import type { Node } from "../types/node";
+import type { Charter } from "../types/charter";
+import type { AnthropicToolDefinition } from "../types/tools";
+import { isAnthropicBuiltinTool } from "../types/tools";
+import type { Transition } from "../types/transitions";
 import {
   isCodeTransition,
   isGeneralTransition,
   transitionHasArguments,
-} from "../types/transitions.js";
-import { resolveTransitionRef } from "../runtime/ref-resolver.js";
-import { ZOD_JSON_SCHEMA_TARGET_OPENAPI_3 } from "../helpers/json-schema.js";
+} from "../types/transitions";
+import { resolveTransitionRef } from "../runtime/ref-resolver";
+import { ZOD_JSON_SCHEMA_TARGET_OPENAPI_3 } from "../helpers/json-schema";
 
 /**
  * Try to create a partial version of a validator.

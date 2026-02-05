@@ -1,16 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { createCharter } from "../core/charter.js";
-import { createNode } from "../core/node.js";
-import { createInstance } from "../types/instance.js";
-import { createMachine } from "../core/machine.js";
-import { getAvailableCommands, runCommand } from "../core/commands.js";
-import { runMachineToCompletion } from "../core/run.js";
-import { commandResult } from "../types/commands.js";
-import { userMessage, assistantMessage } from "../types/messages.js";
-import type { Executor, RunResult, RunOptions } from "../executor/types.js";
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
+import { createCharter } from "../core/charter";
+import { createNode } from "../core/node";
+import { createInstance } from "../types/instance";
+import { createMachine } from "../core/machine";
+import { getAvailableCommands, runCommand } from "../core/commands";
+import { runMachineToCompletion } from "../core/run";
+import { commandResult } from "../types/commands";
+import { userMessage, assistantMessage } from "../types/messages";
+import type { Executor, RunResult, RunOptions } from "../executor/types";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
 
 /**
  * Mock executor for testing - commands don't use the executor,

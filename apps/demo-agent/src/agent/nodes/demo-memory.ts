@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createNode, createTransition, cede } from "markov-machines";
 import { memoryPack } from "../packs/memory.js";
 import { themePack } from "../packs/theme.js";
+import { agentControlsPack } from "../packs/agent-controls.js";
 
 export const demoMemoryStateValidator = z.object({});
 
@@ -22,7 +23,7 @@ Encourage the user to:
 Be enthusiastic and helpful! When done, use returnToFoo to go back.`,
 
   validator: demoMemoryStateValidator,
-  packs: [memoryPack, themePack],
+  packs: [memoryPack, themePack, agentControlsPack],
   transitions: {
     returnToFoo: createTransition<DemoMemoryState>({
       description: "Return to the main Foo node after completing the memory demo",

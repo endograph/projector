@@ -1,20 +1,20 @@
-import type { Machine } from "../types/machine.js";
-import type { Instance } from "../types/instance.js";
+import type { Machine } from "../types/machine";
+import type { Instance } from "../types/instance";
 import type {
   CommandInfo,
   CommandExecutionResult,
   CommandContext,
   CommandDefinition,
   CommandResult,
-} from "../types/commands.js";
-import type { PackCommandContext } from "../types/pack.js";
-import type { MachineMessage } from "../types/messages.js";
-import { userMessage, instanceMessage, commandMessage } from "../types/messages.js";
-import { getActiveInstance, findInstanceById } from "../types/instance.js";
-import { executeCommand as executeCommandOnInstance } from "../runtime/command-executor.js";
-import { isCedeResult } from "../types/transitions.js";
-import { isCommandValueResult } from "../types/commands.js";
-import { shallowMerge } from "../types/state.js";
+} from "../types/commands";
+import type { PackCommandContext } from "../types/pack";
+import type { MachineMessage } from "../types/messages";
+import { userMessage, instanceMessage, commandMessage } from "../types/messages";
+import { getActiveInstance, findInstanceById } from "../types/instance";
+import { executeCommand as executeCommandOnInstance } from "../runtime/command-executor";
+import { isCedeResult } from "../types/transitions";
+import { isCommandValueResult } from "../types/commands";
+import { shallowMerge } from "../types/state";
 
 /**
  * Get available commands on the current active instance.
@@ -61,14 +61,17 @@ export async function runCommand<AppMessage = unknown>(
   machine: Machine<AppMessage>,
   commandName: string,
   input: unknown = {},
-  instanceId?: string,
+  options?: { instanceId?: string; clientId?: string },
 ): Promise<{
   machine: Machine<AppMessage>;
   result: CommandExecutionResult;
   messages?: MachineMessage<AppMessage>[];
 }> {
+  const instanceId = options?.instanceId;
+  const clientId = options?.clientId;
+
   // Enqueue the command message for history tracking
-  const command = { type: "command" as const, name: commandName, input, instanceId };
+  const command = { type: "command" as const, name: commandName, input, instanceId, clientId };
   machine.enqueue([commandMessage([command])]);
 
   // Find the target instance

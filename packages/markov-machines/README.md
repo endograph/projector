@@ -79,3 +79,5 @@ Public APIs are exported from `packages/markov-machines/index.ts` including:
 - Consider merging system and command message roles into a single "immediate" event role. The role distinction may not be about message type but rather precedence in handling.
 - Should commands execute outside of the step loop, and trust that any effects they generate are enqueue'd for the next step run?
 - Revisit `getActiveLeaves` traversal logic: the relationship between suspension, worker/primary invariants, and which nodes count as "active leaves" needs careful design. Current algorithm may not handle all edge cases correctly (e.g., when the primary node is suspended but workers are active).
+- Revisit how contract / commands / types are shared with the client. Probably want to move towards a: generated client if you want strong type gaurantees, fallback to strings / untyped if not  
+- Generated client will also help with optimistic commands

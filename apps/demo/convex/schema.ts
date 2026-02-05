@@ -45,9 +45,13 @@ export default defineSchema({
     // Voice mode fields
     mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),
     idempotencyKey: v.optional(v.string()),
+    // Streaming fields (best-effort; Convex is the durable source of truth)
+    streamState: v.optional(v.union(v.literal("streaming"), v.literal("complete"), v.literal("error"))),
+    streamSeq: v.optional(v.number()),
   })
     .index("by_session", ["sessionId"])
-    .index("by_idempotency_key", ["idempotencyKey"]),
+    .index("by_idempotency_key", ["idempotencyKey"])
+    .index("by_session_idempotency_key", ["sessionId", "idempotencyKey"]),
 
   // Message index - denormalized mapping of messages to branches for efficient queries
   messageIndex: defineTable({

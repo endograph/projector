@@ -1,17 +1,19 @@
 import { z } from "zod";
-import type { Node } from "../types/node.js";
-import type { Instance } from "../types/instance.js";
+import type { Node } from "../types/node";
+import type { Instance } from "../types/instance";
 import type {
   Machine,
   SerializedMachine,
   SerializedInstance,
-} from "../types/machine.js";
-import type { Ref, SerialNode, SerialTransition } from "../types/refs.js";
-import type { Charter } from "../types/charter.js";
-import type { Transition } from "../types/transitions.js";
-import { isRef, isSerialTransition } from "../types/refs.js";
-import { isCodeTransition, isGeneralTransition } from "../types/transitions.js";
-import { toSafeJsonSchema } from "../helpers/json-schema.js";
+  SerialPackInstance,
+} from "../types/machine";
+import type { Ref, SerialNode, SerialTransition, SerialPack } from "../types/refs";
+import type { Charter } from "../types/charter";
+import type { Transition } from "../types/transitions";
+import type { Pack } from "../types/pack";
+import { isRef, isSerialTransition } from "../types/refs";
+import { isCodeTransition, isGeneralTransition } from "../types/transitions";
+import { toSafeJsonSchema } from "../helpers/json-schema";
 
 export interface SerializeNodeOptions {
   /** If true, always inline this node even if registered in charter. Tool/transition refs are unaffected. */
@@ -153,6 +155,88 @@ function serializeTransition<S>(
   throw new Error("Unknown transition type");
 }
 
+/**
+ * Serialize a pack to a Ref or inline SerialPack.
+ * If the pack's instructions match the charter pack's instructions, returns a Ref.
+ * Otherwise, serializes the full pack definition with the pack's current instructions.
+ */
+export function serializePack(
+  pack: Pack,
+  state: unknown,
+  charter?: Charter,
+): Ref | SerialPack {
+  // Check if this pack's instructions match the charter pack's instructions
+  if (charter?.packs) {
+    const charterPack = charter.packs.find((p) => p.name === pack.name);
+    if (charterPack) {
+      // Compare instructions - if they match, use ref
+      const charterInstructions = typeof charterPack.instructions === "function"
+        ? charterPack.instructions(state)
+        : charterPack.instructions;
+      const packInstructions = typeof pack.instructions === "function"
+        ? pack.instructions(state)
+        : pack.instructions;
+
+      if (charterInstructions === packInstructions) {
+        return { ref: pack.name };
+      }
+    }
+  }
+
+  // Serialize the validator to JSON Schema
+  const validator: Record<string, unknown> = isZodSchema(pack.validator)
+    ? toSafeJsonSchema(pack.validator)
+    : (pack.validator as Record<string, unknown>);
+
+  // Resolve instructions from pack
+  let instructions: string | undefined;
+  if (typeof pack.instructions === "function") {
+    try {
+      instructions = pack.instructions(state);
+    } catch {
+      instructions = "(error resolving dynamic instructions)";
+    }
+  } else {
+    instructions = pack.instructions;
+  }
+
+  // Serialize tool refs (pack tools must be registered in charter to serialize)
+  const toolRefs: Record<string, Ref> = {};
+  if (charter?.packs) {
+    const charterPack = charter.packs.find((p) => p.name === pack.name);
+    if (charterPack) {
+      for (const [name, tool] of Object.entries(pack.tools)) {
+        if (charterPack.tools[name] === tool) {
+          toolRefs[name] = { ref: `${pack.name}.${name}` };
+        }
+      }
+    }
+  }
+
+  // Serialize command refs (pack commands must be registered in charter to serialize)
+  const commandRefs: Record<string, Ref> = {};
+  if (charter?.packs && pack.commands) {
+    const charterPack = charter.packs.find((p) => p.name === pack.name);
+    if (charterPack?.commands) {
+      for (const [name, command] of Object.entries(pack.commands)) {
+        if (charterPack.commands[name] === command) {
+          commandRefs[name] = { ref: `${pack.name}.${name}` };
+        }
+      }
+    }
+  }
+
+  return {
+    name: pack.name,
+    description: pack.description,
+    ...(instructions !== undefined ? { instructions } : {}),
+    validator,
+    ...(Object.keys(toolRefs).length > 0 ? { tools: toolRefs } : {}),
+    ...(Object.keys(commandRefs).length > 0 ? { commands: commandRefs } : {}),
+    ...(pack.initialState !== undefined ? { initialState: pack.initialState } : {}),
+  };
+}
+
 export interface SerializeInstanceOptions extends SerializeNodeOptions {}
 
 /**
@@ -171,12 +255,26 @@ export function serializeInstance(
     children = instance.children.map((c) => serializeInstance(c, charter, options));
   }
 
+  // Serialize pack instances (only on root - when packStates exists)
+  // Use instance.packs (deserialized with correct instructions) or fall back to node.packs
+  let packInstances: SerialPackInstance[] | undefined;
+  const packsToSerialize = instance.packs ?? instance.node.packs ?? [];
+  if (instance.packStates && packsToSerialize.length > 0) {
+    packInstances = packsToSerialize.map((pack) => {
+      const state = instance.packStates![pack.name] ?? pack.initialState ?? {};
+      return {
+        state,
+        pack: serializePack(pack, state, charter),
+      };
+    });
+  }
+
   return {
     id: instance.id,
     node: serializedNode,
     state: instance.state,
     children,
-    ...(instance.packStates ? { packStates: instance.packStates } : {}),
+    ...(packInstances && packInstances.length > 0 ? { packInstances } : {}),
     ...(instance.executorConfig ? { executorConfig: instance.executorConfig } : {}),
     ...(instance.suspended ? {
       suspended: {

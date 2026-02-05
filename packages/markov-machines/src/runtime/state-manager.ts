@@ -1,6 +1,6 @@
 import type { z } from "zod";
-import type { StateUpdateResult } from "../types/state.js";
-import { shallowMerge } from "../types/state.js";
+import type { StateUpdateResult } from "../types/state";
+import { shallowMerge } from "../types/state";
 
 /**
  * Update state with a partial patch.

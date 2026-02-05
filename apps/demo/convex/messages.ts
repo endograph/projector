@@ -34,14 +34,53 @@ export const add = mutation({
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
     turnId: v.optional(v.id("machineTurns")),
+    mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),
+    idempotencyKey: v.optional(v.string()),
+    streamState: v.optional(v.union(v.literal("streaming"), v.literal("complete"), v.literal("error"))),
+    streamSeq: v.optional(v.number()),
   },
-  handler: async (ctx, { sessionId, role, content, turnId }) => {
+  handler: async (ctx, { sessionId, role, content, turnId, mode, idempotencyKey, streamState, streamSeq }) => {
+    // If an idempotencyKey is provided, upsert by (sessionId, idempotencyKey).
+    // This is used for streaming assistant messages:
+    // - Insert an envelope immediately (content may be empty)
+    // - Patch the same message when final content is available
+    if (idempotencyKey) {
+      const existing = await ctx.db
+        .query("messages")
+        .withIndex("by_session_idempotency_key", (q) =>
+          q.eq("sessionId", sessionId).eq("idempotencyKey", idempotencyKey)
+        )
+        .first();
+
+      if (existing) {
+        // Prevent stale updates from overwriting newer ones (e.g., envelope arriving after final).
+        const existingSeq = existing.streamSeq ?? -1;
+        const incomingSeq = streamSeq ?? -1;
+        if (incomingSeq < existingSeq) {
+          return existing._id;
+        }
+
+        await ctx.db.patch(existing._id, {
+          content,
+          ...(turnId !== undefined ? { turnId } : {}),
+          ...(mode !== undefined ? { mode } : {}),
+          ...(streamState !== undefined ? { streamState } : {}),
+          ...(streamSeq !== undefined ? { streamSeq } : {}),
+        });
+        return existing._id;
+      }
+    }
+
     const messageId = await ctx.db.insert("messages", {
       sessionId,
       role,
       content,
       turnId,
       createdAt: Date.now(),
+      ...(mode !== undefined ? { mode } : {}),
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      ...(streamState !== undefined ? { streamState } : {}),
+      ...(streamSeq !== undefined ? { streamSeq } : {}),
     });
 
     // Add to messageIndex for the current branch

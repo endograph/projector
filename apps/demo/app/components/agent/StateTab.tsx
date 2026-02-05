@@ -19,6 +19,11 @@ function flattenInstances(instance: DisplayInstance): DisplayInstance[] {
   return result;
 }
 
+// Get packs from root instance (packs are stored at root level only)
+function getPacks(instance: DisplayInstance) {
+  return instance.packs || [];
+}
+
 function getActiveInstance(instance: DisplayInstance): DisplayInstance {
   if (!instance.children || instance.children.length === 0) {
     return instance;
@@ -44,7 +49,7 @@ export function StateTab({ instance }: StateTabProps) {
   const allInstances = flattenInstances(displayInstance);
   const activeInstance = getActiveInstance(displayInstance);
   const packStates = displayInstance.packStates || {};
-  const packs = displayInstance.node.packs || [];
+  const packs = getPacks(displayInstance);
 
   return (
     <div className="space-y-4">

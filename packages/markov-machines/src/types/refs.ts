@@ -37,6 +37,25 @@ export interface SerialTransition {
 }
 
 /**
+ * Serializable pack definition.
+ * Used for inline pack definitions when a pack has been edited.
+ * Tools/commands are stored as refs and resolved from charter at deserialization.
+ */
+export interface SerialPack {
+  name: string;
+  description: string;
+  /** Static instructions string (dynamic functions are resolved at serialization time) */
+  instructions?: string;
+  validator: JSONSchema;
+  /** Tools as refs - resolved from charter at deserialization */
+  tools?: Record<string, Ref>;
+  /** Commands as refs - resolved from charter at deserialization */
+  commands?: Record<string, Ref>;
+  /** Optional initial state */
+  initialState?: unknown;
+}
+
+/**
  * Type guard for Ref
  */
 export function isRef(value: unknown): value is Ref {
@@ -70,5 +89,19 @@ export function isSerialTransition(value: unknown): value is SerialTransition {
     value !== null &&
     "type" in value &&
     (value as SerialTransition).type === "serial"
+  );
+}
+
+/**
+ * Type guard for SerialPack
+ */
+export function isSerialPack(value: unknown): value is SerialPack {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "name" in value &&
+    "description" in value &&
+    "validator" in value &&
+    !("ref" in value) // Distinguish from Ref
   );
 }

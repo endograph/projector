@@ -15,13 +15,14 @@ type SerializedCommandInfo = Omit<CommandMeta, "inputSchema"> & {
 };
 
 interface CommandsTabProps {
-  commands: SerializedCommandInfo[];
+  nodeCommands: SerializedCommandInfo[];
+  packCommands: SerializedCommandInfo[];
 }
 
-export function CommandsTab({ commands }: CommandsTabProps) {
+export function CommandsTab({ nodeCommands, packCommands }: CommandsTabProps) {
   const liveClient = useAtomValue(liveClientAtom);
 
-  if (commands.length === 0) {
+  if (nodeCommands.length === 0 && packCommands.length === 0) {
     return (
       <div className="text-terminal-green-dimmer italic">
         No commands available on the current node
@@ -39,9 +40,21 @@ export function CommandsTab({ commands }: CommandsTabProps) {
 
   return (
     <div className="space-y-4">
-      {commands.map((cmd) => (
+      {nodeCommands.map((cmd) => (
         <CommandCard key={cmd.name} command={cmd} liveClient={liveClient} />
       ))}
+      {packCommands.length > 0 && (
+        <>
+          <div className="flex items-center gap-2 text-terminal-green-dimmer text-xs font-mono">
+            <span className="flex-1 border-t border-terminal-green-dimmer" />
+            pack commands
+            <span className="flex-1 border-t border-terminal-green-dimmer" />
+          </div>
+          {packCommands.map((cmd) => (
+            <CommandCard key={cmd.name} command={cmd} liveClient={liveClient} />
+          ))}
+        </>
+      )}
     </div>
   );
 }

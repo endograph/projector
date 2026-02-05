@@ -130,6 +130,59 @@ function getColorName(hue: number, saturation: number): string {
   return "unknown";
 }
 
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  s /= 100;
+  l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+
+  if (h < 60)       { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+
+  return [
+    Math.round((r + m) * 255),
+    Math.round((g + m) * 255),
+    Math.round((b + m) * 255),
+  ];
+}
+
+function relativeLuminance(r: number, g: number, b: number): number {
+  const [rs, gs, bs] = [r / 255, g / 255, b / 255].map(c =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+  );
+  return 0.2126 * rs! + 0.7152 * gs! + 0.0722 * bs!;
+}
+
+const MIN_CONTRAST_RATIO = 4;
+
+function contrastAgainstBlack(h: number, s: number, l: number = 50): number {
+  const [r, g, b] = hslToRgb(h, s, l);
+  const lum = relativeLuminance(r, g, b);
+  return (lum + 0.05) / 0.05;
+}
+
+function randomContrastColor(saturation: number = 100): { hue: number; saturation: number } {
+  for (let i = 0; i < 50; i++) {
+    const hue = Math.floor(Math.random() * 360);
+    if (contrastAgainstBlack(hue, saturation) >= MIN_CONTRAST_RATIO) {
+      return { hue, saturation };
+    }
+  }
+  // Fallback: pick a random hue and reduce saturation until contrast passes
+  const hue = Math.floor(Math.random() * 360);
+  let sat = saturation;
+  while (sat > 0 && contrastAgainstBlack(hue, sat) < MIN_CONTRAST_RATIO) {
+    sat -= 5;
+  }
+  return { hue, saturation: Math.max(sat, 50) };
+}
+
 function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
   r /= 255;
   g /= 255;
@@ -279,19 +332,20 @@ export const themePack = createPack({
       inputSchema: z.object({}),
       execute: (_input, ctx) => {
         const { animated, gradient } = ctx.state;
-        console.log('toggle theme', animated, gradient)
 
         if (!animated && !gradient) {
-          // static → gradient
-          ctx.updateState({ animated: false, gradient: true });
+          // static → gradient: pick random high-contrast color
+          const color = randomContrastColor();
+          ctx.updateState({ ...color, animated: false, gradient: true });
         } else if (!animated && gradient) {
-          // gradient → flux
-          ctx.updateState({ animated: true, gradient: true });
+          // gradient → flux: pick another random high-contrast color
+          const color = randomContrastColor();
+          ctx.updateState({ ...color, animated: true, gradient: true });
         } else {
           // flux → static
           ctx.updateState({ animated: false, gradient: false });
         }
-        return commandResult(ctx.state)
+        return commandResult(ctx.state);
       },
     },
   },

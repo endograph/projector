@@ -18,5 +18,8 @@
     "@types/bun": "latest",
     "@typescript/native-preview": "latest"
   },
-  "peerDependencies": {}
+  "peerDependencies": {},
+  "patchedDependencies": {
+    "@livekit/agents-plugin-openai@1.0.40": "patches/@livekit%2Fagents-plugin-openai@1.0.40.patch"
+  }
 }

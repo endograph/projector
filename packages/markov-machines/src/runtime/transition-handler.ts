@@ -1,15 +1,15 @@
-import type { Instance, SuspendInfo } from "../types/instance.js";
-import type { Node } from "../types/node.js";
-import type { MachineMessage } from "../types/messages.js";
-import type { TransitionResult } from "../types/transitions.js";
+import type { Instance, SuspendInfo } from "../types/instance";
+import type { Node } from "../types/node";
+import type { MachineMessage } from "../types/messages";
+import type { TransitionResult } from "../types/transitions";
 import {
   isTransitionToResult,
   isSpawnResult,
   isCedeResult,
   isSuspendResult,
-} from "../types/transitions.js";
-import { createInstance, createSuspendInfo } from "../types/instance.js";
-import type { StandardNodeConfig } from "../executor/types.js";
+} from "../types/transitions";
+import { createInstance, createSuspendInfo } from "../types/instance";
+import type { StandardNodeConfig } from "../executor/types";
 
 export interface TransitionOutcome {
   node: Node<any, unknown>;

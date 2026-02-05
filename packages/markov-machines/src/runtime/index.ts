@@ -1,15 +1,15 @@
-export { updateState } from "./state-manager.js";
-export { executeTool } from "./tool-executor.js";
-export type { ToolExecutionResult } from "./tool-executor.js";
+export { updateState } from "./state-manager";
+export { executeTool } from "./tool-executor";
+export type { ToolExecutionResult } from "./tool-executor";
 export {
   executeTransition,
   deserializeNode,
   resolveNodeRef,
-} from "./transition-executor.js";
+} from "./transition-executor";
 export {
   resolveTool,
   resolveTransition,
-} from "./ref-resolver.js";
+} from "./ref-resolver";
 export {
   buildSystemPrompt,
   buildDefaultSystemPrompt,
@@ -18,24 +18,24 @@ export {
   buildAncestorContext,
   buildPacksSection,
   buildStepWarning,
-} from "./system-prompt.js";
-export type { SystemPromptOptions } from "./system-prompt.js";
+} from "./system-prompt";
+export type { SystemPromptOptions } from "./system-prompt";
 export {
   processToolCalls,
-} from "./tool-call-processor.js";
+} from "./tool-call-processor";
 export type {
   ToolCallContext,
   ToolCallResult,
-} from "./tool-call-processor.js";
-export type { ToolCall } from "./tool-call-processor.js";
+} from "./tool-call-processor";
+export type { ToolCall } from "./tool-call-processor";
 export {
   handleTransitionResult,
-} from "./transition-handler.js";
-export type { TransitionOutcome } from "./transition-handler.js";
+} from "./transition-handler";
+export type { TransitionOutcome } from "./transition-handler";
 export {
   runToolPipeline,
-} from "./tool-pipeline.js";
+} from "./tool-pipeline";
 export type {
   ToolPipelineContext,
   ToolPipelineResult,
-} from "./tool-pipeline.js";
+} from "./tool-pipeline";

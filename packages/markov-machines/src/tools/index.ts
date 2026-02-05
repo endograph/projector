@@ -1,1 +1,1 @@
-export { generateToolDefinitions } from "./tool-generator.js";
+export { generateToolDefinitions } from "./tool-generator";

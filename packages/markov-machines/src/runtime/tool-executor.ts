@@ -1,6 +1,6 @@
-import type { AnyToolDefinition, ToolContext } from "../types/tools.js";
-import type { MachineMessage } from "../types/messages.js";
-import { isToolReply } from "../types/tools.js";
+import type { AnyToolDefinition, ToolContext } from "../types/tools";
+import type { MachineMessage } from "../types/messages";
+import { isToolReply } from "../types/tools";
 
 /**
  * Result of executing a tool.

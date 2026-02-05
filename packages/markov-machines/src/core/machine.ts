@@ -1,9 +1,10 @@
 import { v4 as uuid } from "uuid";
-import type { Charter } from "../types/charter.js";
-import type { Machine, MachineConfig } from "../types/machine.js";
-import type { Instance } from "../types/instance.js";
-import type { Pack } from "../types/pack.js";
-import type { MachineMessage } from "../types/messages.js";
+import type { Charter } from "../types/charter";
+import type { Machine, MachineConfig } from "../types/machine";
+import type { Instance } from "../types/instance";
+import type { Pack } from "../types/pack";
+import type { MachineMessage } from "../types/messages";
+import { isEphemeralMessage } from "../types/messages";
 
 /**
  * Validate a node instance tree recursively.
@@ -47,6 +48,30 @@ function initializePackStates(charter: Charter<any>): Record<string, unknown> {
   return packStates;
 }
 
+function ensurePackStatesForCharter(
+  charter: Charter<any>,
+  existing: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (charter.packs.length === 0) return existing;
+
+  const base = existing ?? {};
+  let changed = existing === undefined;
+  let packStates: Record<string, unknown> = changed ? { ...base } : base;
+
+  for (const pack of charter.packs) {
+    if (!(pack.name in packStates)) {
+      if (!changed) {
+        // Copy-on-write
+        packStates = { ...base };
+        changed = true;
+      }
+      packStates[pack.name] = pack.initialState;
+    }
+  }
+
+  return changed ? packStates : existing;
+}
+
 /**
  * Get pack state, lazily initializing if not present.
  * Mutates packStates by adding the initialized state.
@@ -72,10 +97,12 @@ export function createMachine<AppMessage = unknown>(
 ): Machine<AppMessage> {
   const { instance: inputInstance, history = [], onMessageEnqueue } = config;
 
-  // Initialize pack states on root instance if not present (immutably)
+  const packStates = ensurePackStatesForCharter(charter, inputInstance.packStates);
+
+  // Ensure pack states exist and include all charter packs (immutably)
   const instance =
-    !inputInstance.packStates && charter.packs.length > 0
-      ? { ...inputInstance, packStates: initializePackStates(charter) }
+    packStates && packStates !== inputInstance.packStates
+      ? { ...inputInstance, packStates }
       : inputInstance;
 
   // Validate the entire instance tree (may return new instance with generated IDs)
@@ -96,7 +123,7 @@ export function createMachine<AppMessage = unknown>(
   };
 
   const waitForQueue = (): Promise<void> => {
-    if (queue.length > 0) {
+    if (queue.some((m) => !isEphemeralMessage(m))) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => {
@@ -110,14 +137,26 @@ export function createMachine<AppMessage = unknown>(
     history,
     queue,
     enqueue: (messages: MachineMessage<AppMessage>[]) => {
-      queue.push(...messages);
-      // Call onMessageEnqueue for each message
-      if (onMessageEnqueue) {
-        for (const message of messages) {
+      for (const message of messages) {
+        const messageId = message.metadata?.messageId;
+        if (messageId) {
+          const existingIndex = queue.findIndex((m) => m.metadata?.messageId === messageId);
+          if (existingIndex !== -1) {
+            queue[existingIndex] = message;
+          } else {
+            queue.push(message);
+          }
+        } else {
+          queue.push(message);
+        }
+
+        if (onMessageEnqueue && !isEphemeralMessage(message)) {
           onMessageEnqueue(message);
         }
       }
-      notifyQueue();
+      if (messages.some((m) => !isEphemeralMessage(m))) {
+        notifyQueue();
+      }
     },
     waitForQueue,
     notifyQueue,

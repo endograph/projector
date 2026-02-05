@@ -150,11 +150,21 @@ function StepsView({ sessionId }: { sessionId: Id<"sessions"> }) {
               {step.done && <span className="text-terminal-yellow">[done]</span>}
               <span className="text-terminal-green-dimmer">[{step.messages.length} msgs]</span>
             </div>
-            {step.response && (
-              <div className="text-terminal-green-dimmer text-xs mt-1 truncate ml-6">
-                {step.response.slice(0, 60)}...
-              </div>
-            )}
+            {(() => {
+              const previews = getMessagePreviews(step.messages as APIMessage[]);
+              return previews.length > 0 ? (
+                <div className="mt-1 ml-6 space-y-0.5">
+                  {previews.map((p, i) => (
+                    <div key={i} className="text-xs truncate">
+                      <span className={p.role === "user" ? "text-terminal-cyan" : "text-terminal-green-dim"}>
+                        {p.role === "user" ? "> " : "  "}
+                      </span>
+                      <span className="text-terminal-green-dimmer">{p.preview}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null;
+            })()}
             {isExpanded && (
               <pre
                 onClick={(e) => e.stopPropagation()}
@@ -240,6 +250,21 @@ function TurnsView({ sessionId }: { sessionId: Id<"sessions"> }) {
                 </button>
               )}
             </div>
+            {(() => {
+              const previews = getMessagePreviews(turn.messages as APIMessage[]);
+              return previews.length > 0 ? (
+                <div className="mt-1 ml-6 space-y-0.5">
+                  {previews.map((p, i) => (
+                    <div key={i} className="text-xs truncate">
+                      <span className={p.role === "user" ? "text-terminal-cyan" : "text-terminal-green-dim"}>
+                        {p.role === "user" ? "> " : "  "}
+                      </span>
+                      <span className="text-terminal-green-dimmer">{p.preview}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null;
+            })()}
             {isExpanded && (
               <pre
                 onClick={(e) => e.stopPropagation()}
@@ -268,6 +293,39 @@ type APIMessage = Omit<ConversationMessage, "role" | "items"> & {
   role: "user" | "assistant";
   items: string | ContentBlock[];
 };
+
+/** Extract single-line previews for all displayable (text/image) items in a message list. */
+function getMessagePreviews(
+  messages: APIMessage[],
+  maxLen = 80
+): { role: string; preview: string }[] {
+  const previews: { role: string; preview: string }[] = [];
+  for (const msg of messages) {
+    const blocks: ContentBlock[] =
+      typeof msg.items === "string"
+        ? [{ type: "text", text: msg.items }]
+        : Array.isArray(msg.items)
+          ? msg.items
+          : [];
+    for (const block of blocks) {
+      if (block.type === "text") {
+        const text = (block as TextBlock).text.replace(/\n/g, " ").trim();
+        if (text) {
+          previews.push({
+            role: msg.role,
+            preview: text.length > maxLen ? text.slice(0, maxLen) + "..." : text,
+          });
+        }
+      } else if (block.type === "image") {
+        previews.push({
+          role: msg.role,
+          preview: "[image]",
+        });
+      }
+    }
+  }
+  return previews;
+}
 
 function ContentBlockView({ block }: { block: ContentBlock }) {
   if (block.type === "text") {

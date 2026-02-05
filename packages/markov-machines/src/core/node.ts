@@ -5,7 +5,7 @@ import type {
   WorkerNode,
   WorkerNodeConfig,
   OutputConfig,
-} from "../types/node.js";
+} from "../types/node";
 
 /**
  * Validate tool and command names match their keys.

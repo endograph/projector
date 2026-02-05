@@ -1,22 +1,22 @@
 import { v4 as uuid } from "uuid";
-import type { Charter } from "../types/charter.js";
-import { fromSafeJsonSchema } from "../helpers/json-schema.js";
-import type { Node } from "../types/node.js";
+import type { Charter } from "../types/charter";
+import { fromSafeJsonSchema } from "../helpers/json-schema";
+import type { Node } from "../types/node";
 import type {
   Transition,
   TransitionContext,
   TransitionResult,
-} from "../types/transitions.js";
-import { transitionTo } from "../types/transitions.js";
-import type { SerialNode, Ref } from "../types/refs.js";
+} from "../types/transitions";
+import { transitionTo } from "../types/transitions";
+import type { SerialNode, Ref } from "../types/refs";
 import {
   isCodeTransition,
   isGeneralTransition,
-} from "../types/transitions.js";
-import { isRef, isSerialTransition } from "../types/refs.js";
-import { resolveTransitionRef } from "./ref-resolver.js";
-import type { AnyToolDefinition } from "../types/tools.js";
-import type { AnyPackToolDefinition } from "../types/pack.js";
+} from "../types/transitions";
+import { isRef, isSerialTransition } from "../types/refs";
+import { resolveTransitionRef } from "./ref-resolver";
+import type { AnyToolDefinition } from "../types/tools";
+import type { AnyPackToolDefinition } from "../types/pack";
 
 /**
  * Resolve a node tool ref (flat or dotted).

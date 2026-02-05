@@ -1,10 +1,10 @@
 import type { z } from "zod";
-import type { Node } from "../types/node.js";
+import type { Node } from "../types/node";
 import type {
   CodeTransition,
   TransitionContext,
   TransitionResult,
-} from "../types/transitions.js";
+} from "../types/transitions";
 
 /**
  * Configuration for creating a transition.

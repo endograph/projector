@@ -2,17 +2,19 @@
 export { z } from 'zod'
 
 // Core functions
-export { createCharter } from "./src/core/charter.js";
-export { createNode, createWorkerNode } from "./src/core/node.js";
-export { createMachine } from "./src/core/machine.js";
-export { createTransition } from "./src/core/transition.js";
-export { cede, spawn, suspend } from "./src/helpers/cede-spawn.js";
-export type { TransitionConfig } from "./src/core/transition.js";
-export { runMachine, runMachineToCompletion, drainQueue, applyInstanceMessages } from "./src/core/run.js";
-export type { LeafResult, DrainResult } from "./src/core/run.js";
-export { createPack } from "./src/core/pack.js";
-export { getAvailableCommands, runCommand, createCommand } from "./src/core/commands.js";
-export type { CommandConfig } from "./src/core/commands.js";
+export { createCharter } from "./src/core/charter";
+export { createNode, createWorkerNode } from "./src/core/node";
+export { createMachine } from "./src/core/machine";
+export { createTransition } from "./src/core/transition";
+export { cede, spawn, suspend } from "./src/helpers/cede-spawn";
+export type { TransitionConfig } from "./src/core/transition";
+export { runMachine, runMachineToCompletion, drainQueue, applyInstanceMessages } from "./src/core/run";
+export type { LeafResult, DrainResult } from "./src/core/run";
+export { createPack } from "./src/core/pack";
+export { getAvailableCommands, runCommand, createCommand } from "./src/core/commands";
+export type { CommandConfig } from "./src/core/commands";
+export { createMachineContract, assertMachineContract } from "./src/core/contract";
+export { findCommand } from "./src/core/client-helpers";
 
 // Client
 export {
@@ -22,10 +24,10 @@ export {
   hydrateClientNode,
   hydrateClientInstance,
   hydrateClientPack,
-} from "./src/core/client.js";
+} from "./src/core/client";
 
 // Executors
-export { StandardExecutor, createStandardExecutor } from "./src/executor/standard.js";
+export { StandardExecutor, createStandardExecutor } from "./src/executor/standard";
 export type {
   Executor,
   StandardExecutorConfig,
@@ -36,22 +38,26 @@ export type {
   YieldReason,
   SuspendedInstanceInfo,
   EnqueueFn,
-} from "./src/executor/types.js";
+} from "./src/executor/types";
 
 // Tools
-export { generateToolDefinitions } from "./src/tools/index.js";
+export { generateToolDefinitions } from "./src/tools/index";
 
 // Serialization
-export { serializeNode, serializeInstance, serializeMachine } from "./src/serialization/serialize.js";
-export type { SerializeNodeOptions } from "./src/serialization/serialize.js";
-export { deserializeMachine, deserializeInstance, deserializeNode } from "./src/serialization/deserialize.js";
-export { serializeInstanceForDisplay } from "./src/serialization/serialize-display.js";
+export { serializeNode, serializeInstance, serializeMachine } from "./src/serialization/serialize";
+export type { SerializeNodeOptions } from "./src/serialization/serialize";
+export { deserializeMachine, deserializeInstance, deserializeNode } from "./src/serialization/deserialize";
+export {
+  serializeInstanceForDisplay,
+  serializeNodeForDisplay,
+  serializePackForDisplay,
+} from "./src/serialization/serialize-display";
 
 // JSON Schema helpers
-export { escapeSchemaKeys, restoreSchemaKeys, toSafeJsonSchema, fromSafeJsonSchema } from "./src/helpers/json-schema.js";
+export { escapeSchemaKeys, restoreSchemaKeys, toSafeJsonSchema, fromSafeJsonSchema } from "./src/helpers/json-schema";
 
 // Ref resolution
-export { resolveNodeRef } from "./src/runtime/transition-executor.js";
+export { resolveNodeRef } from "./src/runtime/transition-executor";
 
 // Types
 export type {
@@ -104,15 +110,22 @@ export type {
   // Messages
   MachineMessage,
   ConversationMessage,
+  EphemeralMessage,
   InstanceMessage,
   MessageMetadata,
   MessageSource,
   MachineItem,
   TextBlock,
+  ImageDetail,
+  ImageBlock,
   ToolUseBlock,
   ToolResultBlock,
   ThinkingBlock,
   OutputBlock,
+  // Streaming
+  MessageStreamEvent,
+  MessageStreamDelta,
+  MessageStreamError,
   // Instance payloads
   InstancePayload,
   StateUpdatePayload,
@@ -153,7 +166,13 @@ export type {
   DisplayInstance,
   DisplayNode,
   DisplayPack,
-} from "./src/types/index.js";
+  // Contract
+  CommandHandle,
+  ContractCommandEntry,
+  MachineContract,
+  MachineContractConfig,
+  BuildCommands,
+} from "./src/types/index";
 
 // Type guards and helpers
 export {
@@ -193,7 +212,7 @@ export {
   isCommand,
   isResume,
   isResumeResult,
-} from "./src/types/index.js";
+} from "./src/types/index";
 
 // Message helpers
 export {
@@ -202,21 +221,23 @@ export {
   commandMessage,
   systemMessage,
   instanceMessage,
+  ephemeralMessage,
   toolResult,
   getMessageText,
   isConversationMessage,
+  isEphemeralMessage,
   isInstanceMessage,
   isModelMessage,
-} from "./src/types/messages.js";
+} from "./src/types/messages";
 
 // System prompt helpers
-export type { SystemPromptOptions } from './src/runtime/system-prompt.js';
-export { buildSystemPrompt, buildDefaultSystemPrompt } from './src/runtime/system-prompt.js';
+export type { SystemPromptOptions } from './src/runtime/system-prompt';
+export { buildSystemPrompt, buildDefaultSystemPrompt } from './src/runtime/system-prompt';
 
 // Tool pipeline (for custom executors like LiveKitExecutor)
-export { runToolPipeline } from './src/runtime/tool-pipeline.js';
-export type { ToolPipelineContext, ToolPipelineResult } from './src/runtime/tool-pipeline.js';
-export type { ToolCall } from './src/runtime/tool-call-processor.js';
+export { runToolPipeline } from './src/runtime/tool-pipeline';
+export type { ToolPipelineContext, ToolPipelineResult } from './src/runtime/tool-pipeline';
+export type { ToolCall } from './src/runtime/tool-call-processor';
 
 // State helpers
-export { shallowMerge } from "./src/types/state.js";
+export { shallowMerge } from "./src/types/state";

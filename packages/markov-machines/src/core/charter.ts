@@ -1,4 +1,4 @@
-import type { Charter, CharterConfig } from "../types/charter.js";
+import type { Charter, CharterConfig } from "../types/charter";
 
 /**
  * Create a new charter instance.

@@ -1,37 +1,39 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { v4 as uuid } from "uuid";
 import type {
   MessageParam,
   ContentBlock as AnthropicContentBlock,
+  Message as AnthropicMessage,
 } from "@anthropic-ai/sdk/resources/messages";
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
-import type { Node } from "../types/node.js";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
+import type { Node } from "../types/node";
 import type {
   MachineMessage,
   MachineItem,
   OutputBlock,
   ConversationMessage,
   MessageSource,
-} from "../types/messages.js";
+} from "../types/messages";
 import {
   userMessage,
   assistantMessage,
   instanceMessage,
   isModelMessage,
-} from "../types/messages.js";
-import { generateToolDefinitions } from "../tools/tool-generator.js";
-import { buildSystemPrompt } from "../runtime/system-prompt.js";
-import { runToolPipeline } from "../runtime/tool-pipeline.js";
-import { getOrInitPackState } from "../core/machine.js";
-import { ZOD_JSON_SCHEMA_TARGET_OPENAPI_3 } from "../helpers/json-schema.js";
+} from "../types/messages";
+import { generateToolDefinitions } from "../tools/tool-generator";
+import { buildSystemPrompt } from "../runtime/system-prompt";
+import { runToolPipeline } from "../runtime/tool-pipeline";
+import { getOrInitPackState } from "../core/machine";
+import { ZOD_JSON_SCHEMA_TARGET_OPENAPI_3 } from "../helpers/json-schema";
 import type {
   Executor,
   StandardExecutorConfig,
   StandardNodeConfig,
   RunOptions,
   RunResult,
-} from "./types.js";
+} from "./types";
 
 /**
  * Filter out tool_use blocks that don't have corresponding tool_result blocks.
@@ -177,6 +179,8 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
     );
 
     // Build system prompt (delegated)
+    // Use deserialized packs from root instance (with correct instructions) or fall back to node.packs
+    const packs = rootInstance.packs ?? currentNode.packs;
     const systemPrompt = buildSystemPrompt(
       charter,
       currentNode,
@@ -184,6 +188,7 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
       ancestors,
       packStates,
       options,
+      packs,
     );
 
     // Prepare Anthropic tools
@@ -232,6 +237,36 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
       };
     }
 
+    const streamWhenAvailable = options?.streamWhenAvailable === true;
+    const onMessageStream = options?.onMessageStream;
+    const signal = options?.signal;
+    const emitStream = onMessageStream;
+
+    // When streamWhenAvailable is enabled, we optimistically enqueue a vessel message
+    // before the provider call starts, then enqueue the final message once complete.
+    const messageId = streamWhenAvailable ? uuid() : undefined;
+    let streamSeq = 0;
+    const vesselMsg = streamWhenAvailable
+      ? (assistantMessage<AppMessage>([], {
+        source,
+        messageId,
+        stream: { state: "streaming", seq: streamSeq },
+      }) as ConversationMessage<AppMessage>)
+      : null;
+
+    if (vesselMsg) {
+      enqueue([vesselMsg]);
+      if (emitStream) {
+        emitStream({
+          type: "message_start",
+          messageId: messageId!,
+          seq: streamSeq,
+          source,
+          message: vesselMsg,
+        });
+      }
+    }
+
     // Make ONE API call (use beta endpoint for structured outputs if needed)
     const apiParams = {
       model: effectiveModel,
@@ -242,16 +277,80 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
       tools: anthropicTools,
     };
 
+    const shouldUseStreamingApi = streamWhenAvailable && !!emitStream && !outputFormat;
 
-    const response = outputFormat
-      ? await this.client.beta.messages.create({
-        ...apiParams,
-        // Type cast needed as SDK types may not match API exactly for beta features
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        output_format: outputFormat as any,
-        betas: ["structured-outputs-2025-11-13"],
-      })
-      : await this.client.messages.create(apiParams);
+    let response: AnthropicMessage;
+    try {
+      response = shouldUseStreamingApi
+        ? await (() => {
+          const stream = this.client.messages.stream(apiParams, { signal });
+
+          stream.on("streamEvent", (event, snapshot) => {
+            if (!vesselMsg) return;
+            // Keep vessel message in sync with the stream snapshot for optimistic persistence.
+            vesselMsg.items = this.convertContentBlocks(snapshot.content as AnthropicContentBlock[]);
+
+            if (event.type !== "content_block_delta") return;
+
+            const { delta, index } = event;
+            if (delta.type === "text_delta") {
+              streamSeq += 1;
+              if (vesselMsg.metadata?.stream) vesselMsg.metadata.stream.seq = streamSeq;
+              emitStream!({
+                type: "message_update",
+                messageId: messageId!,
+                seq: streamSeq,
+                source,
+                delta: { kind: "text", contentIndex: index, delta: delta.text },
+              });
+              return;
+            }
+            if (delta.type === "thinking_delta") {
+              streamSeq += 1;
+              if (vesselMsg.metadata?.stream) vesselMsg.metadata.stream.seq = streamSeq;
+              emitStream!({
+                type: "message_update",
+                messageId: messageId!,
+                seq: streamSeq,
+                source,
+                delta: { kind: "thinking", contentIndex: index, delta: delta.thinking },
+              });
+            }
+          });
+
+          return stream.finalMessage();
+        })()
+        : outputFormat
+          ? await this.client.beta.messages.create({
+            ...apiParams,
+            // Type cast needed as SDK types may not match API exactly for beta features
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            output_format: outputFormat as any,
+            betas: ["structured-outputs-2025-11-13"],
+          }) as unknown as AnthropicMessage
+          : await this.client.messages.create(apiParams);
+    } catch (error) {
+      if (vesselMsg) {
+        streamSeq += 1;
+        vesselMsg.metadata = {
+          ...(vesselMsg.metadata ?? {}),
+          stream: { state: "error", seq: streamSeq },
+        };
+        enqueue([vesselMsg]);
+        if (emitStream) {
+          emitStream({
+            type: "message_error",
+            messageId: messageId!,
+            seq: streamSeq,
+            source,
+            error: {
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+      }
+      throw error;
+    }
 
     // Debug: log the response
     if (this.debug) {
@@ -274,9 +373,28 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
       });
     }
 
-    // Enqueue assistant message
-    const assistantMsg = assistantMessage(assistantContent, { source });
-    enqueue([assistantMsg]);
+    // Enqueue assistant message (or finalize vessel when streaming)
+    if (vesselMsg) {
+      streamSeq += 1;
+      vesselMsg.items = assistantContent;
+      vesselMsg.metadata = {
+        ...(vesselMsg.metadata ?? {}),
+        stream: { state: "complete", seq: streamSeq },
+      };
+      enqueue([vesselMsg]);
+      if (emitStream) {
+        emitStream({
+          type: "message_end",
+          messageId: messageId!,
+          seq: streamSeq,
+          source,
+          message: vesselMsg,
+        });
+      }
+    } else {
+      const assistantMsg = assistantMessage(assistantContent, { source });
+      enqueue([assistantMsg]);
+    }
 
     // Determine yield reason and process accordingly
     let yieldReason: "end_turn" | "tool_use" | "max_tokens" | "cede" | "suspend" = "end_turn";
@@ -361,6 +479,18 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
     const content = msg.items.map((block: MachineItem<AppMessage>) => {
       if (block.type === "text") {
         return { type: "text" as const, text: block.text };
+      }
+      if (block.type === "image") {
+        return {
+          type: "image" as const,
+          source: {
+            type: "base64" as const,
+            // Anthropic SDK typing can be restrictive; accept any media type string.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            media_type: block.mimeType as any,
+            data: block.data,
+          },
+        };
       }
       if (block.type === "tool_use") {
         return {

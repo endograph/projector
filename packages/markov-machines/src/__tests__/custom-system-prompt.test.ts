@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { createCharter } from '../core/charter.js'
-import { createNode } from '../core/node.js'
-import { createStandardExecutor } from '../executor/standard.js'
-import { buildSystemPrompt } from '../runtime/system-prompt.js'
-import type { Node } from '../types/node.js'
-import type { Instance } from '../types/instance.js'
+import { createCharter } from '../core/charter'
+import { createNode } from '../core/node'
+import { createStandardExecutor } from '../executor/standard'
+import { buildSystemPrompt } from '../runtime/system-prompt'
+import type { Node } from '../types/node'
+import type { Instance } from '../types/instance'
 import type { Charter } from '../types/charter'
 
 describe('Custom System Prompt Builder', () => {

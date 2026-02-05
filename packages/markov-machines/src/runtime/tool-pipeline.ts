@@ -6,15 +6,15 @@
  * tool calls from external sources (not from their own LLM inference).
  */
 
-import type { Charter } from "../types/charter.js";
-import type { Instance, SuspendInfo } from "../types/instance.js";
-import type { Node } from "../types/node.js";
-import type { MachineMessage, ToolResultBlock, TextBlock, OutputBlock, MessageSource } from "../types/messages.js";
-import type { StandardNodeConfig, EnqueueFn } from "../executor/types.js";
-import { userMessage, assistantMessage, instanceMessage } from "../types/messages.js";
-import { processToolCalls, type ToolCall, type ToolCallContext } from "./tool-call-processor.js";
-import { executeTransition } from "./transition-executor.js";
-import { handleTransitionResult } from "./transition-handler.js";
+import type { Charter } from "../types/charter";
+import type { Instance, SuspendInfo } from "../types/instance";
+import type { Node } from "../types/node";
+import type { MachineMessage, ToolResultBlock, TextBlock, OutputBlock, MessageSource } from "../types/messages";
+import type { StandardNodeConfig, EnqueueFn } from "../executor/types";
+import { userMessage, assistantMessage, instanceMessage } from "../types/messages";
+import { processToolCalls, type ToolCall, type ToolCallContext } from "./tool-call-processor";
+import { executeTransition } from "./transition-executor";
+import { handleTransitionResult } from "./transition-handler";
 
 /**
  * Context for running the tool pipeline.

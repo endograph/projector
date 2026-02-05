@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { CommandValueResult } from "./commands.js";
+import type { CommandValueResult } from "./commands";
 
 /**
  * Context provided to pack tool and command execute functions.
@@ -73,6 +73,11 @@ export interface Pack<S = unknown> {
   name: string;
   /** Description shown in system prompt */
   description: string;
+  /**
+   * Optional instructions that are included in the system prompt when this pack is active.
+   * Can be static text or derived from the current pack state.
+   */
+  instructions?: string | ((state: S) => string);
   /** Zod schema for pack state validation */
   validator: z.ZodType<S>;
   /** Pack tools (called by LLM) */
@@ -89,6 +94,7 @@ export interface Pack<S = unknown> {
 export interface PackConfig<S = unknown> {
   name: string;
   description: string;
+  instructions?: string | ((state: S) => string);
   validator: z.ZodType<S>;
   tools?: Record<string, AnyPackToolDefinition<S>>;
   commands?: Record<string, AnyPackCommandDefinition<S>>;

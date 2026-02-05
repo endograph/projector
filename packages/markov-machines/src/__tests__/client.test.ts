@@ -1,15 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { createNode } from "../core/node.js";
-import { createInstance } from "../types/instance.js";
+import { createNode } from "../core/node";
+import { createInstance } from "../types/instance";
 import {
   createDryClientNode,
   createDryClientInstance,
   hydrateClientNode,
   hydrateClientInstance,
-} from "../core/client.js";
-import { isCommand, commandResult } from "../types/commands.js";
-import { createPack } from "../core/pack.js";
+} from "../core/client";
+import { isCommand, commandResult } from "../types/commands";
+import { createPack } from "../core/pack";
 
 // Simple state schema for testing
 const todoStateValidator = z.object({

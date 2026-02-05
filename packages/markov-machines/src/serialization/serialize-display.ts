@@ -1,12 +1,12 @@
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
 import type {
   DisplayCommand,
   DisplayInstance,
   DisplayNode,
   DisplayPack,
-} from "../types/display.js";
-import { toSafeJsonSchema } from "../helpers/json-schema.js";
+} from "../types/display";
+import { toSafeJsonSchema } from "../helpers/json-schema";
 
 /**
  * Custom serialization for display purposes.
@@ -84,7 +84,7 @@ function serializeCommandsForDisplay(
   return result;
 }
 
-function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): DisplayNode {
+export function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): DisplayNode {
   const name = getNodeName(node, charter);
 
   let validator: Record<string, unknown> = {};
@@ -117,8 +117,14 @@ function serializeNodeForDisplay(node: Instance["node"], charter?: Charter): Dis
   };
 }
 
-function serializePackForDisplay(
-  pack: { name: string; description: string; validator: { _def?: unknown }; commands?: Record<string, { name: string; description: string; inputSchema: { _def?: unknown } }> },
+export function serializePackForDisplay(
+  pack: {
+    name: string;
+    description: string;
+    instructions?: string | ((state: unknown) => string);
+    validator: { _def?: unknown };
+    commands?: Record<string, { name: string; description: string; inputSchema: { _def?: unknown } }>;
+  },
   state: unknown,
 ): DisplayPack {
   let validator: Record<string, unknown> = {};
@@ -130,9 +136,27 @@ function serializePackForDisplay(
 
   const commands = serializeCommandsForDisplay(pack.commands as any);
 
+  // Resolve instructions (may be static string or function of state)
+  // The pack already has the correct instructions (from charter or edited by user)
+  let instructions: string | undefined;
+  let instructionsDynamic = false;
+
+  if (typeof pack.instructions === "function") {
+    instructionsDynamic = true;
+    try {
+      instructions = pack.instructions(state);
+    } catch {
+      instructions = "(error resolving dynamic instructions)";
+    }
+  } else {
+    instructions = pack.instructions;
+  }
+
   return {
     name: pack.name,
     description: pack.description,
+    ...(instructions !== undefined ? { instructions } : {}),
+    ...(instructionsDynamic ? { instructionsDynamic } : {}),
     state,
     validator,
     commands,
@@ -151,11 +175,13 @@ export function serializeInstanceForDisplay(
   }
 
   // Build packs array with full info including current state
+  // Use instance.packs (deserialized with correct instructions) or fall back to node.packs
   let packs: DisplayPack[] | undefined;
-  const nodePacks = instance.node.packs ?? [];
+  const instancePacks = instance.packs ?? instance.node.packs ?? [];
   const packStates = instance.packStates ?? {};
-  if (nodePacks.length > 0) {
-    packs = nodePacks.map((pack) => {
+  // Only serialize full packs at root instance (where packStates is stored)
+  if (instancePacks.length > 0 && instance.packStates) {
+    packs = instancePacks.map((pack) => {
       const state = packStates[pack.name] ?? pack.initialState ?? {};
       return serializePackForDisplay(pack as any, state);
     });

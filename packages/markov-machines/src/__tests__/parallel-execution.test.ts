@@ -1,25 +1,25 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-import { createCharter } from "../core/charter.js";
-import { createNode, createWorkerNode } from "../core/node.js";
+import { createCharter } from "../core/charter";
+import { createNode, createWorkerNode } from "../core/node";
 import {
   createInstance,
   getActiveLeaves,
   isWorkerInstance,
-} from "../types/instance.js";
-import { createMachine } from "../core/machine.js";
-import { runMachine, runMachineToCompletion } from "../core/run.js";
+} from "../types/instance";
+import { createMachine } from "../core/machine";
+import { runMachine, runMachineToCompletion } from "../core/run";
 import type {
   Executor,
   RunResult,
   RunOptions,
   MachineStep,
   YieldReason,
-} from "../executor/types.js";
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
-import type { MachineMessage } from "../types/messages.js";
-import { userMessage, assistantMessage, instanceMessage } from "../types/messages.js";
+} from "../executor/types";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
+import type { MachineMessage } from "../types/messages";
+import { userMessage, assistantMessage, instanceMessage } from "../types/messages";
 
 /**
  * Helper to collect all steps from the async generator.
@@ -596,7 +596,7 @@ describe("message attribution", () => {
 
     // First step should contain history from both leaves (user input is in machine.history)
     const firstStep = steps[0]!;
-    expect(firstStep.history.length).toBe(2); // 2 model outputs (user input now in machine.history)
+    expect(firstStep.history.length).toBe(4); // 1 user input + 2 assistant messages + 1 cede instance message
 
     // All messages should have source.instanceId metadata
     for (const msg of firstStep.history) {

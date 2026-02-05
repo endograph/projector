@@ -1,7 +1,7 @@
-import type { Command, Resume } from "./commands.js";
-import type { Node } from "./node.js";
-import type { SuspendInfo } from "./instance.js";
-import type { StandardNodeConfig } from "../executor/types.js";
+import type { Command, Resume } from "./commands";
+import type { Node } from "./node";
+import type { SuspendInfo } from "./instance";
+import type { StandardNodeConfig } from "../executor/types";
 
 /**
  * Text content block (simplified for storage).
@@ -9,6 +9,19 @@ import type { StandardNodeConfig } from "../executor/types.js";
 export interface TextBlock {
   type: "text";
   text: string;
+}
+
+export type ImageDetail = "auto" | "low" | "high";
+
+/**
+ * Image content block (simplified for storage).
+ * Data is base64 bytes (no data: prefix).
+ */
+export interface ImageBlock {
+  type: "image";
+  mimeType: "image/jpeg" | "image/png" | (string & {});
+  data: string;
+  detail?: ImageDetail;
 }
 
 /**
@@ -130,6 +143,7 @@ export type InstancePayload<M = unknown> =
  */
 export type MachineItem<M = unknown> =
   | TextBlock
+  | ImageBlock
   | ToolUseBlock
   | ThinkingBlock
   | ToolResultBlock
@@ -167,12 +181,27 @@ export interface MessageSource {
 export interface MessageMetadata {
   /** Source attribution for this message */
   source?: MessageSource;
+  /** Stable identifier for this message across streaming updates */
+  messageId?: string;
+  /** Streaming state metadata when streamWhenAvailable is enabled */
+  stream?: {
+    state: "streaming" | "complete" | "error";
+    /** Monotonic per-message sequence for stream events */
+    seq?: number;
+  };
   /**
    * If true, this message is added to history for context but does not trigger
    * leaf execution (LLM inference). Use for logging/context messages that
    * should be visible to the LLM on the next real user message.
    */
   silent?: boolean;
+  /**
+   * Collapse messages with the same singleton key at the beginning of runMachine.
+   * Only the most recent message in each group is kept.
+   */
+  singleton?: string;
+  /** Number of messages collapsed into this singleton group (set during collapse). */
+  singletonFrameCount?: number;
 }
 
 /**
@@ -193,6 +222,16 @@ export interface ConversationMessage<M = unknown> extends BaseMessage {
 }
 
 /**
+ * Ephemeral message.
+ * Ephemeral messages are never persisted and are only used for the next run.
+ * They do not trigger waitForQueue and do not trigger inference by themselves.
+ */
+export interface EphemeralMessage<M = unknown> extends BaseMessage {
+  role: "ephemeral";
+  items: string | MachineItem<M>[];
+}
+
+/**
  * Instance mutation message.
  * Contains a payload describing a state update, transition, spawn, cede, or suspend.
  * @typeParam M - The application message type (defaults to unknown).
@@ -207,7 +246,10 @@ export interface InstanceMessage<M = unknown> extends BaseMessage {
  * Can be a conversation message or an instance mutation message.
  * @typeParam M - The application message type for OutputBlock (defaults to unknown).
  */
-export type MachineMessage<M = unknown> = ConversationMessage<M> | InstanceMessage<M>;
+export type MachineMessage<M = unknown> =
+  | ConversationMessage<M>
+  | EphemeralMessage<M>
+  | InstanceMessage<M>;
 
 /**
  * Create a user message.
@@ -311,6 +353,20 @@ export function toolResult(
   };
 }
 
+/**
+ * Create an ephemeral message.
+ */
+export function ephemeralMessage<M = unknown>(
+  items: string | MachineItem<M>[],
+  metadata?: MessageMetadata,
+): EphemeralMessage<M> {
+  return {
+    role: "ephemeral",
+    items,
+    ...(metadata && { metadata }),
+  };
+}
+
 // ============================================================================
 // Type Guards
 // ============================================================================
@@ -321,7 +377,12 @@ export function toolResult(
 export function isConversationMessage<M = unknown>(
   message: MachineMessage<M>,
 ): message is ConversationMessage<M> {
-  return message.role !== "instance";
+  return (
+    message.role === "user" ||
+    message.role === "assistant" ||
+    message.role === "system" ||
+    message.role === "command"
+  );
 }
 
 /**
@@ -340,6 +401,15 @@ export function isModelMessage<M = unknown>(
   message: MachineMessage<M>,
 ): message is ConversationMessage<M> {
   return message.role === "user" || message.role === "assistant";
+}
+
+/**
+ * Check if a message is an ephemeral message.
+ */
+export function isEphemeralMessage<M = unknown>(
+  message: MachineMessage<M>,
+): message is EphemeralMessage<M> {
+  return message.role === "ephemeral";
 }
 
 /**

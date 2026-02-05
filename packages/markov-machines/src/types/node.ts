@@ -1,9 +1,9 @@
 import type { z } from "zod";
-import type { Transition } from "./transitions.js";
-import type { AnyToolDefinition, AnthropicBuiltinTool } from "./tools.js";
-import type { AnyCommandDefinition } from "./commands.js";
-import type { Pack } from "./pack.js";
-import type { StandardNodeConfig } from "../executor/types.js";
+import type { Transition } from "./transitions";
+import type { AnyToolDefinition, AnthropicBuiltinTool } from "./tools";
+import type { AnyCommandDefinition } from "./commands";
+import type { Pack } from "./pack";
+import type { StandardNodeConfig } from "../executor/types";
 
 /**
  * Tool entry - either a regular tool definition or an Anthropic builtin tool.

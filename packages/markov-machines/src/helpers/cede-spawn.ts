@@ -1,14 +1,14 @@
 import { v4 as uuid } from "uuid";
-import type { Node } from "../types/node.js";
+import type { Node } from "../types/node";
 import type {
   CedeResult,
   SpawnResult,
   SpawnTarget,
   SpawnOptions,
   SuspendResult,
-} from "../types/transitions.js";
-import type { MachineMessage } from "../types/messages.js";
-import type { SuspendOptions } from "../types/commands.js";
+} from "../types/transitions";
+import type { MachineMessage } from "../types/messages";
+import type { SuspendOptions } from "../types/commands";
 
 /**
  * Cede control back to parent with optional content.

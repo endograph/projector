@@ -1,1 +1,1 @@
-export { isRef, isSerialTransition } from "./src/types/refs";
+export { isRef, isSerialTransition } from "./src/types/refs.ts";

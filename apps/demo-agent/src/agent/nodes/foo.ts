@@ -4,6 +4,7 @@ import { demoMemoryNode } from "./demo-memory.js";
 import { demoPingNode } from "./demo-ping.js";
 import { demoFavoritesNode } from "./demo-favorites.js";
 import { themePack } from "../packs/theme.js";
+import { agentControlsPack } from "../packs/agent-controls.js";
 
 export const fooStateValidator = z.object({
   name: z.string(),
@@ -23,7 +24,7 @@ Three demos available:
 Spawn the appropriate demo node when requested. When a child cedes back, you receive their summary.`,
 
   validator: fooStateValidator,
-  packs: [themePack],
+  packs: [themePack, agentControlsPack],
   transitions: {
     spawnMemoryDemo: createTransition<FooState>({
       description: "Spawn the Memory Demo node to showcase the Pack system",

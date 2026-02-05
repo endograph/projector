@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { Tool } from "@anthropic-ai/sdk/resources/messages";
-import type { MachineMessage } from "./messages.js";
+import type { MachineMessage } from "./messages";
 
 /**
  * Context passed to tool execute functions.

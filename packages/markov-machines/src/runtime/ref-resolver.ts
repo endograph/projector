@@ -1,10 +1,10 @@
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
-import type { AnyToolDefinition, AnthropicBuiltinTool } from "../types/tools.js";
-import type { Transition } from "../types/transitions.js";
-import type { AnyPackToolDefinition } from "../types/pack.js";
-import type { Node, NodeToolEntry } from "../types/node.js";
-import { isRef } from "../types/refs.js";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
+import type { AnyToolDefinition, AnthropicBuiltinTool } from "../types/tools";
+import type { Transition } from "../types/transitions";
+import type { AnyPackToolDefinition } from "../types/pack";
+import type { Node, NodeToolEntry } from "../types/node";
+import { isRef } from "../types/refs";
 
 /**
  * Result of resolving a tool - includes the tool and its owner.

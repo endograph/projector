@@ -162,6 +162,7 @@ type NodeType = DisplayNode | SerialNode | Ref;
 export type ServerInstance = Omit<SerializedInstance, "node" | "children"> & {
   node: NodeType;
   children?: ServerInstance[];
+  packs?: DisplayPack[];
   packStates?: Record<string, unknown>;
 };
 
@@ -184,6 +185,8 @@ function getServerNodeName(instance: ServerInstance): string {
 
 type EditingNode = { instanceId: string; instructions: string } | null;
 type EditingState = { instanceId: string; state: unknown } | null;
+type EditingPackInstructions = { packName: string; instructions: string | undefined; isDynamic: boolean } | null;
+type EditingPackState = { packName: string; state: unknown } | null;
 
 function InstructionsEditModal({
   editing,
@@ -391,6 +394,228 @@ function StateEditModal({
   );
 }
 
+function PackInstructionsEditModal({
+  editing,
+  sessionId,
+  onClose,
+}: {
+  editing: NonNullable<EditingPackInstructions>;
+  sessionId: Id<"sessions">;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(editing.instructions ?? "");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editCurrentInstance = useMutation(api.sessions.editCurrentInstance);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    await editCurrentInstance({
+      sessionId,
+      instanceId: "", // Pack edits are stored at root level
+      patch: { pack: { name: editing.packName, instructions: value } },
+    });
+    onClose();
+  }, [editCurrentInstance, sessionId, editing.packName, value, onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div
+        className="bg-terminal-bg border border-terminal-green-dimmer p-4 w-[600px] max-h-[80vh] flex flex-col gap-3 font-mono"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-terminal-green text-sm font-bold flex items-center gap-2">
+          Edit Pack Instructions: {editing.packName}
+          {editing.isDynamic && (
+            <span className="text-terminal-yellow text-xs font-normal">(was dynamic)</span>
+          )}
+        </div>
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && e.metaKey) {
+              e.preventDefault();
+              handleSave();
+            }
+          }}
+          className="bg-black border border-terminal-green-dimmer text-terminal-green text-xs p-2 w-full min-h-[200px] resize-y focus:outline-none focus:border-terminal-green terminal-scrollbar"
+          spellCheck={false}
+          placeholder="Enter pack instructions..."
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 text-xs text-terminal-green-dim border border-terminal-green-dimmer hover:text-terminal-green hover:border-terminal-green"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="px-3 py-1 text-xs text-terminal-green border border-terminal-green hover:bg-terminal-green hover:text-black"
+          >
+            Enter
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PackStateEditModal({
+  editing,
+  sessionId,
+  onClose,
+}: {
+  editing: NonNullable<EditingPackState>;
+  sessionId: Id<"sessions">;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(() => JSON.stringify(editing.state, null, 2));
+  const [error, setError] = useState<string | null>(null);
+  const editCurrentInstance = useMutation(api.sessions.editCurrentInstance);
+
+  const handleSave = useCallback(async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON5.parse(addMissingCommas(value));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Invalid JSON");
+      return;
+    }
+    setError(null);
+    try {
+      await editCurrentInstance({
+        sessionId,
+        instanceId: "", // Pack edits are stored at root level
+        patch: { pack: { name: editing.packName, state: parsed } },
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save");
+    }
+  }, [editCurrentInstance, sessionId, editing.packName, value, onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+        if (e.key === "Enter" && e.metaKey) {
+          e.preventDefault();
+          handleSave();
+        }
+      }}
+    >
+      <div
+        className="bg-terminal-bg border border-terminal-green-dimmer p-4 w-[600px] max-h-[80vh] flex flex-col gap-3 font-mono"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-terminal-green text-sm font-bold">
+          Edit Pack State: {editing.packName}
+        </div>
+        <div className="bg-black border border-terminal-green-dimmer min-h-[200px] max-h-[50vh] overflow-auto focus-within:border-terminal-green terminal-scrollbar">
+          <Editor
+            value={value}
+            onValueChange={(code) => {
+              setValue(code);
+              setError(null);
+            }}
+            highlight={highlightJson}
+            tabSize={2}
+            padding={8}
+            style={{
+              fontFamily: "inherit",
+              fontSize: "0.75rem",
+              lineHeight: "1.25rem",
+              color: "var(--terminal-green)",
+              minHeight: "200px",
+            }}
+            textareaClassName="focus:outline-none"
+          />
+        </div>
+        {error && (
+          <div className="text-red-400 text-xs">{error}</div>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 text-xs text-terminal-green-dim border border-terminal-green-dimmer hover:text-terminal-green hover:border-terminal-green"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="px-3 py-1 text-xs text-terminal-green border border-terminal-green hover:bg-terminal-green hover:text-black"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PackInstructionsField({
+  instructions,
+  packName,
+  isDynamic,
+  onEditPackInstructions,
+}: {
+  instructions: string | undefined;
+  packName: string;
+  isDynamic?: boolean;
+  onEditPackInstructions?: (packName: string, instructions: string | undefined, isDynamic: boolean) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const canEdit = !!onEditPackInstructions;
+  const hasInstructions = instructions !== undefined;
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (e.metaKey && canEdit) {
+      e.preventDefault();
+      e.stopPropagation();
+      onEditPackInstructions!(packName, instructions, isDynamic ?? false);
+    } else if (hasInstructions) {
+      setExpanded(!expanded);
+    }
+  };
+
+  return (
+    <div className="text-xs overflow-hidden">
+      <button
+        onClick={handleClick}
+        className={`flex items-start gap-1 text-left w-full min-w-0 ${canEdit ? "hover:bg-terminal-green/10 rounded" : ""}`}
+      >
+        <span className="w-2.5 shrink-0" />
+        <span className="text-terminal-cyan shrink-0">instructions:</span>
+        {hasInstructions ? (
+          <>
+            <span className={`text-terminal-green-dim italic text-left min-w-0 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>
+              "{instructions}"
+            </span>
+            {isDynamic && (
+              <span className="text-terminal-yellow shrink-0">(dynamic)</span>
+            )}
+          </>
+        ) : (
+          <span className="text-terminal-green-dimmer italic">undefined</span>
+        )}
+      </button>
+    </div>
+  );
+}
+
 function InstructionsField({
   instructions,
   instanceId,
@@ -514,6 +739,7 @@ function NodeSection({
             <JsonBlock data={node.initialState} />
           </Expander>
         )}
+
       </div>
     );
   }
@@ -576,17 +802,23 @@ function NodeSection({
 
 function ServerInstanceContent({
   instance,
+  rootPackStates,
   onEditInstructions,
   onEditState,
+  onEditPackInstructions,
+  onEditPackState,
 }: {
   instance: ServerInstance;
+  rootPackStates: Record<string, unknown>;
   onEditInstructions?: (instanceId: string, instructions: string) => void;
   onEditState?: (instanceId: string, state: unknown) => void;
+  onEditPackInstructions?: (packName: string, instructions: string | undefined, isDynamic: boolean) => void;
+  onEditPackState?: (packName: string, state: unknown) => void;
 }) {
-  // Get packs from node if it's a DisplayNode
-  const nodePacks = isDisplayNode(instance.node) ? (instance.node.packs || []) : [];
-  const packStates = instance.packStates || {};
-  const hasPacks = nodePacks.length > 0;
+  // Get packs from instance (packs are stored at root instance level only)
+  const instancePacks = instance.packs || [];
+  const packStates = rootPackStates;
+  const hasPacks = instancePacks.length > 0;
   const isSuspended = !!instance.suspended;
 
   const handleStateClick = (e: React.MouseEvent) => {
@@ -611,18 +843,36 @@ function ServerInstanceContent({
       {hasPacks && (
         <Expander
           label="packs"
-          badge={nodePacks.length}
-          preview={nodePacks}
+          badge={instancePacks.length}
+          preview={instancePacks}
         >
           <div className="space-y-1">
-            {nodePacks.map((pack) => {
+            {instancePacks.map((pack) => {
               const packState = packStates[pack.name];
+              const handlePackStateClick = (e: React.MouseEvent) => {
+                if (e.metaKey && onEditPackState) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onEditPackState(pack.name, packState);
+                }
+              };
               return (
                 <Expander key={pack.name} label={pack.name} preview={packState}>
                   <div className="space-y-1">
-                    <Expander label="state" preview={packState}>
-                      <JsonBlock data={packState} />
-                    </Expander>
+                    <PackInstructionsField
+                      instructions={pack.instructions}
+                      packName={pack.name}
+                      isDynamic={pack.instructionsDynamic}
+                      onEditPackInstructions={onEditPackInstructions}
+                    />
+                    <div
+                      onClick={handlePackStateClick}
+                      className={onEditPackState ? "cursor-pointer hover:bg-terminal-green/10 -mx-1 px-1 rounded" : ""}
+                    >
+                      <Expander label="state" preview={packState}>
+                        <JsonBlock data={packState} />
+                      </Expander>
+                    </div>
                     <Expander label="validator" preview={pack.validator}>
                       <JsonBlock data={pack.validator} />
                     </Expander>
@@ -687,6 +937,8 @@ function getServerBadge(instance: ServerInstance): ReactNode {
 export function TreeView({ sessionId, instance }: { sessionId: Id<"sessions">; instance: ServerInstance }) {
   const [editing, setEditing] = useState<EditingNode>(null);
   const [editingState, setEditingState] = useState<EditingState>(null);
+  const [editingPackInstructions, setEditingPackInstructions] = useState<EditingPackInstructions>(null);
+  const [editingPackState, setEditingPackState] = useState<EditingPackState>(null);
 
   const handleEditInstructions = useCallback((instanceId: string, instructions: string) => {
     setEditing({ instanceId, instructions });
@@ -694,6 +946,14 @@ export function TreeView({ sessionId, instance }: { sessionId: Id<"sessions">; i
 
   const handleEditState = useCallback((instanceId: string, state: unknown) => {
     setEditingState({ instanceId, state });
+  }, []);
+
+  const handleEditPackInstructions = useCallback((packName: string, instructions: string | undefined, isDynamic: boolean) => {
+    setEditingPackInstructions({ packName, instructions, isDynamic });
+  }, []);
+
+  const handleEditPackState = useCallback((packName: string, state: unknown) => {
+    setEditingPackState({ packName, state });
   }, []);
 
   return (
@@ -704,8 +964,11 @@ export function TreeView({ sessionId, instance }: { sessionId: Id<"sessions">; i
         renderContent={(inst) => (
           <ServerInstanceContent
             instance={inst}
+            rootPackStates={instance.packStates || {}}
             onEditInstructions={handleEditInstructions}
             onEditState={handleEditState}
+            onEditPackInstructions={handleEditPackInstructions}
+            onEditPackState={handleEditPackState}
           />
         )}
         getBadge={getServerBadge}
@@ -722,6 +985,20 @@ export function TreeView({ sessionId, instance }: { sessionId: Id<"sessions">; i
           editing={editingState}
           sessionId={sessionId}
           onClose={() => setEditingState(null)}
+        />
+      )}
+      {editingPackInstructions && (
+        <PackInstructionsEditModal
+          editing={editingPackInstructions}
+          sessionId={sessionId}
+          onClose={() => setEditingPackInstructions(null)}
+        />
+      )}
+      {editingPackState && (
+        <PackStateEditModal
+          editing={editingPackState}
+          sessionId={sessionId}
+          onClose={() => setEditingPackState(null)}
         />
       )}
     </>

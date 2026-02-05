@@ -9,7 +9,7 @@ import {
   type Instance,
   type Node,
 } from "markov-machines";
-import { nameGateNode } from "../../../apps/demo-agent/src/agent/nodes.js";
+import { nameGateNode, fooNode } from "../../../apps/demo-agent/src/agent/nodes.js";
 import { createDemoCharter } from "../../../apps/demo-agent/src/agent/charter.js";
 import { serializeInstanceForDisplay } from "markov-machines";
 
@@ -31,6 +31,30 @@ export const createSession = action({
   handler: async (ctx): Promise<Id<"sessions">> => {
     const packStates = initPackStates(nameGateNode as Node<unknown>);
     const instance: Instance = createInstance(nameGateNode as Node<unknown>, {}, undefined, packStates);
+
+    const serializedInstance = serializeInstance(instance, demoCharter);
+    const displayInstance = serializeInstanceForDisplay(instance, demoCharter);
+
+    const sessionId = await ctx.runMutation(api.sessions.create, {
+      instanceId: instance.id,
+      instance: serializedInstance,
+      displayInstance,
+    });
+
+    return sessionId;
+  },
+});
+
+export const createSessionAtFoo = action({
+  args: {},
+  handler: async (ctx): Promise<Id<"sessions">> => {
+    const packStates = initPackStates(fooNode as Node<unknown>);
+    const instance: Instance = createInstance(
+      fooNode as Node<unknown>,
+      { name: "Foo" },
+      undefined,
+      packStates
+    );
 
     const serializedInstance = serializeInstance(instance, demoCharter);
     const displayInstance = serializeInstanceForDisplay(instance, demoCharter);

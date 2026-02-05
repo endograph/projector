@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { Node } from "../types/node.js";
-import type { Instance, NodeState } from "../types/instance.js";
+import type { Node } from "../types/node";
+import type { Instance, NodeState } from "../types/instance";
 import type {
   DryClientNode,
   DryClientInstance,
@@ -10,11 +10,11 @@ import type {
   ClientPack,
   CommandMeta,
   NodeCommands,
-} from "../types/client.js";
-import type { Command, AnyCommandDefinition } from "../types/commands.js";
-import type { JSONSchema } from "../types/refs.js";
-import type { Pack } from "../types/pack.js";
-import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema.js";
+} from "../types/client";
+import type { Command, AnyCommandDefinition } from "../types/commands";
+import type { JSONSchema } from "../types/refs";
+import type { Pack } from "../types/pack";
+import { ZOD_JSON_SCHEMA_TARGET_DRAFT_2020_12 } from "../helpers/json-schema";
 
 /**
  * Create a DryClientNode from a Node.

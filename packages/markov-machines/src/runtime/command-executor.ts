@@ -1,23 +1,23 @@
-import type { Instance, SuspendInfo } from "../types/instance.js";
-import type { Node } from "../types/node.js";
-import type { MachineMessage } from "../types/messages.js";
+import type { Instance, SuspendInfo } from "../types/instance";
+import type { Node } from "../types/node";
+import type { MachineMessage } from "../types/messages";
 import type {
   CommandContext,
   CommandResult,
   CommandExecutionResult,
-} from "../types/commands.js";
-import { isCommandValueResult, isResumeResult } from "../types/commands.js";
-import type { SpawnTarget, SpawnOptions } from "../types/transitions.js";
+} from "../types/commands";
+import { isCommandValueResult, isResumeResult } from "../types/commands";
+import type { SpawnTarget, SpawnOptions } from "../types/transitions";
 import {
   isTransitionToResult,
   isSpawnResult,
   isCedeResult,
   isSuspendResult,
-} from "../types/transitions.js";
-import { cede, spawn, suspend } from "../helpers/cede-spawn.js";
-import { shallowMerge } from "../types/state.js";
-import { createInstance, createSuspendInfo, clearSuspension } from "../types/instance.js";
-import { userMessage, instanceMessage } from "../types/messages.js";
+} from "../types/transitions";
+import { cede, spawn, suspend } from "../helpers/cede-spawn";
+import { shallowMerge } from "../types/state";
+import { createInstance, createSuspendInfo, clearSuspension } from "../types/instance";
+import { userMessage, instanceMessage } from "../types/messages";
 
 /**
  * Execute a command on an instance.

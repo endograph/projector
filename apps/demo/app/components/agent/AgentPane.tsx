@@ -30,7 +30,9 @@ interface AgentPaneProps {
   sessionId: Id<"sessions">;
   instance: SerializedInstance | undefined;
   displayInstance: DisplayInstance | undefined;
+  systemPrompt?: string;
   onResetSession: () => void;
+  onResetToFoo: () => void;
 }
 
 // Helper to get active instance (follows children to deepest)
@@ -43,40 +45,41 @@ function getActiveDisplayInstance(instance: DisplayInstance): DisplayInstance {
   return getActiveDisplayInstance(lastChild);
 }
 
-// Extract commands from active instance (includes node commands and pack commands)
-function getCommandsFromInstance(instance: DisplayInstance | undefined): SerializedCommandInfo[] {
-  if (!instance) return [];
+// Extract commands from active instance (node commands + pack commands separately)
+function getCommandsFromInstance(instance: DisplayInstance | undefined): {
+  nodeCommands: SerializedCommandInfo[];
+  packCommands: SerializedCommandInfo[];
+} {
+  if (!instance) return { nodeCommands: [], packCommands: [] };
   const active = getActiveDisplayInstance(instance);
-  
-  // Get node commands
+
   const nodeCommands = Object.values(active.node.commands).map(cmd => ({
     name: cmd.name,
     description: cmd.description,
     inputSchema: cmd.inputSchema as CommandSchema,
   }));
 
-  // Get pack commands from root instance (packs are stored on root)
+  // Get pack commands from the active node's packs (not the root instance)
   const packCommands: SerializedCommandInfo[] = [];
-  if (instance.packs) {
-    for (const pack of instance.packs) {
-      for (const cmd of Object.values(pack.commands)) {
-        packCommands.push({
-          name: cmd.name,
-          description: cmd.description,
-          inputSchema: cmd.inputSchema as CommandSchema,
-        });
-      }
+  const activePacks = active.node.packs || [];
+  for (const pack of activePacks) {
+    for (const cmd of Object.values(pack.commands)) {
+      packCommands.push({
+        name: cmd.name,
+        description: cmd.description,
+        inputSchema: cmd.inputSchema as CommandSchema,
+      });
     }
   }
 
-  return [...nodeCommands, ...packCommands];
+  return { nodeCommands, packCommands };
 }
 
 export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
-  function AgentPane({ sessionId, instance, displayInstance, onResetSession }, ref) {
+  function AgentPane({ sessionId, instance, displayInstance, systemPrompt, onResetSession, onResetToFoo }, ref) {
     const activeTab = useAtomValue(activeAgentTabAtom);
     const shiftHeld = useAtomValue(shiftHeldAtom);
-    const commands = getCommandsFromInstance(displayInstance);
+    const { nodeCommands, packCommands } = getCommandsFromInstance(displayInstance);
 
     return (
       <div
@@ -97,14 +100,19 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
         {/* Tab content */}
         <div className="flex-1 overflow-hidden p-4">
           {activeTab === "tree" && (
-            <InstanceTreeTab sessionId={sessionId} instance={instance ?? null} displayInstance={displayInstance ?? null} />
+            <InstanceTreeTab
+              sessionId={sessionId}
+              instance={instance ?? null}
+              displayInstance={displayInstance ?? null}
+              systemPrompt={systemPrompt}
+            />
           )}
           {activeTab === "state" && <StateTab instance={displayInstance ?? null} />}
           {activeTab === "history" && <HistoryTab sessionId={sessionId} />}
           {activeTab === "commands" && (
-            <CommandsTab commands={commands} />
+            <CommandsTab nodeCommands={nodeCommands} packCommands={packCommands} />
           )}
-          {activeTab === "dev" && <DevTab onResetSession={onResetSession} />}
+          {activeTab === "dev" && <DevTab onResetSession={onResetSession} onResetToFoo={onResetToFoo} />}
         </div>
       </div>
     );

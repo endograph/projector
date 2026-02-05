@@ -13,12 +13,14 @@ import {
   isPreviewingAtom,
   activeAgentTabAtom,
   shiftHeldAtom,
-  isLiveModeAtom,
   liveClientAtom,
   voiceAgentConnectedAtom,
+  streamBuffersAtom,
+  streamPresenceAtom,
+  pruneStreamBuffersAtom,
   type AgentTab,
 } from "@/src/atoms";
-import { useSessionId } from "@/src/hooks";
+import { useSessionId, useOptimisticCommands } from "@/src/hooks";
 import { TerminalPane } from "./components/terminal/TerminalPane";
 import { AgentPane } from "./components/agent/AgentPane";
 import { ThemeProvider } from "./components/ThemeProvider";
@@ -40,16 +42,22 @@ export function HomeClient({
   const isPreviewing = useAtomValue(isPreviewingAtom);
   const setActiveTab = useSetAtom(activeAgentTabAtom);
   const setShiftHeld = useSetAtom(shiftHeldAtom);
-  const isLiveMode = useAtomValue(isLiveModeAtom);
   const setLiveClient = useSetAtom(liveClientAtom);
   const voiceAgentConnected = useAtomValue(voiceAgentConnectedAtom);
+  const streamPresence = useAtomValue(streamPresenceAtom);
+  const setStreamBuffers = useSetAtom(streamBuffersAtom);
+  const setStreamPresence = useSetAtom(streamPresenceAtom);
+  const pruneStreamBuffers = useSetAtom(pruneStreamBuffersAtom);
+  const liveClient = useAtomValue(liveClientAtom);
 
   const terminalInputRef = useRef<HTMLTextAreaElement>(null);
   const agentPaneRef = useRef<HTMLDivElement>(null);
   const liveClientRef = useRef<LiveVoiceClientHandle>(null);
 
   // Optimistic pending message for instant feedback
-  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const [pendingMessage, setPendingMessage] = useState<{ id: string; content: string } | null>(
+    null
+  );
 
   // Expose liveClient to atom when ref is set (via callback ref pattern)
   const handleLiveClientRef = useCallback((handle: LiveVoiceClientHandle | null) => {
@@ -58,6 +66,7 @@ export function HomeClient({
   }, [setLiveClient]);
 
   const createSession = useAction(api.sessionActions.createSession);
+  const createSessionAtFoo = useAction(api.sessionActions.createSessionAtFoo);
 
   // Query the previewed step to get its turnId for filtering messages
   const previewedStep = useQuery(
@@ -76,11 +85,25 @@ export function HomeClient({
   );
   const session = useQuery(api.sessions.get, sessionId ? { id: sessionId } : "skip");
 
+  // Per-command optimistic tracking — overlays are kept until the server confirms
+  // each command's clientId in recentCommandResidue.
+  const optimistic = useOptimisticCommands(
+    session?.displayInstance,
+    session?.recentCommandResidue,
+    liveClient,
+  );
+  const effectiveDisplayInstance = optimistic.instance;
+
+  // Derive voice/camera state from effective (optimistic) display instance
+  const effectivePackStates = effectiveDisplayInstance?.packStates as Record<string, any> | undefined;
+  const voiceEnabled = (effectivePackStates?.agentControls?.voiceEnabled as boolean) ?? false;
+  const cameraEnabled = (effectivePackStates?.agentControls?.cameraEnabled as boolean) ?? false;
+
   // Clear pending message when we see it in the server messages
   useEffect(() => {
     if (pendingMessage && serverMessages) {
       const found = serverMessages.some(
-        (msg) => msg.role === "user" && msg.content === pendingMessage
+        (msg) => msg.role === "user" && msg.content === pendingMessage.content
       );
       if (found) {
         setPendingMessage(null);
@@ -88,20 +111,61 @@ export function HomeClient({
     }
   }, [serverMessages, pendingMessage]);
 
-  // Combine server messages with pending optimistic message
+  // Best-effort: once Convex has the final message, drop the local stream buffer
+  // so Convex remains the only source of truth.
+  useEffect(() => {
+    if (!serverMessages) return;
+    const finalizedIds = serverMessages
+      .filter((m) => m.role === "assistant" && m.idempotencyKey &&
+        (m.streamState === "complete" || (!m.streamState && m.content.length > 0)))
+      .map((m) => m.idempotencyKey!) as string[];
+    if (finalizedIds.length > 0) {
+      pruneStreamBuffers(finalizedIds);
+    }
+  }, [serverMessages, pruneStreamBuffers]);
+
+  // Combine server messages with pending optimistic message.
+  // Stream content overlay is handled per-message in TerminalMessage via selectAtom,
+  // so this useMemo only depends on streamPresence (changes on start/end) not on every delta.
   const messages = useMemo(() => {
     const base = serverMessages ?? [];
-    if (!pendingMessage) return base;
-    return [
-      ...base,
-      {
-        _id: `pending-${Date.now()}`,
-        role: "user" as const,
-        content: pendingMessage,
-        createdAt: Date.now(),
-      },
-    ];
-  }, [serverMessages, pendingMessage]);
+
+    // Streaming overlay is disabled while previewing history to avoid mixing branches/timelines.
+    const shouldOverlayStreaming = !isPreviewing;
+
+    const messageIdsInBase = shouldOverlayStreaming
+      ? new Set(base.map((m) => m.idempotencyKey).filter(Boolean) as string[])
+      : new Set<string>();
+
+    // Ephemeral entries for streams not yet persisted in Convex.
+    // Content is empty here — TerminalMessage fills it from the stream buffer.
+    const ephemeralStreamingMessages = shouldOverlayStreaming
+      ? Object.entries(streamPresence)
+        .filter(([id]) => !messageIdsInBase.has(id))
+        .map(([id, meta]) => ({
+          _id: `stream-${id}`,
+          role: "assistant" as const,
+          content: "",
+          createdAt: meta.startedAt,
+          idempotencyKey: id,
+        }))
+      : [];
+
+    const pending = pendingMessage
+      ? [
+        {
+          _id: pendingMessage.id,
+          role: "user" as const,
+          content: pendingMessage.content,
+          createdAt: Date.now(), // local ordering only; server message will replace
+        },
+      ]
+      : [];
+
+    return [...base, ...ephemeralStreamingMessages, ...pending].sort(
+      (a, b) => a.createdAt - b.createdAt
+    );
+  }, [serverMessages, pendingMessage, streamPresence, isPreviewing]);
 
   // Create session on mount if none exists or if stale
   useEffect(() => {
@@ -119,6 +183,12 @@ export function HomeClient({
       createSession().then(setSessionId);
     }
   }, [sessionId, session, createSession, setSessionId]);
+
+  // Clear any in-flight streaming state when switching sessions.
+  useEffect(() => {
+    setStreamBuffers({});
+    setStreamPresence({});
+  }, [sessionId, setStreamBuffers, setStreamPresence]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -200,7 +270,10 @@ export function HomeClient({
 
     const message = input.trim();
     setInput("");
-    setPendingMessage(message); // Optimistic update - show immediately
+    setPendingMessage({
+      id: `pending-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now()}`,
+      content: message,
+    }); // Optimistic update - show immediately
 
     try {
       if (!liveClientRef.current?.isConnected()) {
@@ -221,6 +294,11 @@ export function HomeClient({
     // Clear session - useEffect will create a new one
     setSessionId(null);
   }, [setSessionId]);
+
+  const handleResetToFoo = useCallback(() => {
+    // Create a new session starting at fooNode with { name: "Foo" }
+    createSessionAtFoo().then(setSessionId);
+  }, [createSessionAtFoo, setSessionId]);
 
   // Extract theme from session instance packs (supports array or keyed map)
   const theme = (() => {
@@ -267,7 +345,12 @@ export function HomeClient({
   return (
     <ThemeProvider theme={theme}>
       {/* Live mode client - manages LiveKit connection for voice and text */}
-      <LiveVoiceClient ref={handleLiveClientRef} sessionId={sessionId} />
+      <LiveVoiceClient
+        ref={handleLiveClientRef}
+        sessionId={sessionId}
+        voiceEnabled={voiceEnabled}
+        cameraEnabled={cameraEnabled}
+      />
 
       <div className="h-screen flex">
         {/* Left side - Terminal pane */}
@@ -276,11 +359,13 @@ export function HomeClient({
           <TerminalPane
             ref={terminalInputRef}
             sessionId={sessionId}
+            displayInstance={effectiveDisplayInstance}
             messages={messages ?? []}
             input={input}
             onInputChange={setInput}
             onSend={handleSend}
             isLoading={isLoading}
+            executeCommand={optimistic.executeCommand}
           />
         </div>
 
@@ -291,8 +376,10 @@ export function HomeClient({
             ref={agentPaneRef}
             sessionId={sessionId}
             instance={session?.instance}
-            displayInstance={session?.displayInstance}
+            displayInstance={effectiveDisplayInstance}
+            systemPrompt={session?.systemPrompt}
             onResetSession={handleResetSession}
+            onResetToFoo={handleResetToFoo}
           />
         </div>
       </div>

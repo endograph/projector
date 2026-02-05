@@ -1,7 +1,8 @@
-import type { Instance } from "../types/instance.js";
-import type { Node } from "../types/node.js";
-import type { Transition } from "../types/transitions.js";
-import type { Charter } from "../types/charter.js";
+import type { Instance } from "../types/instance";
+import type { Node } from "../types/node";
+import type { Pack } from "../types/pack";
+import type { Transition } from "../types/transitions";
+import type { Charter } from "../types/charter";
 
 export interface SystemPromptOptions {
   currentStep?: number;
@@ -12,6 +13,9 @@ export interface SystemPromptOptions {
  * Build the complete system prompt for a node execution.
  * If the charter has a custom buildSystemPrompt function, it will be used.
  * Otherwise, the default system prompt builder is used.
+ *
+ * @param packs - Optional deserialized packs with their actual instructions.
+ *                If not provided, falls back to node.packs.
  */
 export function buildSystemPrompt<S>(
   charter: Charter<any>,
@@ -19,7 +23,8 @@ export function buildSystemPrompt<S>(
   state: S,
   ancestors: Instance[],
   packStates: Record<string, unknown>,
-  options?: SystemPromptOptions
+  options?: SystemPromptOptions,
+  packs?: Pack[],
 ): string {
   // Use custom builder if provided by charter
   if (charter.buildSystemPrompt) {
@@ -27,7 +32,7 @@ export function buildSystemPrompt<S>(
   }
 
   // Fall back to default system prompt builder
-  let prompt = buildDefaultSystemPrompt(node, state, ancestors, packStates, options);
+  let prompt = buildDefaultSystemPrompt(node, state, ancestors, packStates, options, packs);
 
   // Prepend charter instructions if present
   if (charter.instructions) {
@@ -42,13 +47,17 @@ export function buildSystemPrompt<S>(
  * Includes node instructions, current state, available transitions,
  * ancestor context, pack states, and step warnings.
  * For worker nodes, pack context is omitted.
+ *
+ * @param packs - Optional deserialized packs with their actual instructions.
+ *                If not provided, falls back to node.packs.
  */
 export function buildDefaultSystemPrompt<S>(
   node: Node<any, S>,
   state: S,
   ancestors: Instance[],
   packStates: Record<string, unknown>,
-  options?: SystemPromptOptions
+  options?: SystemPromptOptions,
+  packs?: Pack[],
 ): string {
   let prompt = `${node.instructions}
 
@@ -64,7 +73,9 @@ ${buildTransitionsSection(node.transitions)}`;
   // Add active packs section (only for non-worker nodes)
   // Worker nodes don't have packs and shouldn't see pack context
   if (!node.worker) {
-    const packsSection = buildPacksSection(node, packStates);
+    // Use provided packs (deserialized with correct instructions) or fall back to node.packs
+    const activePacks = packs ?? node.packs ?? [];
+    const packsSection = buildPacksSection(activePacks, packStates);
     if (packsSection) {
       prompt += `\n\n${packsSection}`;
     }
@@ -127,18 +138,24 @@ ${sections.join("\n\n")}`;
 
 /**
  * Build the active packs section of the system prompt.
+ * Takes packs directly (may be deserialized with custom instructions).
  */
-export function buildPacksSection<S>(
-  node: Node<any, S>,
+export function buildPacksSection(
+  packs: Pack[],
   packStates: Record<string, unknown>,
 ): string {
-  const activePacks = node.packs ?? [];
-  if (activePacks.length === 0) return "";
+  if (packs.length === 0) return "";
 
-  const sections = activePacks.map((pack) => {
-    const state = packStates[pack.name];
+  const sections = packs.map((pack) => {
+    const state = packStates[pack.name] ?? pack.initialState ?? {};
+    const instructions =
+      typeof pack.instructions === "function"
+        ? pack.instructions(state as any)
+        : pack.instructions;
+    const instructionsText = typeof instructions === "string" ? instructions.trim() : "";
     return `### ${pack.name}
 ${pack.description}
+${instructionsText ? `\nInstructions:\n${instructionsText}\n` : ""}
 State: \`\`\`json
 ${JSON.stringify(state, null, 2)}
 \`\`\``;

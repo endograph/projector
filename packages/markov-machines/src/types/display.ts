@@ -1,6 +1,6 @@
-import type { JSONSchema } from "./refs.js";
-import type { SerializedSuspendInfo } from "./machine.js";
-import type { StandardNodeConfig } from "../executor/types.js";
+import type { JSONSchema } from "./refs";
+import type { SerializedSuspendInfo } from "./machine";
+import type { StandardNodeConfig } from "../executor/types";
 
 export interface DisplayCommand {
   name: string;
@@ -11,6 +11,8 @@ export interface DisplayCommand {
 export interface DisplayPack {
   name: string;
   description: string;
+  instructions?: string;
+  instructionsDynamic?: boolean;
   state: unknown;
   validator: Record<string, unknown>;
   commands: Record<string, DisplayCommand>;

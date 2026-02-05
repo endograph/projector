@@ -1,8 +1,8 @@
 import type { z } from "zod";
-import type { Ref, SerialNode, SerialTransition } from "./refs.js";
-import type { Node } from "./node.js";
-import type { StandardNodeConfig } from "../executor/types.js";
-import type { MachineMessage } from "./messages.js";
+import type { Ref, SerialNode, SerialTransition } from "./refs";
+import type { Node } from "./node";
+import type { StandardNodeConfig } from "../executor/types";
+import type { MachineMessage } from "./messages";
 
 /**
  * Context passed to code transition execute functions.

@@ -1,17 +1,22 @@
-import type { Machine } from "../types/machine.js";
-import type { RunOptions, MachineStep, RunResult, SuspendedInstanceInfo } from "../executor/types.js";
-import type { Instance, ActiveLeafInfo } from "../types/instance.js";
-import type { Resume } from "../types/commands.js";
+import type { Machine } from "../types/machine";
+import type { RunOptions, MachineStep, RunResult, SuspendedInstanceInfo } from "../executor/types";
+import type { Instance, ActiveLeafInfo } from "../types/instance";
+import type { Resume } from "../types/commands";
 import type {
   MachineMessage,
   InstanceMessage,
   ConversationMessage,
+  EphemeralMessage,
   InstancePayload,
-} from "../types/messages.js";
-import type { YieldReason } from "../executor/types.js";
-import { getActiveLeaves, isWorkerInstance, getSuspendedInstances, findInstanceById, clearSuspension, createInstance } from "../types/instance.js";
-import { userMessage, isInstanceMessage } from "../types/messages.js";
-import { isResume } from "../types/commands.js";
+  ImageBlock,
+  TextBlock,
+} from "../types/messages";
+import type { YieldReason } from "../executor/types";
+import type { Charter } from "../types/charter";
+import { getActiveLeaves, isWorkerInstance, getSuspendedInstances, findInstanceById, clearSuspension, createInstance } from "../types/instance";
+import { userMessage, isInstanceMessage, isEphemeralMessage } from "../types/messages";
+import { isResume } from "../types/commands";
+import { serializeNode } from "../serialization/serialize";
 
 
 /** Check if packStates has any entries */
@@ -146,10 +151,19 @@ function removeInstanceById(root: Instance, targetId: string): Instance {
  * Result of draining the queue.
  */
 export interface DrainResult<AppMessage = unknown> {
+  /** All drained messages in original queue order */
+  ordered: MachineMessage<AppMessage>[];
   /** Instance mutation messages (applied to machine.instance) */
   instanceMessages: InstanceMessage<AppMessage>[];
   /** Conversation messages (user, assistant, system, command) for history */
   conversationMessages: ConversationMessage<AppMessage>[];
+  /** Ephemeral messages (role: "ephemeral") */
+  ephemeralMessages: EphemeralMessage<AppMessage>[];
+}
+
+export interface DrainOptions {
+  /** When false, ephemeral messages remain in the machine queue. Defaults to true. */
+  includeEphemeral?: boolean;
 }
 
 /**
@@ -158,22 +172,173 @@ export interface DrainResult<AppMessage = unknown> {
  */
 export function drainQueue<AppMessage = unknown>(
   machine: Machine<AppMessage>,
+  options?: DrainOptions,
 ): DrainResult<AppMessage> {
-  const messages = machine.queue.splice(0, machine.queue.length);
+  const includeEphemeral = options?.includeEphemeral !== false;
+
+  let messages: MachineMessage<AppMessage>[];
+  if (includeEphemeral) {
+    messages = machine.queue.splice(0, machine.queue.length);
+  } else {
+    const drained: MachineMessage<AppMessage>[] = [];
+    const remaining: MachineMessage<AppMessage>[] = [];
+    for (const msg of machine.queue) {
+      if (isEphemeralMessage(msg)) {
+        remaining.push(msg);
+      } else {
+        drained.push(msg);
+      }
+    }
+    machine.queue.splice(0, machine.queue.length, ...remaining);
+    messages = drained;
+  }
 
   const instanceMessages: InstanceMessage<AppMessage>[] = [];
   const conversationMessages: ConversationMessage<AppMessage>[] = [];
+  const ephemeralMessages: EphemeralMessage<AppMessage>[] = [];
 
   for (const msg of messages) {
     if (isInstanceMessage(msg)) {
       instanceMessages.push(msg);
+    } else if (isEphemeralMessage(msg)) {
+      ephemeralMessages.push(msg);
     } else {
       // user, assistant, system, command - all go to conversation history
       conversationMessages.push(msg as ConversationMessage<AppMessage>);
     }
   }
 
-  return { instanceMessages, conversationMessages };
+  return { ordered: messages, instanceMessages, conversationMessages, ephemeralMessages };
+}
+
+/**
+ * Serialize Node references in instance messages to Ref/SerialNode for history persistence.
+ * Transition and spawn payloads contain live Node objects with functions/validators
+ * that are not serializable. This replaces them with charter refs.
+ */
+function serializeInstanceMessageForHistory<AppMessage>(
+  msg: InstanceMessage<AppMessage>,
+  charter?: Charter<AppMessage>,
+): InstanceMessage<AppMessage> {
+  const payload = msg.items;
+  switch (payload.kind) {
+    case "transition":
+      return {
+        ...msg,
+        items: {
+          ...payload,
+          node: serializeNode(payload.node, charter) as any,
+        },
+      };
+    case "spawn":
+      return {
+        ...msg,
+        items: {
+          ...payload,
+          children: payload.children.map(c => ({
+            ...c,
+            node: serializeNode(c.node, charter) as any,
+          })),
+        },
+      };
+    default:
+      return msg;
+  }
+}
+
+/**
+ * Build step history from ordered drain output.
+ * - Non-ephemeral messages pass through in order.
+ * - Non-singleton ephemerals pass through in order.
+ * - Singleton ephemerals collapse: only the last message per singleton key is kept,
+ *   annotated with singletonFrameCount.
+ * - Instance messages have Node references serialized for persistence.
+ */
+function buildStepHistory<AppMessage = unknown>(
+  ordered: MachineMessage<AppMessage>[],
+  charter?: Charter<AppMessage>,
+): MachineMessage<AppMessage>[] {
+  // First pass: find last index and count for each singleton key
+  const lastIndexBySingleton = new Map<string, number>();
+  const countBySingleton = new Map<string, number>();
+
+  for (let i = 0; i < ordered.length; i++) {
+    const msg = ordered[i]!;
+    if (!isEphemeralMessage(msg)) continue;
+    const singleton = msg.metadata?.singleton;
+    if (!singleton) continue;
+    lastIndexBySingleton.set(singleton, i);
+    countBySingleton.set(singleton, (countBySingleton.get(singleton) ?? 0) + 1);
+  }
+
+  // Second pass: build result, collapsing singleton ephemerals and serializing instance messages
+  const result: MachineMessage<AppMessage>[] = [];
+  for (let i = 0; i < ordered.length; i++) {
+    const msg = ordered[i]!;
+
+    if (isInstanceMessage(msg)) {
+      result.push(serializeInstanceMessageForHistory(msg, charter));
+      continue;
+    }
+
+    if (isEphemeralMessage(msg)) {
+      const singleton = msg.metadata?.singleton;
+      if (!singleton) {
+        result.push(msg);
+        continue;
+      }
+      // Only keep the last message for this singleton key
+      if (lastIndexBySingleton.get(singleton) !== i) continue;
+      const frameCount = countBySingleton.get(singleton) ?? 1;
+      result.push({
+        ...msg,
+        metadata: {
+          ...(msg.metadata ?? {}),
+          singletonFrameCount: frameCount,
+        },
+      });
+      continue;
+    }
+
+    result.push(msg);
+  }
+
+  return result;
+}
+
+/**
+ * Convert ephemeral messages in history to model-friendly user messages.
+ * Non-ephemeral messages pass through unchanged.
+ */
+function convertEphemeralsForModel<AppMessage = unknown>(
+  history: MachineMessage<AppMessage>[],
+): MachineMessage<AppMessage>[] {
+  return history.flatMap((msg) => {
+    if (!isEphemeralMessage(msg)) return msg;
+
+    const items = msg.items;
+    if (typeof items === "string") {
+      return userMessage<AppMessage>(items, { silent: true });
+    }
+
+    const imageBlocks = items.filter(
+      (b): b is ImageBlock => typeof b === "object" && b !== null && b.type === "image",
+    );
+
+    if (imageBlocks.length > 0) {
+      const frameCount = msg.metadata?.singletonFrameCount ?? 1;
+      const preamble: TextBlock = {
+        type: "text",
+        text: `[Camera frame] This is a snapshot from the user's live camera (not an uploaded file). Frames since last turn: ${frameCount}.`,
+      };
+
+      return imageBlocks.map((image) =>
+        userMessage<AppMessage>([preamble, image], { silent: true }),
+      );
+    }
+
+    return userMessage<AppMessage>(items, { silent: true });
+  });
 }
 
 /**
@@ -333,6 +498,7 @@ export async function* runMachine<AppMessage = unknown>(
 ): AsyncGenerator<MachineStep<AppMessage>> {
   // Initial drain of queue
   const initialDrain = drainQueue(machine);
+  const initialStepHistory = buildStepHistory(initialDrain.ordered, machine.charter);
 
   // Check for Resume in system messages
   for (const msg of initialDrain.conversationMessages) {
@@ -374,8 +540,8 @@ export async function* runMachine<AppMessage = unknown>(
     }
   }
 
-  // Add initial conversation messages to machine.history
-  machine.history = [...machine.history, ...initialDrain.conversationMessages];
+  // Add initial step history to machine.history (all messages in queue order, singletons collapsed)
+  machine.history = [...machine.history, ...initialStepHistory];
 
   // Apply any initial instance messages
   applyInstanceMessages(machine, initialDrain.instanceMessages, 0);
@@ -390,7 +556,7 @@ export async function* runMachine<AppMessage = unknown>(
     // Yield step without running leaves
     yield {
       instance: machine.instance,
-      history: [...initialDrain.conversationMessages, ...initialDrain.instanceMessages],
+      history: initialStepHistory,
       yieldReason: "end_turn",
       done: true,
     };
@@ -400,6 +566,8 @@ export async function* runMachine<AppMessage = unknown>(
   const maxSteps = options?.maxSteps ?? 50;
   let steps = 0;
   let tokenRecoveryAttempted = false;
+  // Initial drain messages are prepended to the first yielded step's history
+  let pendingInitialHistory: MachineMessage<AppMessage>[] | null = initialStepHistory;
 
   while (steps < maxSteps) {
     steps++;
@@ -443,6 +611,8 @@ export async function* runMachine<AppMessage = unknown>(
       console.log(`[runMachine]   Active leaves: ${activeLeaves.length} (${nonWorkerLeaves.length} non-worker)`);
     }
 
+    const historyForModel = convertEphemeralsForModel(machine.history);
+
     // Execute all leaves in parallel - they enqueue messages directly
     const results = await Promise.all(
       activeLeaves.map(async ({ path, leafIndex, isWorker }) => {
@@ -461,7 +631,7 @@ export async function* runMachine<AppMessage = unknown>(
           "",
           {
             ...options,
-            history: machine.history,
+            history: historyForModel,
             currentStep: steps,
             maxSteps,
             enqueue: machine.enqueue,
@@ -486,20 +656,22 @@ export async function* runMachine<AppMessage = unknown>(
     }
 
     // Drain the queue to collect step history and apply instance changes
-    const stepDrain = drainQueue(machine);
+    const stepDrain = drainQueue(machine, { includeEphemeral: false });
 
     // Apply instance messages and collect cede info
     const { hasCede, cedeContents } = applyInstanceMessages(machine, stepDrain.instanceMessages, steps);
 
-    // Step history is all conversation messages from this step
-    const stepHistory: MachineMessage<AppMessage>[] = [...stepDrain.conversationMessages];
+    // Step history is all drained messages in queue order
+    const stepHistory = buildStepHistory(stepDrain.ordered, machine.charter);
 
-    // Add step history to machine.history (includes instance messages for future reference)
-    machine.history = [
-      ...machine.history,
-      ...stepDrain.conversationMessages,
-      ...stepDrain.instanceMessages,
-    ];
+    // Add step history to machine.history
+    machine.history = [...machine.history, ...stepHistory];
+
+    // First step includes initial drain messages (user input, etc.)
+    const fullStepHistory = pendingInitialHistory
+      ? [...pendingInitialHistory, ...stepHistory]
+      : stepHistory;
+    pendingInitialHistory = null;
 
     // Determine primary yield reason (from non-worker leaf)
     const primaryResult = results.find(r => !r.isWorker);
@@ -539,7 +711,7 @@ export async function* runMachine<AppMessage = unknown>(
       if (activeLeaves.length === 1) {
         yield {
           instance: machine.instance,
-          history: stepHistory,
+          history: fullStepHistory,
           yieldReason: "cede",
           done: false,
           cedeContent,
@@ -559,7 +731,7 @@ export async function* runMachine<AppMessage = unknown>(
         // Yield the partial step (not final)
         yield {
           instance: machine.instance,
-          history: stepHistory,
+          history: fullStepHistory,
           yieldReason: "max_tokens",
           done: false,
         };
@@ -574,7 +746,7 @@ export async function* runMachine<AppMessage = unknown>(
         // Recovery already attempted, treat as final
         yield {
           instance: machine.instance,
-          history: stepHistory,
+          history: fullStepHistory,
           yieldReason: "max_tokens",
           done: true,
         };
@@ -589,7 +761,7 @@ export async function* runMachine<AppMessage = unknown>(
 
     yield {
       instance: machine.instance,
-      history: stepHistory,
+      history: fullStepHistory,
       yieldReason: primaryYieldReason,
       done: isFinal,
     };

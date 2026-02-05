@@ -1,23 +1,23 @@
-import type { Charter } from "../types/charter.js";
-import type { Instance } from "../types/instance.js";
-import type { Node } from "../types/node.js";
+import type { Charter } from "../types/charter";
+import type { Instance } from "../types/instance";
+import type { Node } from "../types/node";
 import type {
   MachineMessage,
   ToolResultBlock,
   TextBlock,
   OutputBlock,
-} from "../types/messages.js";
-import { toolResult } from "../types/messages.js";
-import { updateState } from "./state-manager.js";
-import { executeTool } from "./tool-executor.js";
-import { resolveTool } from "./ref-resolver.js";
+} from "../types/messages";
+import { toolResult } from "../types/messages";
+import { updateState } from "./state-manager";
+import { executeTool } from "./tool-executor";
+import { resolveTool } from "./ref-resolver";
 import {
   isAnthropicBuiltinTool,
   type AnyToolDefinition,
   type AnthropicBuiltinTool,
-} from "../types/tools.js";
-import type { AnyPackToolDefinition } from "../types/pack.js";
-import { getOrInitPackState } from "../core/machine.js";
+} from "../types/tools";
+import type { AnyPackToolDefinition } from "../types/pack";
+import { getOrInitPackState } from "../core/machine";
 
 // Tool name constants
 const TOOL_UPDATE_STATE = "updateState";

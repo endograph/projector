@@ -1,7 +1,7 @@
-import type { JSONSchema } from "./refs.js";
-import type { Command, CommandDefinition } from "./commands.js";
-import type { Node } from "./node.js";
-import type { NodeState } from "./instance.js";
+import type { JSONSchema } from "./refs";
+import type { Command, CommandDefinition } from "./commands";
+import type { Node } from "./node";
+import type { NodeState } from "./instance";
 
 /**
  * Metadata about a command (JSON-serializable).

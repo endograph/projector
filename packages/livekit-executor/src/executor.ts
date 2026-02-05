@@ -237,6 +237,9 @@ export class LiveKitExecutor implements Executor {
 
     // User speech transcription - store reference for later cleanup
     this.eventHandlers.userInputTranscribed = (ev) => {
+      this.log(
+        `UserInputTranscribed: isFinal=${ev.isFinal} length=${ev.transcript?.length ?? 0}`
+      );
       if (ev.isFinal) {
         this.log(`User transcript: "${ev.transcript}"`);
         // Mark as external (from LiveKit STT)
@@ -268,7 +271,15 @@ export class LiveKitExecutor implements Executor {
         if (content) {
           console.log(`[LiveKitExecutor] Enqueuing assistant message: "${content.slice(0, 50)}..."`);
           // Mark as external (from LiveKit TTS)
-          machine.enqueue([assistantMessage(content, { source: { external: true } })]);
+          // Include a stable messageId for streaming/envelope upserts.
+          // For OpenAI Realtime mode, this matches the server item_id used in transcript delta events.
+          machine.enqueue([
+            assistantMessage(content, {
+              source: { external: true },
+              messageId: item.id,
+              stream: { state: "complete", seq: 1 },
+            }),
+          ]);
         }
       }
     };
@@ -336,6 +347,8 @@ export class LiveKitExecutor implements Executor {
     const ancestors = instancePath.slice(0, -1); // All except the last (active) instance
     // Pack states are stored on the root instance
     const packStates = rootInstance.packStates ?? {};
+    // Use deserialized packs from root instance (with correct instructions) or fall back to node.packs
+    const packs = rootInstance.packs ?? activeInstance.node.packs;
 
     // Build system prompt
     let instructions = buildSystemPrompt(
@@ -345,6 +358,7 @@ export class LiveKitExecutor implements Executor {
       ancestors,
       packStates,
       {},
+      packs,
     );
 
     // Bootstrap history context when entering live mode

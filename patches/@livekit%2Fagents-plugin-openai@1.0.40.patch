@@ -1,0 +1,38 @@
+diff --git a/dist/realtime/realtime_model.cjs b/dist/realtime/realtime_model.cjs
+index 0bd19604809d920fbc1c6af98877f540729c22da..c1b977139f039912227271d729e55540d87ad848 100644
+--- a/dist/realtime/realtime_model.cjs
++++ b/dist/realtime/realtime_model.cjs
+@@ -1262,7 +1262,13 @@ function livekitItemToOpenAIItem(item) {
+             text: c
+           });
+         } else if (c.type === "image_content") {
+-          continue;
++          if (role !== "user") continue;
++          if (typeof c.image !== "string") continue;
++          contentList.push({
++            type: "input_image",
++            image_url: c.image,
++            detail: c.inferenceDetail ?? "auto"
++          });
+         } else if (c.type === "audio_content") {
+           if (role === "user") {
+             const encodedAudio = Buffer.from((0, import_rtc_node.combineAudioFrames)(c.frame).data).toString("base64");
+diff --git a/dist/realtime/realtime_model.js b/dist/realtime/realtime_model.js
+index 5ee681b71882a6b58e6feb4209a34ae696c579c7..0799552b4b091ee9e5a1d5adddccbaee27f7df35 100644
+--- a/dist/realtime/realtime_model.js
++++ b/dist/realtime/realtime_model.js
+@@ -1242,7 +1242,13 @@ function livekitItemToOpenAIItem(item) {
+             text: c
+           });
+         } else if (c.type === "image_content") {
+-          continue;
++          if (role !== "user") continue;
++          if (typeof c.image !== "string") continue;
++          contentList.push({
++            type: "input_image",
++            image_url: c.image,
++            detail: c.inferenceDetail ?? "auto"
++          });
+         } else if (c.type === "audio_content") {
+           if (role === "user") {
+             const encodedAudio = Buffer.from(combineAudioFrames(c.frame).data).toString("base64");

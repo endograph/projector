@@ -1,19 +1,19 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { createCharter } from "../core/charter.js";
-import { createNode } from "../core/node.js";
-import { createInstance, getActiveInstance, getActiveLeaves, getSuspendedInstances, findInstanceById } from "../types/instance.js";
-import { createMachine } from "../core/machine.js";
-import { runMachine, runMachineToCompletion } from "../core/run.js";
-import { runCommand } from "../core/commands.js";
-import { suspend } from "../helpers/cede-spawn.js";
-import { commandResume, commandResult } from "../types/commands.js";
-import type { Executor, RunResult, RunOptions, MachineStep, SuspendedInstanceInfo, YieldReason } from "../executor/types.js";
-import type { Charter } from "../types/charter.js";
-import type { Instance, SuspendInfo } from "../types/instance.js";
-import type { Resume, Command } from "../types/commands.js";
-import type { MachineMessage } from "../types/messages.js";
-import { userMessage, systemMessage, assistantMessage, instanceMessage } from "../types/messages.js";
+import { createCharter } from "../core/charter";
+import { createNode } from "../core/node";
+import { createInstance, getActiveInstance, getActiveLeaves, getSuspendedInstances, findInstanceById } from "../types/instance";
+import { createMachine } from "../core/machine";
+import { runMachine, runMachineToCompletion } from "../core/run";
+import { runCommand } from "../core/commands";
+import { suspend } from "../helpers/cede-spawn";
+import { commandResume, commandResult } from "../types/commands";
+import type { Executor, RunResult, RunOptions, MachineStep, SuspendedInstanceInfo, YieldReason } from "../executor/types";
+import type { Charter } from "../types/charter";
+import type { Instance, SuspendInfo } from "../types/instance";
+import type { Resume, Command } from "../types/commands";
+import type { MachineMessage } from "../types/messages";
+import { userMessage, systemMessage, assistantMessage, instanceMessage } from "../types/messages";
 
 /**
  * Helper to collect all steps from the async generator.
@@ -637,7 +637,7 @@ describe("command with instanceId targeting", () => {
       machine,
       "setValue",
       { newValue: "updated-parent" },
-      parent.id,
+      { instanceId: parent.id },
     );
 
     expect(result.success).toBe(true);
@@ -649,8 +649,8 @@ describe("command with instanceId targeting", () => {
 
 describe("serialization with suspend", () => {
   it("should serialize and deserialize suspended instance", async () => {
-    const { serializeInstance } = await import("../serialization/serialize.js");
-    const { deserializeInstance } = await import("../serialization/deserialize.js");
+    const { serializeInstance } = await import("../serialization/serialize");
+    const { deserializeInstance } = await import("../serialization/deserialize");
 
     const node = createNode<NodeState>({
       instructions: "Test node",
