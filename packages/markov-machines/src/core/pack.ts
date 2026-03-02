@@ -33,5 +33,6 @@ export function createPack<S>(config: PackConfig<S>): Pack<S> {
     tools: config.tools ?? {},
     commands: config.commands,
     initialState: config.initialState,
+    externalize: config.externalize,
   };
 }

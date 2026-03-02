@@ -13,6 +13,8 @@ export interface ToolContext<S = unknown> {
   updateState: (patch: Partial<S>) => void;
   /** ID of the instance executing this tool */
   instanceId: string;
+  /** ID of the root instance in the ancestor chain (stable across child instances) */
+  rootInstanceId?: string;
   /** Get messages from the conversation history that belong to this instance */
   getInstanceMessages: () => MachineMessage[];
 }

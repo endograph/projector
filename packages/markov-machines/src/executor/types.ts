@@ -2,6 +2,7 @@ import type { Charter } from "../types/charter";
 import type { Instance } from "../types/instance";
 import type { MachineMessage } from "../types/messages";
 import type { MessageStreamEvent } from "../types/stream";
+import type { Tracer } from "../types/tracer";
 
 
 /**
@@ -12,6 +13,7 @@ export type YieldReason =
   | "tool_use"
   | "max_tokens"
   | "cede"
+  | "command"          // Command executed (e.g., resume)
   | "suspend"          // Instance just suspended
   | "awaiting_resume"  // All leaves suspended, waiting for resume
   | "external";        // Inference delegated to external system (e.g., LiveKit)
@@ -56,6 +58,8 @@ export interface RunOptions<AppMessage = unknown> {
    * Used for source.isPrimary attribution.
    */
   isWorker?: boolean;
+  /** Optional tracer for observability spans. */
+  tracer?: Tracer;
 }
 
 /**
@@ -90,7 +94,7 @@ export interface MachineStep<AppMessage = unknown> {
   /** History generated in this step */
   history: MachineMessage<AppMessage>[];
   /** Why this step yielded */
-  yieldReason: "end_turn" | "tool_use" | "cede" | "max_tokens" | "command" | "suspend" | "awaiting_resume" | "external";
+  yieldReason: YieldReason;
   /** True if this is the final step (has response or hit limit) */
   done: boolean;
   /** Cede content if yieldReason is "cede" - string or MachineMessage[] */

@@ -22,6 +22,7 @@ export interface ToolExecutionResult {
  * @param onStateUpdate - Callback for state updates
  * @param instanceId - ID of the instance executing the tool
  * @param history - Conversation history for getInstanceMessages
+ * @param rootInstanceId - ID of the root instance in the ancestor chain
  */
 export async function executeTool<S>(
   tool: AnyToolDefinition<S>,
@@ -30,6 +31,7 @@ export async function executeTool<S>(
   onStateUpdate: (patch: Partial<S>) => void,
   instanceId: string,
   history: MachineMessage<unknown>[],
+  rootInstanceId?: string,
 ): Promise<ToolExecutionResult> {
   try {
     // Validate input
@@ -53,6 +55,7 @@ export async function executeTool<S>(
       state,
       updateState: onStateUpdate,
       instanceId,
+      rootInstanceId,
       getInstanceMessages,
     };
 

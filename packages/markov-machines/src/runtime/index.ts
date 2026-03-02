@@ -39,3 +39,4 @@ export type {
   ToolPipelineContext,
   ToolPipelineResult,
 } from "./tool-pipeline";
+export { createExternalizeRuntime } from "./externalize-manager";

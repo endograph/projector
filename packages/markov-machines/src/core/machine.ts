@@ -5,6 +5,7 @@ import type { Instance } from "../types/instance";
 import type { Pack } from "../types/pack";
 import type { MachineMessage } from "../types/messages";
 import { isEphemeralMessage } from "../types/messages";
+import { createExternalizeRuntime } from "../runtime/externalize-manager";
 
 /**
  * Validate a node instance tree recursively.
@@ -131,7 +132,7 @@ export function createMachine<AppMessage = unknown>(
     });
   };
 
-  return {
+  const machine: Machine<AppMessage> = {
     charter,
     instance: validatedInstance,
     history,
@@ -161,4 +162,9 @@ export function createMachine<AppMessage = unknown>(
     waitForQueue,
     notifyQueue,
   };
+
+  machine.externalize = createExternalizeRuntime(machine);
+  machine.externalize.syncRegistrations();
+
+  return machine;
 }

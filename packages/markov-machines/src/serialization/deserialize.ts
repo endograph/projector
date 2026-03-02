@@ -13,6 +13,7 @@ import type { Ref, SerialPack } from "../types/refs";
 import { isEphemeralMessage } from "../types/messages";
 import { isRef } from "../types/refs";
 import { resolveNodeRef } from "../runtime/transition-executor";
+import { createExternalizeRuntime } from "../runtime/externalize-manager";
 export { deserializeNode } from "../runtime/transition-executor";
 
 /**
@@ -46,6 +47,7 @@ function deserializePack(
     validator: charterPack.validator, // Use charter's validator (Zod schema)
     tools: charterPack.tools, // Tools come from charter (have execute functions)
     commands: charterPack.commands, // Commands come from charter (have execute functions)
+    externalize: charterPack.externalize,
     initialState: serialPack.initialState ?? charterPack.initialState,
   };
 }
@@ -156,7 +158,7 @@ export function deserializeMachine<AppMessage = unknown>(
     });
   };
 
-  return {
+  const machine: Machine<AppMessage> = {
     charter,
     instance: deserializeInstance(charter, serialized.instance),
     history: serialized.history,
@@ -186,4 +188,9 @@ export function deserializeMachine<AppMessage = unknown>(
     waitForQueue,
     notifyQueue,
   };
+
+  machine.externalize = createExternalizeRuntime(machine);
+  machine.externalize.syncRegistrations();
+
+  return machine;
 }

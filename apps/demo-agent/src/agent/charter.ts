@@ -7,7 +7,7 @@
  * For LiveKit voice support, see livekit.ts which overrides the executor.
  */
 
-import { createCharter, assertMachineContract, type Executor } from "markov-machines";
+import { createCharter, assertMachineContract, type Executor, type Pack } from "markov-machines";
 import { demoContract } from "./contract.js";
 
 import { memoryPack } from "./packs/memory.js";
@@ -19,12 +19,20 @@ import { demoMemoryNode } from "./nodes/demo-memory.js";
 import { demoPingNode } from "./nodes/demo-ping.js";
 import { demoFavoritesNode } from "./nodes/demo-favorites.js";
 
-export function createDemoCharter(executor: Executor<any>) {
+export interface DemoCharterOptions {
+  executor: Executor<any>;
+}
+
+export function createDemoCharter(options: DemoCharterOptions) {
+  const { executor } = options;
+
+  const packs: Pack<any>[] = [memoryPack, themePack, agentControlsPack];
+
   const charter = createCharter({
     name: "demo-assistant",
     instructions: "Be concise. No qualifiers or flowery language. State things simply. Always respond to the user after becoming active via a transition.",
     executor,
-    packs: [memoryPack, themePack, agentControlsPack],
+    packs,
     nodes: {
       nameGateNode,
       fooNode,

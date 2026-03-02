@@ -188,3 +188,17 @@ export type {
   MachineContractConfig,
   BuildCommands,
 } from "./contract";
+
+// Externalize
+export type {
+  ExternalScope,
+  ExternalStateMutationEvent,
+  ExternalSetStateOptions,
+  ExternalStateHandlerContext,
+  ExternalStateHandler,
+  ExternalizeStateConfig,
+  ExternalizeRuntime,
+} from "./externalize";
+
+// Tracer
+export type { Tracer, Span, SpanOptions } from "./tracer";

@@ -18,7 +18,8 @@
     "@markov-machines/livekit-executor": "workspace:*",
     "convex": "^1.24.0",
     "demo": "workspace:*",
-    "markov-machines": "workspace:*"
+    "markov-machines": "workspace:*",
+    "markov-skills": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22",

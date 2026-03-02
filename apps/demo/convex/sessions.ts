@@ -15,7 +15,7 @@ import { isRef } from "markov-machines/client";
 import { createDemoCharter } from "../../../apps/demo-agent/src/agent/charter.js";
 
 // Charter for serialization ref resolution only — executor is unused
-const charter = createDemoCharter({ run: async () => ({ response: [] }) } as any);
+const charter = createDemoCharter({ executor: { run: async () => ({ response: [] }) } as any });
 
 export const create = mutation({
   args: {

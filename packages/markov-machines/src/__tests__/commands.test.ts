@@ -2,12 +2,13 @@ import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { createCharter } from "../core/charter";
 import { createNode } from "../core/node";
+import { createPack } from "../core/pack";
 import { createInstance } from "../types/instance";
 import { createMachine } from "../core/machine";
 import { getAvailableCommands, runCommand } from "../core/commands";
 import { runMachineToCompletion } from "../core/run";
 import { commandResult } from "../types/commands";
-import { userMessage, assistantMessage } from "../types/messages";
+import { userMessage, assistantMessage, isInstanceMessage } from "../types/messages";
 import type { Executor, RunResult, RunOptions } from "../executor/types";
 import type { Charter } from "../types/charter";
 import type { Instance } from "../types/instance";
@@ -319,6 +320,177 @@ describe("runCommand", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("Something went wrong!");
+  });
+
+  it("should validate pack command updates against the pack validator", async () => {
+    const settingsPack = createPack({
+      name: "settings",
+      description: "Settings pack",
+      validator: z.object({
+        voiceEnabled: z.boolean(),
+      }),
+      initialState: { voiceEnabled: false },
+      commands: {
+        setInvalid: {
+          name: "setInvalid",
+          description: "Set invalid value",
+          inputSchema: z.object({}),
+          execute: (_input, ctx) => {
+            ctx.updateState({ voiceEnabled: "yes" as unknown as boolean });
+            return commandResult(null);
+          },
+        },
+      },
+    });
+
+    const node = createNode<TodoState>({
+      instructions: "Test node",
+      validator: todoStateValidator,
+      initialState: { todos: [] },
+      packs: [settingsPack],
+    });
+
+    const charter = createCharter({
+      name: "test",
+      executor: createMockExecutor(),
+      nodes: { node },
+      packs: [settingsPack],
+    });
+
+    const machine = createMachine(charter, {
+      instance: createInstance(node, { todos: [] }, undefined, {
+        settings: { voiceEnabled: false },
+      }),
+    });
+
+    const { result } = await runCommand(machine, "setInvalid", {});
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Pack state update validation failed");
+
+    const packStateMessages = machine.queue.filter((msg) => {
+      if (!isInstanceMessage(msg)) return false;
+      return msg.items.kind === "packState" && msg.items.packName === "settings";
+    });
+    expect(packStateMessages).toHaveLength(0);
+  });
+
+  it("should enqueue accumulated partial pack-state patch for pack commands", async () => {
+    const settingsPack = createPack({
+      name: "settings",
+      description: "Settings pack",
+      validator: z.object({
+        voiceEnabled: z.boolean(),
+        cameraEnabled: z.boolean(),
+      }),
+      initialState: { voiceEnabled: false, cameraEnabled: false },
+      commands: {
+        setVoiceEnabled: {
+          name: "setVoiceEnabled",
+          description: "Set voice mode",
+          inputSchema: z.object({ enabled: z.boolean() }),
+          execute: (input, ctx) => {
+            ctx.updateState({ voiceEnabled: input.enabled });
+            return commandResult({ ok: true });
+          },
+        },
+      },
+    });
+
+    const node = createNode<TodoState>({
+      instructions: "Test node",
+      validator: todoStateValidator,
+      initialState: { todos: [] },
+      packs: [settingsPack],
+    });
+
+    const charter = createCharter({
+      name: "test",
+      executor: createMockExecutor(),
+      nodes: { node },
+      packs: [settingsPack],
+    });
+
+    const machine = createMachine(charter, {
+      instance: createInstance(node, { todos: [] }, undefined, {
+        settings: { voiceEnabled: false, cameraEnabled: true },
+      }),
+    });
+
+    const { result } = await runCommand(machine, "setVoiceEnabled", { enabled: true });
+    expect(result.success).toBe(true);
+
+    const packStateMessage = machine.queue.find((msg) => {
+      if (!isInstanceMessage(msg)) return false;
+      return msg.items.kind === "packState" && msg.items.packName === "settings";
+    });
+    expect(packStateMessage).toBeDefined();
+    if (!packStateMessage || !isInstanceMessage(packStateMessage) || packStateMessage.items.kind !== "packState") {
+      throw new Error("Expected packState instance message");
+    }
+    expect(packStateMessage.items.patch).toEqual({
+      voiceEnabled: true,
+    });
+  });
+
+  it("should merge multiple pack command updates into a single patch", async () => {
+    const settingsPack = createPack({
+      name: "settings",
+      description: "Settings pack",
+      validator: z.object({
+        voiceEnabled: z.boolean(),
+        cameraEnabled: z.boolean(),
+      }),
+      initialState: { voiceEnabled: false, cameraEnabled: false },
+      commands: {
+        updateBoth: {
+          name: "updateBoth",
+          description: "Update both settings",
+          inputSchema: z.object({}),
+          execute: (_input, ctx) => {
+            ctx.updateState({ voiceEnabled: true });
+            ctx.updateState({ cameraEnabled: false });
+            return commandResult({ ok: true });
+          },
+        },
+      },
+    });
+
+    const node = createNode<TodoState>({
+      instructions: "Test node",
+      validator: todoStateValidator,
+      initialState: { todos: [] },
+      packs: [settingsPack],
+    });
+
+    const charter = createCharter({
+      name: "test",
+      executor: createMockExecutor(),
+      nodes: { node },
+      packs: [settingsPack],
+    });
+
+    const machine = createMachine(charter, {
+      instance: createInstance(node, { todos: [] }, undefined, {
+        settings: { voiceEnabled: false, cameraEnabled: true },
+      }),
+    });
+
+    const { result } = await runCommand(machine, "updateBoth", {});
+    expect(result.success).toBe(true);
+
+    const packStateMessages = machine.queue.filter((msg) => {
+      if (!isInstanceMessage(msg)) return false;
+      return msg.items.kind === "packState" && msg.items.packName === "settings";
+    });
+    expect(packStateMessages).toHaveLength(1);
+    const packStateMessage = packStateMessages[0]!;
+    if (!isInstanceMessage(packStateMessage) || packStateMessage.items.kind !== "packState") {
+      throw new Error("Expected packState instance message");
+    }
+    expect(packStateMessage.items.patch).toEqual({
+      voiceEnabled: true,
+      cameraEnabled: false,
+    });
   });
 });
 

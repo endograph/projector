@@ -12,9 +12,19 @@ import type { MachineMessage } from "../types/messages";
 import { userMessage, instanceMessage, commandMessage } from "../types/messages";
 import { getActiveInstance, findInstanceById } from "../types/instance";
 import { executeCommand as executeCommandOnInstance } from "../runtime/command-executor";
-import { isCedeResult } from "../types/transitions";
+import { isCedeResult, isTransitionToResult } from "../types/transitions";
 import { isCommandValueResult } from "../types/commands";
-import { shallowMerge } from "../types/state";
+import { updateState as applyStateUpdate } from "../runtime/state-manager";
+
+function mergePatch(
+  current: Record<string, unknown> | undefined,
+  patch: Partial<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    ...(current ?? {}),
+    ...(patch as Record<string, unknown>),
+  };
+}
 
 /**
  * Get available commands on the current active instance.
@@ -73,6 +83,7 @@ export async function runCommand<AppMessage = unknown>(
   // Enqueue the command message for history tracking
   const command = { type: "command" as const, name: commandName, input, instanceId, clientId };
   machine.enqueue([commandMessage([command])]);
+  machine.externalize?.syncRegistrations();
 
   // Find the target instance
   let target: Instance;
@@ -128,17 +139,30 @@ export async function runCommand<AppMessage = unknown>(
           result: { success: false, error: "Cannot cede from root instance" },
         };
       }
+      machine.instance = updatedRoot;
+      machine.externalize?.syncRegistrations();
       return {
-        machine: { ...machine, instance: updatedRoot },
+        machine,
         result,
         messages,
       };
     }
 
     // All other cases: replace instance in tree
-    const updatedRoot = replaceInstance(machine.instance, target.id, updatedInstance);
+    // externalized state instances ahve their state preserved. This is probably
+    // the wrong behavior, it would be better to not allow transitions to change state, 
+    // and then model all state changes as messages
+    const shouldPreserveExternalizedNodeState =
+      !!target.node.externalize?.state &&
+      (!transitionResult || !isTransitionToResult(transitionResult));
+    const replacement = shouldPreserveExternalizedNodeState
+      ? { ...updatedInstance, state: target.state }
+      : updatedInstance;
+    const updatedRoot = replaceInstance(machine.instance, target.id, replacement);
+    machine.instance = updatedRoot;
+    machine.externalize?.syncRegistrations();
     return {
-      machine: { ...machine, instance: updatedRoot },
+      machine,
       result,
       messages,
     };
@@ -226,19 +250,27 @@ async function executePackCommand<AppMessage = unknown>(
 
   // Get current pack state from ROOT (not from instance - pack states are only on root)
   let packState = rootPackStates[packName] ?? pack.initialState ?? {};
+  let hasPackStateUpdate = false;
+  let accumulatedPatch: Record<string, unknown> | undefined;
 
   // Create context
   const ctx: PackCommandContext<unknown> = {
     state: packState,
     updateState: (patch: Partial<unknown>) => {
-      packState = shallowMerge(
+      const result = applyStateUpdate(
         packState as Record<string, unknown>,
-        patch as Record<string, unknown>,
+        patch as Partial<Record<string, unknown>>,
+        pack.validator as any,
       );
-      // Enqueue state update message
-      enqueue([instanceMessage<AppMessage>(
-        { kind: "packState", packName, patch: patch as Record<string, unknown> },
-      )]);
+      if (!result.success) {
+        throw new Error(`Pack state update validation failed: ${result.error}`);
+      }
+      packState = result.state;
+      hasPackStateUpdate = true;
+      accumulatedPatch = mergePatch(
+        accumulatedPatch,
+        patch as Partial<Record<string, unknown>>,
+      );
     },
   };
 
@@ -261,6 +293,16 @@ async function executePackCommand<AppMessage = unknown>(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: message };
+  } finally {
+    if (hasPackStateUpdate) {
+      enqueue([instanceMessage<AppMessage>(
+        {
+          kind: "packState",
+          packName,
+          patch: accumulatedPatch ?? (packState as Record<string, unknown>),
+        },
+      )]);
+    }
   }
 }
 

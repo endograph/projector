@@ -4,6 +4,7 @@ import type { AnyToolDefinition, AnthropicBuiltinTool } from "./tools";
 import type { AnyCommandDefinition } from "./commands";
 import type { Pack } from "./pack";
 import type { StandardNodeConfig } from "../executor/types";
+import type { ExternalizeStateConfig } from "./externalize";
 
 /**
  * Tool entry - either a regular tool definition or an Anthropic builtin tool.
@@ -48,6 +49,8 @@ export interface NodeConfig<M = never, S = unknown> {
   output?: OutputConfig<M>;
   /** Packs this node uses */
   packs?: Pack<any>[];
+  /** Optional externalized state ownership hooks */
+  externalize?: ExternalizeStateConfig<S>;
 }
 
 /**
@@ -76,6 +79,8 @@ export interface WorkerNodeConfig<M = never, S = unknown> {
   executorConfig?: StandardNodeConfig;
   /** Structured output configuration */
   output?: OutputConfig<M>;
+  /** Optional externalized state ownership hooks */
+  externalize?: ExternalizeStateConfig<S>;
   // packs intentionally omitted - worker nodes can't access packs
 }
 
@@ -109,6 +114,8 @@ export interface Node<M = never, S = unknown> {
   packs?: Pack<any>[];
   /** Whether this is a worker node */
   worker?: boolean;
+  /** Optional externalized state ownership hooks */
+  externalize?: ExternalizeStateConfig<S>;
 }
 
 /**

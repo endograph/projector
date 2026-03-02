@@ -1,0 +1,21 @@
+{
+  "name": "markov-skills",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "^4.0.17"
+  },
+  "peerDependencies": {
+    "zod": "catalog:",
+    "markov-machines": "workspace:*"
+  },
+  "dependencies": {}
+}

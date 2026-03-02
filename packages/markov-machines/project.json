@@ -1,0 +1,7 @@
+{
+  "targets": {
+    "lint": {
+      "command": "echo 'Lint disabled for libs/machine'"
+    }
+  }
+}

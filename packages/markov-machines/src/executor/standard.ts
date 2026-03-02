@@ -419,6 +419,7 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
           history: options?.history,
           enqueue,
           source,
+          rootInstanceId: rootInstance.id,
         },
         toolCalls,
       );

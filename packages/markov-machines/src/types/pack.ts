@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { CommandValueResult } from "./commands";
+import type { ExternalizeStateConfig } from "./externalize";
 
 /**
  * Context provided to pack tool and command execute functions.
@@ -10,6 +11,8 @@ export interface PackToolContext<S = unknown> {
   state: S;
   /** Update pack state with a partial patch */
   updateState: (patch: Partial<S>) => void;
+  /** ID of the root instance in the ancestor chain (stable across child instances) */
+  rootInstanceId?: string;
 }
 
 /**
@@ -56,6 +59,8 @@ export interface PackToolDefinition<S = unknown, TInput = unknown, TOutput = unk
   inputSchema: z.ZodType<TInput>;
   /** Execute function */
   execute: (input: TInput, ctx: PackToolContext<S>) => Promise<TOutput> | TOutput;
+  /** If true, tool execution ends the turn immediately (yields end_turn) */
+  terminal?: boolean;
 }
 
 /**
@@ -86,6 +91,8 @@ export interface Pack<S = unknown> {
   commands?: Record<string, AnyPackCommandDefinition<S>>;
   /** Optional initial state */
   initialState?: S;
+  /** Optional externalized state ownership hooks */
+  externalize?: ExternalizeStateConfig<S>;
 }
 
 /**
@@ -99,6 +106,7 @@ export interface PackConfig<S = unknown> {
   tools?: Record<string, AnyPackToolDefinition<S>>;
   commands?: Record<string, AnyPackCommandDefinition<S>>;
   initialState?: S;
+  externalize?: ExternalizeStateConfig<S>;
 }
 
 /**

@@ -11,6 +11,7 @@ import type { Instance, SuspendInfo } from "../types/instance";
 import type { Node } from "../types/node";
 import type { MachineMessage, ToolResultBlock, TextBlock, OutputBlock, MessageSource } from "../types/messages";
 import type { StandardNodeConfig, EnqueueFn } from "../executor/types";
+import type { Tracer } from "../types/tracer";
 import { userMessage, assistantMessage, instanceMessage } from "../types/messages";
 import { processToolCalls, type ToolCall, type ToolCallContext } from "./tool-call-processor";
 import { executeTransition } from "./transition-executor";
@@ -37,6 +38,10 @@ export interface ToolPipelineContext<AppMessage = unknown> {
   enqueue?: EnqueueFn<AppMessage>;
   /** Source attribution for messages */
   source?: MessageSource;
+  /** ID of the root instance in the ancestor chain */
+  rootInstanceId?: string;
+  /** Optional tracer for observability spans. */
+  tracer?: Tracer;
 }
 
 /**
@@ -68,8 +73,39 @@ export async function runToolPipeline<AppMessage = unknown>(
   ctx: ToolPipelineContext<AppMessage>,
   toolCalls: ToolCall[],
 ): Promise<ToolPipelineResult<AppMessage>> {
+  const { charter, instance, ancestors, history, enqueue, source, tracer } = ctx;
+
+  if (!enqueue) {
+    throw new Error("runToolPipeline requires enqueue function in context");
+  }
+
+  if (tracer) {
+    return tracer.withSpan("tool_pipeline", async (span) => {
+      span.log({
+        input: {
+          toolNames: toolCalls.map(tc => tc.name),
+          toolCount: toolCalls.length,
+        },
+      });
+      const pipelineTracer = span.child();
+      const result = await runToolPipelineInner<AppMessage>(ctx, toolCalls, pipelineTracer);
+      span.log({
+        output: { yieldReason: result.yieldReason },
+      });
+      return result;
+    });
+  }
+
+  return runToolPipelineInner<AppMessage>(ctx, toolCalls, undefined);
+}
+
+async function runToolPipelineInner<AppMessage = unknown>(
+  ctx: ToolPipelineContext<AppMessage>,
+  toolCalls: ToolCall[],
+  pipelineTracer: import("../types/tracer").Tracer | undefined,
+): Promise<ToolPipelineResult<AppMessage>> {
   const { charter, instance, ancestors, history, enqueue, source } = ctx;
-  
+
   if (!enqueue) {
     throw new Error("runToolPipeline requires enqueue function in context");
   }
@@ -87,13 +123,17 @@ export async function runToolPipeline<AppMessage = unknown>(
     currentState,
     currentNode,
     history,
+    rootInstanceId: ctx.rootInstanceId,
+    tracer: pipelineTracer,
   };
 
   const toolResult = await processToolCalls<AppMessage>(toolCallCtx, toolCalls);
 
   // Emit state update if state changed
   if (toolResult.currentState !== currentState) {
-    const statePatch = toolResult.currentState as Record<string, unknown>;
+    const statePatch =
+      toolResult.currentStatePatch ??
+      (toolResult.currentState as Record<string, unknown>);
     enqueue([instanceMessage<AppMessage>(
       { kind: "state", instanceId: instance.id, patch: statePatch },
       source,
@@ -104,8 +144,11 @@ export async function runToolPipeline<AppMessage = unknown>(
   // Emit pack state updates
   for (const [packName, packState] of Object.entries(toolResult.packStates)) {
     if (packState !== ctx.packStates[packName]) {
+      const packStatePatch =
+        toolResult.packStatePatches[packName] ??
+        (packState as Record<string, unknown>);
       enqueue([instanceMessage<AppMessage>(
-        { kind: "packState", packName, patch: packState as Record<string, unknown> },
+        { kind: "packState", packName, patch: packStatePatch },
         source,
       )]);
     }

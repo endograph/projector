@@ -15,7 +15,8 @@ function getActiveDisplayInstance(instance: DisplayInstance): DisplayInstance {
  * Find a command on the current active instance by its handle.
  * Returns the handle if the command is available, undefined if not.
  *
- * Checks both node commands and pack commands on the active leaf instance.
+ * Checks both node commands and pack commands. Pack commands are checked
+ * on the root instance (where full pack data with commands is stored).
  *
  * @example
  * ```ts
@@ -36,9 +37,9 @@ export function findCommand(
     return handle;
   }
 
-  // Check pack commands
-  if (active.node.packs) {
-    for (const pack of active.node.packs) {
+  // Check pack commands on root instance (that's where full pack data is stored)
+  if (instance.packs) {
+    for (const pack of instance.packs) {
       if (handle.name in (pack.commands ?? {})) {
         return handle;
       }

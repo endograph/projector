@@ -65,6 +65,7 @@ export function createNode<M = never, S = unknown>(config: NodeConfig<M, S>): No
     commands,
     initialState,
     packs,
+    externalize,
     executorConfig,
     output,
   } = config;
@@ -81,6 +82,7 @@ export function createNode<M = never, S = unknown>(config: NodeConfig<M, S>): No
     commands,
     initialState,
     packs,
+    externalize,
     executorConfig,
     output,
   };
@@ -125,6 +127,7 @@ export function createWorkerNode<M = never, S = unknown>(
     initialState,
     executorConfig,
     output,
+    externalize,
   } = config;
 
   validateNames(tools, commands);
@@ -140,6 +143,7 @@ export function createWorkerNode<M = never, S = unknown>(
     initialState,
     executorConfig,
     output,
+    externalize,
     worker: true,
   };
 }

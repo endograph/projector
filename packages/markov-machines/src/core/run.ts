@@ -11,17 +11,53 @@ import type {
   ImageBlock,
   TextBlock,
 } from "../types/messages";
+import type { ExternalStateMutationEvent } from "../types/externalize";
 import type { YieldReason } from "../executor/types";
 import type { Charter } from "../types/charter";
+import type { Pack } from "../types/pack";
+import type { Tracer, Span } from "../types/tracer";
 import { getActiveLeaves, isWorkerInstance, getSuspendedInstances, findInstanceById, clearSuspension, createInstance } from "../types/instance";
 import { userMessage, isInstanceMessage, isEphemeralMessage } from "../types/messages";
 import { isResume } from "../types/commands";
 import { serializeNode } from "../serialization/serialize";
+import { getOrInitPackState } from "./machine";
 
 
 /** Check if packStates has any entries */
 const hasPackStates = (ps?: Record<string, unknown>): boolean =>
   ps !== undefined && Object.keys(ps).length > 0;
+
+/**
+ * Hoist packs from a node to the root instance.
+ * Adds any new packs to instance.packs and initializes their states in packStates.
+ * This is called lazily when nodes with packs are discovered via transition or spawn.
+ */
+function hoistPacksToRoot<AppMessage>(
+  machine: Machine<AppMessage>,
+  newPacks: Pack[] | undefined,
+): void {
+  if (!newPacks || newPacks.length === 0) return;
+
+  const existingPacks = machine.instance.packs ?? [];
+  const existingPackNames = new Set(existingPacks.map(p => p.name));
+
+  const packsToAdd = newPacks.filter(p => !existingPackNames.has(p.name));
+  if (packsToAdd.length === 0) return;
+
+  // Ensure packStates exists
+  const packStates = machine.instance.packStates ?? {};
+
+  // Initialize state for new packs
+  for (const pack of packsToAdd) {
+    getOrInitPackState(packStates, pack);
+  }
+
+  machine.instance = {
+    ...machine.instance,
+    packs: [...existingPacks, ...packsToAdd],
+    packStates,
+  };
+}
 
 // ============================================================================
 // Parallel Execution Helpers
@@ -357,12 +393,14 @@ export function applyInstanceMessages<AppMessage = unknown>(
 ): {
   hasCede: boolean;
   cedeContents: Array<{ instanceId: string; content: string | MachineMessage<AppMessage>[] | undefined }>;
+  stateMutations: ExternalStateMutationEvent<unknown, AppMessage>[];
 } {
   // Track writes for duplicate detection
   const stateWrites = new Map<string, number>(); // instanceId -> write count
   const packStateWrites = new Map<string, number>(); // packName -> write count
 
   const cedeContents: Array<{ instanceId: string; content: string | MachineMessage<AppMessage>[] | undefined }> = [];
+  const stateMutations: ExternalStateMutationEvent<unknown, AppMessage>[] = [];
   let hasCede = false;
 
   for (const msg of instanceMessages) {
@@ -377,6 +415,12 @@ export function applyInstanceMessages<AppMessage = unknown>(
           console.warn(
             `[runMachine] Step ${stepNumber}: instanceId ${payload.instanceId} state updated ${count} times, last write wins`
           );
+        }
+
+        const externalMutation = machine.externalize?.consumeInstanceMessage(msg, stepNumber);
+        if (externalMutation) {
+          stateMutations.push(externalMutation);
+          break;
         }
 
         // Shallow merge into instance state
@@ -401,6 +445,12 @@ export function applyInstanceMessages<AppMessage = unknown>(
           );
         }
 
+        const externalMutation = machine.externalize?.consumeInstanceMessage(msg, stepNumber);
+        if (externalMutation) {
+          stateMutations.push(externalMutation);
+          break;
+        }
+
         // Shallow merge into pack state on root
         const currentPackStates = machine.instance.packStates ?? {};
         const currentPackState = currentPackStates[payload.packName] as Record<string, unknown> | undefined;
@@ -415,6 +465,9 @@ export function applyInstanceMessages<AppMessage = unknown>(
       }
 
       case "transition": {
+        // Hoist packs from new node to root
+        hoistPacksToRoot(machine, payload.node.packs);
+
         // Replace node/state, clear children
         machine.instance = updateInstanceById(
           machine.instance,
@@ -431,6 +484,11 @@ export function applyInstanceMessages<AppMessage = unknown>(
       }
 
       case "spawn": {
+        // Hoist packs from all spawned nodes to root
+        for (const { node } of payload.children) {
+          hoistPacksToRoot(machine, node.packs);
+        }
+
         // Add children to parent instance
         const newChildren = payload.children.map(({ node, state, executorConfig }) =>
           createInstance(
@@ -476,7 +534,9 @@ export function applyInstanceMessages<AppMessage = unknown>(
     }
   }
 
-  return { hasCede, cedeContents };
+  machine.externalize?.syncRegistrations();
+
+  return { hasCede, cedeContents, stateMutations };
 }
 
 /**
@@ -496,6 +556,27 @@ export async function* runMachine<AppMessage = unknown>(
   machine: Machine<AppMessage>,
   options?: RunOptions<AppMessage>,
 ): AsyncGenerator<MachineStep<AppMessage>> {
+  const tracer = options?.tracer;
+  const rootSpan = tracer?.startSpan("machine.run", {
+    input: { charterName: machine.charter.name },
+    attributes: { maxSteps: options?.maxSteps ?? 50 },
+  });
+
+  try {
+  yield* runMachineInner(machine, options, tracer, rootSpan);
+  } finally {
+    rootSpan?.end();
+  }
+}
+
+async function* runMachineInner<AppMessage = unknown>(
+  machine: Machine<AppMessage>,
+  options: RunOptions<AppMessage> | undefined,
+  tracer: Tracer | undefined,
+  rootSpan: Span | undefined,
+): AsyncGenerator<MachineStep<AppMessage>> {
+  const rootTracer = rootSpan?.child();
+
   // Initial drain of queue
   const initialDrain = drainQueue(machine);
   const initialStepHistory = buildStepHistory(initialDrain.ordered, machine.charter);
@@ -529,12 +610,14 @@ export async function* runMachine<AppMessage = unknown>(
         const stepHistory: MachineMessage<AppMessage>[] = [userMessage(`[Resumed instance ${resumeItem.instanceId}]`)];
         machine.history = [...machine.history, ...stepHistory];
 
-        yield {
+        const step: MachineStep<AppMessage> = {
           instance: machine.instance,
           history: stepHistory,
           yieldReason: "command",
           done: false,
         };
+        machine.externalize?.notifyStep(step, []);
+        yield step;
         return;
       }
     }
@@ -544,7 +627,7 @@ export async function* runMachine<AppMessage = unknown>(
   machine.history = [...machine.history, ...initialStepHistory];
 
   // Apply any initial instance messages
-  applyInstanceMessages(machine, initialDrain.instanceMessages, 0);
+  const initialApplyResult = applyInstanceMessages(machine, initialDrain.instanceMessages, 0);
 
   // Check if we should skip leaf execution (only silent user messages)
   const hasNonSilentUserMessage = initialDrain.conversationMessages.some(
@@ -554,12 +637,14 @@ export async function* runMachine<AppMessage = unknown>(
   if (!hasNonSilentUserMessage) {
     // All processing done (history updated, instance messages applied)
     // Yield step without running leaves
-    yield {
+    const step: MachineStep<AppMessage> = {
       instance: machine.instance,
       history: initialStepHistory,
       yieldReason: "end_turn",
       done: true,
     };
+    machine.externalize?.notifyStep(step, initialApplyResult.stateMutations);
+    yield step;
     return;
   }
 
@@ -568,12 +653,16 @@ export async function* runMachine<AppMessage = unknown>(
   let tokenRecoveryAttempted = false;
   // Initial drain messages are prepended to the first yielded step's history
   let pendingInitialHistory: MachineMessage<AppMessage>[] | null = initialStepHistory;
+  // Initial drain mutations are merged into the first yielded step.
+  let pendingInitialStateMutations: ExternalStateMutationEvent<unknown, AppMessage>[] | null =
+    initialApplyResult.stateMutations;
 
   while (steps < maxSteps) {
     steps++;
 
     // Get all active leaves for parallel execution
     const activeLeaves = getActiveLeaves(machine.instance);
+
     if (activeLeaves.length === 0) {
       // Check if all leaves are suspended
       const suspendedInstances = getSuspendedInstances(machine.instance);
@@ -585,17 +674,26 @@ export async function* runMachine<AppMessage = unknown>(
           reason: inst.suspended!.reason,
           metadata: inst.suspended!.metadata,
         }));
-        yield {
+        const step: MachineStep<AppMessage> = {
           instance: machine.instance,
           history: [],
           yieldReason: "awaiting_resume",
           done: true,
           suspendedInstances: suspendedInfo,
         };
+        machine.externalize?.notifyStep(step, []);
+        yield step;
         return;
       }
       throw new Error("No active instances found");
     }
+
+    const stepSpan = rootTracer?.startSpan(`machine.step.${steps}`, {
+      attributes: { step: steps, activeLeafCount: activeLeaves.length },
+    });
+    const stepTracer = stepSpan?.child();
+
+    try {
 
     // Validate: max 1 non-worker leaf
     const nonWorkerLeaves = activeLeaves.filter(l => !l.isWorker);
@@ -637,6 +735,7 @@ export async function* runMachine<AppMessage = unknown>(
             enqueue: machine.enqueue,
             instanceId: leaf.id,
             isWorker,
+            tracer: stepTracer,
           },
         );
 
@@ -659,7 +758,7 @@ export async function* runMachine<AppMessage = unknown>(
     const stepDrain = drainQueue(machine, { includeEphemeral: false });
 
     // Apply instance messages and collect cede info
-    const { hasCede, cedeContents } = applyInstanceMessages(machine, stepDrain.instanceMessages, steps);
+    const { hasCede, cedeContents, stateMutations } = applyInstanceMessages(machine, stepDrain.instanceMessages, steps);
 
     // Step history is all drained messages in queue order
     const stepHistory = buildStepHistory(stepDrain.ordered, machine.charter);
@@ -672,6 +771,10 @@ export async function* runMachine<AppMessage = unknown>(
       ? [...pendingInitialHistory, ...stepHistory]
       : stepHistory;
     pendingInitialHistory = null;
+    const fullStateMutations = pendingInitialStateMutations
+      ? [...pendingInitialStateMutations, ...stateMutations]
+      : stateMutations;
+    pendingInitialStateMutations = null;
 
     // Determine primary yield reason (from non-worker leaf)
     const primaryResult = results.find(r => !r.isWorker);
@@ -709,13 +812,15 @@ export async function* runMachine<AppMessage = unknown>(
 
       // If single-leaf cede, yield explicit cede step
       if (activeLeaves.length === 1) {
-        yield {
+        const step: MachineStep<AppMessage> = {
           instance: machine.instance,
           history: fullStepHistory,
           yieldReason: "cede",
           done: false,
           cedeContent,
         };
+        machine.externalize?.notifyStep(step, fullStateMutations);
+        yield step;
         continue;
       }
     }
@@ -729,12 +834,14 @@ export async function* runMachine<AppMessage = unknown>(
         }
 
         // Yield the partial step (not final)
-        yield {
+        const step: MachineStep<AppMessage> = {
           instance: machine.instance,
           history: fullStepHistory,
           yieldReason: "max_tokens",
           done: false,
         };
+        machine.externalize?.notifyStep(step, fullStateMutations);
+        yield step;
 
         // Add recovery message
         const recoveryMessage = userMessage<AppMessage>(
@@ -744,12 +851,14 @@ export async function* runMachine<AppMessage = unknown>(
         continue;
       } else {
         // Recovery already attempted, treat as final
-        yield {
+        const step: MachineStep<AppMessage> = {
           instance: machine.instance,
           history: fullStepHistory,
           yieldReason: "max_tokens",
           done: true,
         };
+        machine.externalize?.notifyStep(step, fullStateMutations);
+        yield step;
         return;
       }
     }
@@ -759,15 +868,21 @@ export async function* runMachine<AppMessage = unknown>(
     // "external" = inference delegated to external system (e.g., LiveKit voice)
     const isFinal = primaryYieldReason === "end_turn" || primaryYieldReason === "external";
 
-    yield {
+    const step: MachineStep<AppMessage> = {
       instance: machine.instance,
       history: fullStepHistory,
       yieldReason: primaryYieldReason,
       done: isFinal,
     };
+    machine.externalize?.notifyStep(step, fullStateMutations);
+    yield step;
 
     if (isFinal) {
       return;
+    }
+
+    } finally {
+      stepSpan?.end();
     }
   }
 

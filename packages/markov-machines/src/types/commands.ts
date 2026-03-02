@@ -76,7 +76,7 @@ export type AnyCommandDefinition<S = unknown> = CommandDefinition<any, any, S>;
  * Resume result - command resumes the current instance from suspension.
  */
 export interface ResumeResult {
-  type: "resume";
+  type: "command_resume";
 }
 
 /**
@@ -119,7 +119,7 @@ export function isCommandValueResult<T>(result: CommandResult<T>): result is Com
  * Use this in command execute functions to resume the current instance.
  */
 export function commandResume(): ResumeResult {
-  return { type: "resume" };
+  return { type: "command_resume" };
 }
 
 /**
@@ -207,8 +207,7 @@ export function isResumeResult(value: unknown): value is ResumeResult {
     typeof value === "object" &&
     value !== null &&
     "type" in value &&
-    (value as ResumeResult).type === "resume" &&
-    !("instanceId" in value) // Distinguish from Resume which also has type: "resume"
+    (value as ResumeResult).type === "command_resume"
   );
 }
 

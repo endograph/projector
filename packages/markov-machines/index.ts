@@ -172,6 +172,18 @@ export type {
   MachineContract,
   MachineContractConfig,
   BuildCommands,
+  // Externalize
+  ExternalScope,
+  ExternalStateMutationEvent,
+  ExternalSetStateOptions,
+  ExternalStateHandlerContext,
+  ExternalStateHandler,
+  ExternalizeStateConfig,
+  ExternalizeRuntime,
+  // Tracer
+  Tracer,
+  Span,
+  SpanOptions,
 } from "./src/types/index";
 
 // Type guards and helpers

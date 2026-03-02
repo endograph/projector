@@ -47,12 +47,12 @@ import { attachVisionSampler, type VisionSamplerHandle } from "./agent/vision.js
 import { type AgentControlsState } from "./agent/packs/agent-controls.js";
 
 // Create charters with their respective executors
-const demoCharterStandard = createDemoCharter(
-  createStandardExecutor({
+const demoCharterStandard = createDemoCharter({
+  executor: createStandardExecutor({
     model: "claude-sonnet-4-5",
     apiKey: process.env.ANTHROPIC_API_KEY,
   }),
-);
+});
 const demoCharterLiveKit = {
   ...demoCharterStandard,
   executor: getLiveKitExecutor(),

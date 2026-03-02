@@ -74,9 +74,9 @@ export interface SuspendResult {
 
 /**
  * Union of all transition results.
- * Default to `any` to allow assignment from specific state types.
+ * Default to `unknown` for type safety at usage sites.
  */
-export type TransitionResult<T = any> =
+export type TransitionResult<T = unknown> =
   | TransitionToResult<T>
   | SpawnResult<T>
   | CedeResult

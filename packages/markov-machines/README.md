@@ -1,4 +1,4 @@
-# markov-machines
+# machine
 
 A small framework for building stateful, multi-node agent workflows. It models an agent as a tree of node instances, supports tool execution and transitions, and persists state/history for long-running sessions.
 
@@ -38,7 +38,7 @@ import {
   createStandardExecutor,
   runMachineToCompletion,
   transitionTo,
-} from "markov-machines";
+} from "machine";
 
 const idleNode = createNode({
   instructions: "You are a helpful assistant.",
@@ -63,7 +63,7 @@ console.log(step.response);
 
 ## Exports
 
-Public APIs are exported from `packages/markov-machines/index.ts` including:
+Public APIs are exported from `packages/machine/index.ts` including:
 - `createCharter`, `createNode`, `createMachine`, `runMachine`, `runMachineToCompletion`
 - Transition helpers: `createTransition`, `transitionTo`, `createHelpers`
 - Serialization helpers: `serializeMachine`, `deserializeMachine`, etc.

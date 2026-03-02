@@ -3,6 +3,7 @@ import type { Instance, SuspendInfo } from "./instance";
 import type { MachineMessage } from "./messages";
 import type { Ref, SerialNode, SerialPack } from "./refs";
 import type { StandardNodeConfig } from "../executor/types";
+import type { ExternalizeRuntime } from "./externalize";
 
 /**
  * Callback invoked when a message is enqueued.
@@ -45,6 +46,8 @@ export interface Machine<AppMessage = unknown> {
   waitForQueue: () => Promise<void>;
   /** Notify any waiters that queue has content (called automatically by enqueue) */
   notifyQueue: () => void;
+  /** Runtime externalization manager for externally-owned state scopes */
+  externalize?: ExternalizeRuntime<AppMessage>;
 }
 
 /**
