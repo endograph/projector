@@ -17,6 +17,24 @@ import { isRef, isSerialTransition } from "../types/refs";
 import { resolveTransitionRef } from "./ref-resolver";
 import type { AnyToolDefinition } from "../types/tools";
 import type { AnyPackToolDefinition } from "../types/pack";
+import type { AnyCommandDefinition } from "../types/commands";
+
+/**
+ * Resolve a node command ref (dotted: charter.nodes[source].commands[name]).
+ */
+function resolveNodeCommandRef(charter: Charter<any>, ref: string): AnyCommandDefinition<unknown> {
+  const dotIdx = ref.indexOf(".");
+  if (dotIdx === -1) {
+    throw new Error(`Command ref must be dotted (node.command): ${ref}`);
+  }
+  const source = ref.slice(0, dotIdx);
+  const name = ref.slice(dotIdx + 1);
+  const node = charter.nodes[source];
+  if (!node) throw new Error(`Unknown node in command ref: ${ref}`);
+  const command = node.commands?.[name];
+  if (!command) throw new Error(`Unknown command on node ${source}: ${name}`);
+  return command as AnyCommandDefinition<unknown>;
+}
 
 /**
  * Resolve a node tool ref (flat or dotted).
@@ -155,13 +173,24 @@ export function deserializeNode<S>(
     }
   }
 
+  // Resolve command refs (supports dotted nested refs — node commands only)
+  const commands: Record<string, AnyCommandDefinition<S>> = {};
+  if (serialNode.commands) {
+    for (const [name, cmdRef] of Object.entries(serialNode.commands)) {
+      commands[name] = resolveNodeCommandRef(charter, cmdRef.ref) as AnyCommandDefinition<S>;
+    }
+  }
+
   return {
     id: uuid(),
     instructions: serialNode.instructions,
     tools,
     validator,
     transitions,
+    ...(Object.keys(commands).length > 0 ? { commands } : {}),
     initialState: serialNode.initialState,
+    ...(serialNode.executorConfig ? { executorConfig: serialNode.executorConfig } : {}),
+    ...(serialNode.name ? { name: serialNode.name } : {}),
   };
 }
 

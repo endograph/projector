@@ -59,6 +59,10 @@ function getNodeName(node: Instance["node"], charter?: Charter): string {
       }
     }
   }
+  // Preserve name from inlined nodes (set when a ref-backed node is edited)
+  if ("name" in node && typeof (node as any).name === "string") {
+    return `[inline] ${(node as any).name}`;
+  }
   return "[inline]";
 }
 
@@ -114,6 +118,7 @@ export function serializeNodeForDisplay(node: Instance["node"], charter?: Charte
     ...(node.initialState !== undefined ? { initialState: node.initialState } : {}),
     ...(packNames && packNames.length > 0 ? { packNames } : {}),
     ...(node.worker ? { worker: true } : {}),
+    ...(node.executorConfig ? { executorConfig: node.executorConfig } : {}),
   };
 }
 
@@ -194,7 +199,6 @@ export function serializeInstanceForDisplay(
     ...(children ? { children } : {}),
     ...(packs ? { packs } : {}),
     ...(instance.packStates ? { packStates: instance.packStates } : {}),
-    ...(instance.executorConfig ? { executorConfig: { ...instance.executorConfig } } : {}),
     ...(instance.suspended
       ? {
           suspended: {

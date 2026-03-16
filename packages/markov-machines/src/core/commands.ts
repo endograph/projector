@@ -42,7 +42,7 @@ export function getAvailableCommands(machine: Machine): CommandInfo[] {
   }));
 
   // Collect pack commands from all packs on the node
-  const packs = active.node.packs ?? [];
+  const packs = active.packs ?? active.node.packs ?? [];
   for (const pack of packs) {
     const packCommands = pack.commands ?? {};
     for (const [name, cmd] of Object.entries(packCommands)) {
@@ -169,7 +169,7 @@ export async function runCommand<AppMessage = unknown>(
   }
 
   // Check if this is a pack command
-  const packs = target.node.packs ?? [];
+  const packs = target.packs ?? target.node.packs ?? [];
   for (const pack of packs) {
     if (pack.commands?.[commandName]) {
       // Pass ROOT's packStates (pack states are only stored on root instance)
@@ -230,8 +230,8 @@ async function executePackCommand<AppMessage = unknown>(
 ): Promise<CommandExecutionResult & {
   messages?: MachineMessage<AppMessage>[];
 }> {
-  // Find the pack on the node
-  const pack = instance.node.packs?.find((p) => p.name === packName);
+  // Find the pack on the instance (deserialized) or fall back to node
+  const pack = (instance.packs ?? instance.node.packs)?.find((p) => p.name === packName);
   if (!pack) {
     return { success: false, error: `Pack not found: ${packName}` };
   }

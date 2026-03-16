@@ -29,6 +29,7 @@ export interface DisplayNode {
   packNames?: string[];
   packs?: DisplayPack[];
   worker?: boolean;
+  executorConfig?: StandardNodeConfig;
 }
 
 export interface DisplayInstance {
@@ -38,6 +39,5 @@ export interface DisplayInstance {
   children?: DisplayInstance[];
   packs?: DisplayPack[];
   packStates?: Record<string, unknown>;
-  executorConfig?: StandardNodeConfig;
   suspended?: SerializedSuspendInfo;
 }

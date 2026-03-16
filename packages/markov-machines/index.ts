@@ -118,6 +118,7 @@ export type {
   TextBlock,
   ImageDetail,
   ImageBlock,
+  FileBlock,
   ToolUseBlock,
   ToolResultBlock,
   ThinkingBlock,

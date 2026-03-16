@@ -41,11 +41,16 @@ export function serializeNode<S>(
   charter?: Charter<any>,
   options?: SerializeNodeOptions,
 ): SerialNode<S> | Ref {
-  // Check if this node is registered in the charter (unless noNodeRef is set)
-  if (charter && !options?.noNodeRef) {
+  // Check if this node is registered in the charter
+  let charterName: string | undefined;
+  if (charter) {
     for (const [name, registeredNode] of Object.entries(charter.nodes)) {
       if (registeredNode.id === node.id) {
-        return { ref: name };
+        if (!options?.noNodeRef) {
+          return { ref: name };
+        }
+        charterName = name;
+        break;
       }
     }
   }
@@ -97,12 +102,34 @@ export function serializeNode<S>(
     }
   }
 
+  // Serialize command refs (node commands only — not packs)
+  const commandRefs: Record<string, Ref> = {};
+  if (charter && node.commands) {
+    for (const [name, command] of Object.entries(node.commands)) {
+      // Check charter.nodes for matching command by reference identity
+      let found = false;
+      for (const [nodeName, regNode] of Object.entries(charter.nodes)) {
+        if (regNode.commands?.[name] === command) {
+          commandRefs[name] = { ref: `${nodeName}.${name}` };
+          found = true;
+          break;
+        }
+      }
+      // Unregistered inline commands are skipped (can't be serialized)
+    }
+  }
+
+  const name = charterName ?? (node as unknown as Record<string, unknown>).name;
+
   return {
+    ...(name ? { name: name as string } : {}),
     instructions: node.instructions,
     validator,
     transitions,
     ...(Object.keys(toolRefs).length > 0 ? { tools: toolRefs } : {}),
+    ...(Object.keys(commandRefs).length > 0 ? { commands: commandRefs } : {}),
     initialState: node.initialState,
+    ...(node.executorConfig ? { executorConfig: node.executorConfig } : {}),
   };
 }
 
@@ -275,7 +302,6 @@ export function serializeInstance(
     state: instance.state,
     children,
     ...(packInstances && packInstances.length > 0 ? { packInstances } : {}),
-    ...(instance.executorConfig ? { executorConfig: instance.executorConfig } : {}),
     ...(instance.suspended ? {
       suspended: {
         suspendId: instance.suspended.suspendId,

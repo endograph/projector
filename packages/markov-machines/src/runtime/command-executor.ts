@@ -113,7 +113,6 @@ export async function executeCommand(
         newState,
         undefined,
         instance.packStates,
-        cmdResult.executorConfig,
       );
       return {
         result: { success: true },
@@ -128,9 +127,6 @@ export async function executeCommand(
         createInstance(
           target.node,
           target.state ?? target.node.initialState,
-          undefined,
-          undefined,
-          target.executorConfig,
         ),
       );
       const updatedInstance: Instance = {

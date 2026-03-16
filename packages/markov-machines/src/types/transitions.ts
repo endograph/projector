@@ -1,7 +1,6 @@
 import type { z } from "zod";
 import type { Ref, SerialNode, SerialTransition } from "./refs";
 import type { Node } from "./node";
-import type { StandardNodeConfig } from "../executor/types";
 import type { MachineMessage } from "./messages";
 
 /**
@@ -22,8 +21,6 @@ export interface TransitionContext {
 export interface SpawnTarget<T = unknown> {
   node: Node<any, T>;
   state?: T;
-  /** Override executor config for this spawned instance */
-  executorConfig?: StandardNodeConfig;
 }
 
 /**
@@ -35,8 +32,6 @@ export interface TransitionToResult<T = unknown> {
   type: "transition";
   node: Node<any, T>;
   state?: T;
-  /** Override executor config for this transition */
-  executorConfig?: StandardNodeConfig;
 }
 
 /**
@@ -85,18 +80,12 @@ export type TransitionResult<T = unknown> =
 /**
  * Options for spawn helper.
  */
-export interface SpawnOptions {
-  /** Override executor config for spawned instance(s) */
-  executorConfig?: StandardNodeConfig;
-}
+export interface SpawnOptions {}
 
 /**
  * Options for transitionTo helper.
  */
-export interface TransitionToOptions {
-  /** Override executor config for the transition target */
-  executorConfig?: StandardNodeConfig;
-}
+export interface TransitionToOptions {}
 
 
 /**
@@ -151,7 +140,6 @@ export function transitionTo<T>(
     type: "transition",
     node,
     state,
-    executorConfig: options?.executorConfig,
   };
 }
 

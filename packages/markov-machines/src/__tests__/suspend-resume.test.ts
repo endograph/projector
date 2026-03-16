@@ -102,7 +102,6 @@ function createMockExecutor(
             children: newChildren.map(c => ({
               node: c.node,
               state: c.state,
-              executorConfig: c.executorConfig,
             })),
           }, source)]);
         }

@@ -80,7 +80,7 @@ export function spawn<T = unknown>(
 ): SpawnResult<T> {
   const children: SpawnTarget<T>[] = Array.isArray(nodeOrTargets)
     ? nodeOrTargets
-    : [{ node: nodeOrTargets, state, executorConfig: options?.executorConfig }];
+    : [{ node: nodeOrTargets, state }];
   return {
     type: "spawn",
     children,

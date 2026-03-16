@@ -207,7 +207,7 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
     });
 
     // Resolve effective executor config (instance > node > executor defaults)
-    const execConfig = instance.executorConfig ?? instance.node.executorConfig ?? {};
+    const execConfig = instance.node.executorConfig ?? {};
 
     // Runtime validation of known executorConfig fields
     if (execConfig.model !== undefined && typeof execConfig.model !== "string") {
@@ -491,6 +491,13 @@ export class StandardExecutor<AppMessage = unknown> implements Executor<AppMessa
             media_type: block.mimeType as any,
             data: block.data,
           },
+        };
+      }
+      if (block.type === "file") {
+        const label = block.filename ? `${block.filename} (${block.mediaType})` : block.mediaType;
+        return {
+          type: "text" as const,
+          text: `[file: ${label}] ${block.url}`,
         };
       }
       if (block.type === "tool_use") {

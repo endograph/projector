@@ -382,7 +382,7 @@ export async function processToolCalls<AppMessage = unknown>(
       };
 
       if (tracer) {
-        await tracer.withSpan("tool.updateState", (span) => {
+        await tracer.withSpan("update state", (span) => {
           const result = execUpdateState();
           span.log({
             input: { patch: (toolInput as any)?.patch },
@@ -393,7 +393,7 @@ export async function processToolCalls<AppMessage = unknown>(
               newState: result.newState,
             },
           });
-        });
+        }, { attributes: { type: "tool" } });
       } else {
         execUpdateState();
       }
@@ -414,7 +414,7 @@ export async function processToolCalls<AppMessage = unknown>(
       };
 
       if (tracer) {
-        await tracer.withSpan(`tool.transition.${transitionName}`, (span) => {
+        await tracer.withSpan('transition', (span) => {
           const wasAlreadyQueued = !!queuedTransition;
           const result = execTransition();
           span.log({
@@ -425,7 +425,7 @@ export async function processToolCalls<AppMessage = unknown>(
               queuedTransition: result.queuedTransition,
             },
           });
-        });
+        }, { attributes: { type: "task" } });
       } else {
         execTransition();
       }
@@ -478,7 +478,7 @@ export async function processToolCalls<AppMessage = unknown>(
       };
 
       if (tracer) {
-        await tracer.withSpan(`tool.${name}`, async (span) => {
+        await tracer.withSpan(`${name}`, async (span) => {
           const result = await execRegularTool();
           if (result) {
             const content = result.toolResult.content;
@@ -493,7 +493,7 @@ export async function processToolCalls<AppMessage = unknown>(
               },
             });
           }
-        });
+        }, { attributes: { type: "tool" } });
       } else {
         await execRegularTool();
       }

@@ -9,13 +9,11 @@ import {
   isSuspendResult,
 } from "../types/transitions";
 import { createInstance, createSuspendInfo } from "../types/instance";
-import type { StandardNodeConfig } from "../executor/types";
 
 export interface TransitionOutcome {
   node: Node<any, unknown>;
   state: unknown;
   children: Instance[] | undefined;
-  executorConfig?: StandardNodeConfig;
   yieldReason: "tool_use" | "cede" | "suspend";
   /** Content from cede (string or MachineMessage[]) */
   cedeContent?: string | MachineMessage<unknown>[];
@@ -58,13 +56,10 @@ export function handleTransitionResult(
 
   if (isSpawnResult(result)) {
     // Spawn: add children to current instance
-    const newChildren = result.children.map(({ node, state, executorConfig: childExecConfig }) =>
+    const newChildren = result.children.map(({ node, state }) =>
       createInstance(
         node,
         state ?? node.initialState,
-        undefined, // children
-        undefined, // packStates
-        childExecConfig ?? node.executorConfig, // Apply config hierarchy
       ),
     );
 
@@ -99,7 +94,6 @@ export function handleTransitionResult(
       node: newNode,
       state: newState,
       children: undefined, // Clear children on transition to new node
-      executorConfig: result.executorConfig ?? newNode.executorConfig,
       yieldReason: "tool_use", // More work to do on new node
     };
   }

@@ -1,7 +1,6 @@
 import { v4 as uuid } from "uuid";
 import type { Node } from "./node";
 import type { Pack } from "./pack";
-import type { StandardNodeConfig } from "../executor/types";
 import type { SuspendResult } from "./transitions";
 
 /**
@@ -43,8 +42,6 @@ export interface Instance<N extends Node<any, any> = Node<any, any>> {
   packStates?: Record<string, unknown>;
   /** Deserialized packs with their actual instructions (may differ from charter packs if edited) */
   packs?: Pack[];
-  /** Effective executor config for this instance (override or from node) */
-  executorConfig?: StandardNodeConfig;
   /** Suspension info - if present, instance is suspended */
   suspended?: SuspendInfo;
 }
@@ -58,7 +55,6 @@ export function createInstance<N extends Node<any, any>>(
   state: NodeState<N>,
   children?: Instance | Instance[],
   packStates?: Record<string, unknown>,
-  executorConfig?: StandardNodeConfig,
 ): Instance<N> {
   // Normalize children to array
   let normalizedChildren: Instance[] | undefined;
@@ -72,7 +68,6 @@ export function createInstance<N extends Node<any, any>>(
     state,
     children: normalizedChildren,
     packStates,
-    executorConfig,
   };
 }
 

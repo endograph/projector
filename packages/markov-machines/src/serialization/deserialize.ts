@@ -112,7 +112,6 @@ export function deserializeInstance(
     children,
     ...(packStates && Object.keys(packStates).length > 0 ? { packStates } : {}),
     ...(packs && packs.length > 0 ? { packs } : {}),
-    ...(serialized.executorConfig ? { executorConfig: serialized.executorConfig } : {}),
     ...(serialized.suspended ? {
       suspended: {
         suspendId: serialized.suspended.suspendId,

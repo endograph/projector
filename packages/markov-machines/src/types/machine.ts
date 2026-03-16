@@ -2,7 +2,6 @@ import type { Charter } from "./charter";
 import type { Instance, SuspendInfo } from "./instance";
 import type { MachineMessage } from "./messages";
 import type { Ref, SerialNode, SerialPack } from "./refs";
-import type { StandardNodeConfig } from "../executor/types";
 import type { ExternalizeRuntime } from "./externalize";
 
 /**
@@ -85,8 +84,6 @@ export interface SerializedInstance {
   children?: SerializedInstance[];
   /** Pack instances with state (only on root instance) */
   packInstances?: SerialPackInstance[];
-  /** Per-instance executor configuration override */
-  executorConfig?: StandardNodeConfig;
   /** Suspension info if suspended */
   suspended?: SerializedSuspendInfo;
 }

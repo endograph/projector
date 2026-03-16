@@ -80,7 +80,7 @@ export async function runToolPipeline<AppMessage = unknown>(
   }
 
   if (tracer) {
-    return tracer.withSpan("tool_pipeline", async (span) => {
+    return tracer.withSpan("tool pipeline", async (span) => {
       span.log({
         input: {
           toolNames: toolCalls.map(tc => tc.name),
@@ -93,7 +93,7 @@ export async function runToolPipeline<AppMessage = unknown>(
         output: { yieldReason: result.yieldReason },
       });
       return result;
-    });
+    }, { attributes: { type: 'task' }});
   }
 
   return runToolPipelineInner<AppMessage>(ctx, toolCalls, undefined);
@@ -228,7 +228,6 @@ async function runToolPipelineInner<AppMessage = unknown>(
               children: newChildren.map(c => ({
                 node: c.node,
                 state: c.state,
-                executorConfig: c.executorConfig,
               })),
             },
             source,
@@ -241,7 +240,6 @@ async function runToolPipelineInner<AppMessage = unknown>(
               instanceId: instance.id,
               node: outcome.node,
               state: outcome.state,
-              executorConfig: outcome.executorConfig,
             },
             source,
           )]);

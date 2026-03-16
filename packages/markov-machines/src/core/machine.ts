@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import type { Charter } from "../types/charter";
 import type { Machine, MachineConfig } from "../types/machine";
-import type { Instance } from "../types/instance";
+import { type Instance, getAllInstances } from "../types/instance";
 import type { Pack } from "../types/pack";
 import type { MachineMessage } from "../types/messages";
 import { isEphemeralMessage } from "../types/messages";
@@ -38,39 +38,37 @@ function validateInstance(instance: Instance): Instance {
 }
 
 /**
- * Initialize pack states for all packs in the charter.
- * Uses initialState from each pack if defined.
+ * Walk all instances in the tree, collect node-level packs,
+ * and hoist them to the root instance (deduplicating by name).
+ * Initializes packStates for any newly hoisted packs.
  */
-function initializePackStates(charter: Charter<any>): Record<string, unknown> {
-  const packStates: Record<string, unknown> = {};
-  for (const pack of charter.packs) {
-    packStates[pack.name] = pack.initialState;
-  }
-  return packStates;
-}
+function hoistAllNodePacksToRoot(root: Instance): Instance {
+  const allInstances = getAllInstances(root);
+  const existingPacks = root.packs ?? [];
+  const existingNames = new Set(existingPacks.map(p => p.name));
 
-function ensurePackStatesForCharter(
-  charter: Charter<any>,
-  existing: Record<string, unknown> | undefined,
-): Record<string, unknown> | undefined {
-  if (charter.packs.length === 0) return existing;
-
-  const base = existing ?? {};
-  let changed = existing === undefined;
-  let packStates: Record<string, unknown> = changed ? { ...base } : base;
-
-  for (const pack of charter.packs) {
-    if (!(pack.name in packStates)) {
-      if (!changed) {
-        // Copy-on-write
-        packStates = { ...base };
-        changed = true;
+  const newPacks: Pack[] = [];
+  for (const inst of allInstances) {
+    for (const pack of inst.node.packs ?? []) {
+      if (!existingNames.has(pack.name)) {
+        existingNames.add(pack.name);
+        newPacks.push(pack);
       }
-      packStates[pack.name] = pack.initialState;
     }
   }
 
-  return changed ? packStates : existing;
+  if (newPacks.length === 0) return root;
+
+  const packStates = root.packStates ?? {};
+  for (const pack of newPacks) {
+    getOrInitPackState(packStates, pack);
+  }
+
+  return {
+    ...root,
+    packs: [...existingPacks, ...newPacks],
+    packStates,
+  };
 }
 
 /**
@@ -98,13 +96,7 @@ export function createMachine<AppMessage = unknown>(
 ): Machine<AppMessage> {
   const { instance: inputInstance, history = [], onMessageEnqueue } = config;
 
-  const packStates = ensurePackStatesForCharter(charter, inputInstance.packStates);
-
-  // Ensure pack states exist and include all charter packs (immutably)
-  const instance =
-    packStates && packStates !== inputInstance.packStates
-      ? { ...inputInstance, packStates }
-      : inputInstance;
+  const instance = hoistAllNodePacksToRoot(inputInstance);
 
   // Validate the entire instance tree (may return new instance with generated IDs)
   const validatedInstance = validateInstance(instance);
