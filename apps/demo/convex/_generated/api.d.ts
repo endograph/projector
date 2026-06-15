@@ -9,11 +9,11 @@
  */
 
 import type * as branching from "../branching.js";
+import type * as convexJson from "../convexJson.js";
 import type * as http from "../http.js";
 import type * as livekitAgent from "../livekitAgent.js";
 import type * as livekitAgentActions from "../livekitAgentActions.js";
-import type * as machineSteps from "../machineSteps.js";
-import type * as machineTurns from "../machineTurns.js";
+import type * as machineFrames from "../machineFrames.js";
 import type * as messages from "../messages.js";
 import type * as sessionActions from "../sessionActions.js";
 import type * as sessionEphemera from "../sessionEphemera.js";
@@ -27,11 +27,11 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   branching: typeof branching;
+  convexJson: typeof convexJson;
   http: typeof http;
   livekitAgent: typeof livekitAgent;
   livekitAgentActions: typeof livekitAgentActions;
-  machineSteps: typeof machineSteps;
-  machineTurns: typeof machineTurns;
+  machineFrames: typeof machineFrames;
   messages: typeof messages;
   sessionActions: typeof sessionActions;
   sessionEphemera: typeof sessionEphemera;

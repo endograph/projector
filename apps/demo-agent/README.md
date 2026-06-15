@@ -1,60 +1,50 @@
-# Demo Voice Agent
+# demo-agent
 
-LiveKit voice agent for the demo app. Supports two modes:
+LiveKit worker for the projector demo.
 
-- **Realtime mode** (`ENABLE_REALTIME_MODEL=true`): Uses OpenAI Realtime API for low-latency voice-to-voice
-- **Pipeline mode** (`ENABLE_REALTIME_MODEL=false`): Uses STT → LLM → TTS pipeline
+The web app dispatches this worker when the demo voice toggle is enabled. The worker joins the LiveKit room, starts an OpenAI Realtime session, syncs compiled projector instructions/tools through `@projectors/livekit-executor`, and persists voice transcripts back to the same Convex session used by text chat.
 
 ## Setup
 
-1. Copy `.env.example` to `.env` and fill in the values:
+Create `apps/demo-agent/.env`:
 
 ```bash
-cp .env.example .env
+LIVEKIT_API_KEY=your-livekit-api-key
+LIVEKIT_API_SECRET=your-livekit-api-secret
+LIVEKIT_URL=wss://your-project.livekit.cloud
+OPENAI_API_KEY=your-openai-api-key
+CONVEX_URL=https://your-deployment.convex.cloud
+ENABLE_REALTIME_MODEL=true
 ```
 
-2. Set your Convex deployment URL and create a `VOICE_AGENT_SECRET`:
+Optional:
 
 ```bash
-# In Convex dashboard, add these environment variables:
-# - LIVEKIT_API_KEY
-# - LIVEKIT_API_SECRET
-# - LIVEKIT_URL
-# - VOICE_AGENT_SECRET (generate a random string)
+OPENAI_REALTIME_MODEL=gpt-realtime-2
+OPENAI_REALTIME_VOICE=alloy
+OPENAI_REALTIME_VAD_THRESHOLD=0.65
+OPENAI_REALTIME_VAD_SILENCE_DURATION_MS=800
+OPENAI_REALTIME_VAD_PREFIX_PADDING_MS=300
+OPENAI_REALTIME_INPUT_NOISE_REDUCTION=near_field
 ```
 
-3. Install dependencies:
+For noisier rooms, raise `OPENAI_REALTIME_VAD_THRESHOLD` toward `0.8` so audio must be louder before it is treated as speech. Increase `OPENAI_REALTIME_VAD_SILENCE_DURATION_MS` if the agent cuts in too aggressively after brief pauses. Set `OPENAI_REALTIME_INPUT_NOISE_REDUCTION` to `near_field` for a headset/close mic, `far_field` for a room mic, or `off` to disable OpenAI input noise reduction.
 
-```bash
-bun install
-```
+The agent name is `demo-agent`; `apps/demo/convex/livekitAgentActions.ts` dispatches that exact name.
 
-4. Download required models (VAD, etc.):
+## Run
 
-```bash
-bun run download-files
-```
-
-## Running
-
-Development mode:
+From this directory:
 
 ```bash
 bun run dev
 ```
 
-Production:
+Then run the demo app and enable `voice` in the terminal toolbar. The browser will request a LiveKit token from Convex, join the room, and dispatch this worker.
+
+For a production-style run:
 
 ```bash
 bun run build
 bun run start
 ```
-
-## Architecture
-
-The agent:
-1. Joins a LiveKit room when dispatched by the frontend
-2. Listens to user audio and responds with voice
-3. Persists transcripts to Convex via HTTP endpoint with idempotency
-
-Transcripts are stored with idempotency keys (`{roomName}:{segmentId}:{role}`) to ensure exactly-once delivery even if the agent retries.

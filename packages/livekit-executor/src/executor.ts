@@ -1,618 +1,818 @@
-/**
- * LiveKitExecutor - An executor that delegates inference to a LiveKit voice agent.
- *
- * For primary nodes:
- * - Skips inference (no LLM call)
- * - Pushes instructions and tools to the LiveKit agent
- * - Returns yieldReason: "external" so runMachine waits for queue
- *
- * For worker nodes:
- * - Delegates to StandardExecutor
- *
- * LiveKit events are mapped to machine messages via machine.enqueue().
- */
+import { llm } from "@livekit/agents";
+import { GET_STATE_ACTION_NAME, SYNTHETIC_ROOT_RUNTIME_ID } from "@projectors/core";
+import type { ActionContext, ActorMessage, AnyAction, CompiledInference, RuntimeSyncContext } from "@projectors/core";
+import { z } from "zod";
+import type {
+  ExecutorRunRequest,
+  ExecutorRunResult,
+  Frame,
+  FrameDraft,
+  FrameMessage,
+  LiveKitAgentLike,
+  LiveKitAssistantTranscriptUpdate,
+  LiveKitExecutorConfig,
+  LiveKitEventNames,
+  LiveKitFunctionTool,
+  LiveKitRealtimeSessionLike,
+  LiveKitTextOutputLike,
+  LiveKitToolContext,
+  LiveKitToolDefinition,
+  LiveKitUserTranscriptUpdate,
+  ProjectorExecutor,
+  RunActionInput,
+} from "./types.ts";
 
-import { llm, voice } from "@livekit/agents";
-import {
-  type Executor,
-  type RunOptions,
-  type RunResult,
-  type Charter,
-  type Instance,
-  type Machine,
-  type MachineMessage,
-  type ToolCall,
-  type InstanceMessage,
-  StandardExecutor,
-  buildSystemPrompt,
-  generateToolDefinitions,
-  runToolPipeline,
-  userMessage,
-  assistantMessage,
-  findInstanceById,
-  createStandardExecutor,
-  createInstance,
-  getActiveInstance,
-  getInstancePath,
-  getMessageText,
-  isInstanceMessage,
-} from "markov-machines";
+export const SYNTHETIC_ROOT_GENERATOR_ID = SYNTHETIC_ROOT_RUNTIME_ID;
 
-import type { LiveKitExecutorConfig, ConnectConfig, LiveKitToolDefinition } from "./types.js";
+const ASSISTANT_TRANSCRIPT_OUTPUT_OWNER = Symbol("livekitExecutorAssistantTranscriptOutputOwner");
 
-// Counter for generating unique tool call IDs
-let toolCallIdCounter = 0;
-function generateToolCallId(): string {
-  return `tc_${Date.now()}_${++toolCallIdCounter}`;
+const DEFAULT_EVENT_NAMES: LiveKitEventNames = {
+  userInputTranscribed: "user_input_transcribed",
+  userStateChanged: "user_state_changed",
+  conversationItemAdded: "conversation_item_added",
+  dataReceived: "data_received",
+};
+
+let frameIdCounter = 0;
+
+export class LiveKitExecutor implements ProjectorExecutor {
+  readonly type = "livekit";
+
+  readonly connection: LiveKitConnection;
+
+  constructor(readonly config: LiveKitExecutorConfig) {
+    this.connection = new LiveKitConnection(this, config);
+  }
+
+  disconnect(): void {
+    this.connection.disconnect();
+  }
+
+  async run(request: ExecutorRunRequest): Promise<ExecutorRunResult> {
+    if (request.runtimeInstanceId !== SYNTHETIC_ROOT_RUNTIME_ID) {
+      return this.config.discreteExecutor.run(request);
+    }
+
+    if (!this.connection.isRealtimeActive()) {
+      return this.config.discreteExecutor.run(request);
+    }
+
+    return { completionReason: "delegated" };
+  }
+
+  async syncRuntime(context: RuntimeSyncContext): Promise<void> {
+    if (context.runtimeInstanceId !== SYNTHETIC_ROOT_RUNTIME_ID) return;
+    await this.connection.syncRuntime(context);
+  }
+
+  getTool(name: string): AnyAction | undefined {
+    return this.connection.getTool(name);
+  }
+
+  executeTool(name: string, input: unknown, liveKitContext?: unknown): Promise<unknown> {
+    return this.connection.executeTool(name, input, liveKitContext);
+  }
+
+  log(message: string, details?: unknown): void {
+    if (!this.config.debug) return;
+    if (details === undefined) {
+      console.log(`[LiveKitExecutor] ${message}`);
+    } else {
+      console.log(`[LiveKitExecutor] ${message}`, details);
+    }
+  }
 }
 
-/**
- * LiveKitExecutor delegates voice inference to a LiveKit agent.
- *
- * Usage:
- * ```ts
- * const executor = new LiveKitExecutor();
- * const charter = createCharter({ executor, ... });
- * const machine = createMachine(charter, ...);
- *
- * // In your LiveKit agent entry:
- * await executor.connect(machine, { session, room: ctx.room });
- *
- * // Run the machine loop
- * for await (const step of runMachine(machine)) {
- *   await saveToConvex(step);
- * }
- * ```
- */
-export class LiveKitExecutor implements Executor {
-  type = "livekit";
+export class LiveKitConnection {
+  private readonly eventNames: LiveKitEventNames;
+  private readonly handlers: Array<{
+    target: "session" | "room";
+    event: string;
+    handler: (...args: unknown[]) => void;
+  }> = [];
+  private disconnected = false;
+  private syncTail: Promise<void> = Promise.resolve();
+  private currentSyncContext?: RuntimeSyncContext;
+  private currentInference?: CompiledInference;
+  private currentInstructions = "";
+  private currentTools: LiveKitToolContext = {};
+  private toolRegistry = new Map<string, AnyAction>();
+  private readonly forwardedInputFrameIds = new Set<string>();
+  private readonly assistantTranscripts = new AssistantTranscriptStream(this);
+  private readonly userTranscripts = new UserTranscriptEnvelope(this);
 
-  private config: LiveKitExecutorConfig;
-  private workerExecutor: StandardExecutor;
-  private machine: Machine | null = null;
-  private session: voice.AgentSession | null = null;
-  private agent: voice.Agent | null = null;
-  private connected = false;
+  constructor(
+    private readonly executor: LiveKitExecutor,
+    readonly config: LiveKitExecutorConfig,
+  ) {
+    this.eventNames = {
+      ...DEFAULT_EVENT_NAMES,
+      ...config.eventNames,
+    };
+    this.installEventHandlers();
+  }
 
-  /** Track whether we've bootstrapped history into LiveKit for this live session */
-  private hasBootstrappedHistory = false;
-  /** Track the last history length we bootstrapped from, to avoid re-bootstrapping unchanged history */
-  private lastBootstrappedHistoryLength = 0;
+  get inference(): CompiledInference | undefined {
+    return this.currentInference;
+  }
 
-  /** Track registered event handlers for cleanup on reconnect */
-  private eventHandlers: {
-    userInputTranscribed?: (ev: any) => void;
-    conversationItemAdded?: (ev: any) => void;
-  } = {};
+  get instructions(): string {
+    return this.currentInstructions;
+  }
 
-  constructor(config: LiveKitExecutorConfig = {}) {
-    this.config = config;
-    this.workerExecutor = createStandardExecutor({
-      debug: config.debug,
-      apiKey: config.apiKey,
-      model: config.model,
-      maxTokens: config.maxTokens,
+  get tools(): LiveKitToolContext {
+    return this.currentTools;
+  }
+
+  disconnect(): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
+    this.assistantTranscripts.restore();
+    this.userTranscripts.reset();
+    for (const { target, event, handler } of this.handlers.splice(0)) {
+      if (target === "session") {
+        this.config.session.off?.(event, handler);
+      } else {
+        this.config.room?.off?.(event, handler);
+      }
+    }
+  }
+
+  isRealtimeActive(context: RuntimeSyncContext | undefined = this.currentSyncContext): boolean {
+    const enabled = this.executor.config.realtime?.enabled;
+    if (typeof enabled === "function") {
+      return context ? enabled(context) : false;
+    }
+    if (enabled !== undefined) return enabled;
+
+    return !!this.getRealtimeSession();
+  }
+
+  syncRuntime(context: RuntimeSyncContext): Promise<void> {
+    const job = this.syncTail
+      .catch(() => undefined)
+      .then(async () => {
+        await this.syncNow(context);
+        await this.forwardVisibleInput(context);
+      });
+    this.syncTail = job;
+    return job;
+  }
+
+  getTool(name: string): AnyAction | undefined {
+    return this.toolRegistry.get(name);
+  }
+
+  async executeTool(
+    name: string,
+    input: unknown,
+    liveKitContext?: unknown,
+  ): Promise<unknown> {
+    const action = this.toolRegistry.get(name);
+    if (!action) {
+      throw new Error(`No LiveKit tool named "${name}" is registered in the current projection`);
+    }
+
+    await this.enqueueToolFrame(name, { phase: "call", input });
+    const context: ActionContext<unknown> =
+      this.currentSyncContext?.createActionContext(action) ?? {};
+    if (action.name === GET_STATE_ACTION_NAME) {
+      context.getState ??= (address) => this.getRetrievableState(address);
+    }
+    const runAction = this.config.runAction;
+    const runInput: RunActionInput = { action, input, context, liveKitContext };
+    const value = runAction
+      ? await runAction(runInput)
+      : action.run
+        ? await action.run(input, context)
+        : undefined;
+    await this.enqueueToolFrame(name, { phase: "result", value });
+    return value;
+  }
+
+  private async getRetrievableState(address: string): Promise<unknown> {
+    const state = this.currentInference?.retrievableStates.find(
+      (entry) => entry.address === address,
+    );
+    if (!state) {
+      throw new Error(`Unknown retrievable state address "${address}"`);
+    }
+
+    const getState = this.config.getState;
+    if (!getState) {
+      throw new Error("No getState handler is available for this inference");
+    }
+
+    return getState({ address, state });
+  }
+
+  async enqueueAssistantTranscript(
+    text: string,
+    metadata: Record<string, unknown> = {},
+  ): Promise<Frame> {
+    return this.enqueueFrame({
+      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      inert: true,
+      metadata: { mode: "voice", transport: "livekit", transcript: true },
+      messages: [
+        {
+          type: "assistant",
+          text,
+          audience: "self",
+          source: { external: true },
+          ...metadata,
+        } as FrameMessage,
+      ],
     });
   }
 
-  /**
-   * Check if we're using OpenAI Realtime mode (vs STT->LLM->TTS pipeline).
-   * Realtime mode is active when the agent's activity has an active RealtimeSession.
-   */
-  private isRealtimeMode(): boolean {
-    return !!this.agent?._agentActivity?.realtimeLLMSession;
+  async enqueueUserTranscript(
+    text: string,
+    metadata: Record<string, unknown> = {},
+  ): Promise<Frame> {
+    return this.enqueueFrame({
+      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      inert: true,
+      metadata: { mode: "voice", transport: "livekit", transcript: true },
+      messages: [
+        {
+          type: "user",
+          text,
+          audience: "broadcast",
+          source: { external: true },
+          ...metadata,
+        } as FrameMessage,
+      ],
+    });
   }
 
-  /**
-   * Set whether we're in live (voice) mode.
-   * When true, primary nodes delegate to LiveKit.
-   * When false, primary nodes use StandardExecutor.
-   */
-  setLive(isLive: boolean): void {
-    const wasLive = this.config.isLive ?? false;
-    this.config.isLive = isLive;
-    this.log(`Live mode: ${isLive}`);
+  private async syncNow(input: CompiledInference | RuntimeSyncContext): Promise<void> {
+    if (this.disconnected) return;
 
-    if (this.machine) {
-      const active = getActiveInstance(this.machine.instance);
-      const currentToolNames = this.agent?._tools ? Object.keys(this.agent._tools) : [];
-      console.log(`[LiveKit setLive(${isLive})] Current active node: ${active.node.id} (${active.node.name ?? "unnamed"}), tools: [${currentToolNames.join(", ")}]`);
-    }
-
-    // Reset bootstrap tracking when transitioning out of live mode
-    // This ensures we re-bootstrap history next time live mode is enabled
-    if (wasLive && !isLive) {
-      this.hasBootstrappedHistory = false;
-      this.lastBootstrappedHistoryLength = 0;
-      this.log("Reset history bootstrap tracking");
-    }
-
-    // If turning on live mode, push config immediately to bootstrap history
-    if (!wasLive && isLive && this.connected) {
-      // Fire and forget - don't block setLive on async config push
-      this.pushConfigToLiveKit().catch((err) => {
-        console.error("[LiveKitExecutor] Failed to push config on setLive:", err);
-      });
-    }
-  }
-
-  /**
-   * Get current live mode state.
-   */
-  get isLive(): boolean {
-    return this.config.isLive ?? false;
-  }
-
-  /**
-   * Connect the executor to a machine and LiveKit session.
-   * Sets up event handlers that enqueue messages to the machine.
-   */
-  async connect(machine: Machine, connectConfig: ConnectConfig): Promise<void> {
-    this.machine = machine;
-    this.session = connectConfig.session;
-    this.agent = connectConfig.agent;
-
-    this.log("Connecting to LiveKit session...");
-
-    // Set up event handlers
-    this.setupEventHandlers();
-
-    // Push initial config to LiveKit (instructions + tools)
-    await this.pushConfigToLiveKit();
-
-    this.connected = true;
-    this.log("Connected");
-  }
-
-  /**
-   * Run the executor for a node instance.
-   *
-   * Worker nodes: always delegate to StandardExecutor
-   * Primary nodes when isLive=true: skip inference, push config to LiveKit, return "external"
-   * Primary nodes when isLive=false: delegate to StandardExecutor
-   */
-  async run(
-    charter: Charter<any>,
-    instance: Instance,
-    ancestors: Instance[],
-    input: string,
-    options?: RunOptions,
-  ): Promise<RunResult> {
-    if (!this.connected) {
-      throw new Error("LiveKitExecutor.connect() must be called before run()");
-    }
-
-    const isWorker = instance.node.worker === true;
-
-    // Worker nodes always use StandardExecutor
-    if (isWorker) {
-      this.log(`Running worker node: ${instance.node.id}`);
-      return this.workerExecutor.run(charter, instance, ancestors, input, options);
-    }
-
-    this.log(`Pushing primary node config to livekit. Instnace: ${instance.id}`)
-    await this.pushConfigToLiveKit();
-
-    // Primary nodes: route based on isLive flag
-    if (!this.config.isLive) {
-      this.log(`Primary node run (text mode) - using StandardExecutor`);
-      return this.workerExecutor.run(charter, instance, ancestors, input, options);
+    let nextInference: CompiledInference | undefined;
+    if (isRuntimeSyncContext(input)) {
+      this.currentSyncContext = input;
+      nextInference = input.inference;
     } else {
-      // Live mode: skip inference
-      this.log(`Primary node run (live mode) - pushing config to LiveKit`);
-      // Return "external" to signal waiting for LiveKit events
-      return { yieldReason: "external" };
+      nextInference = input;
+    }
+    if (!nextInference) return;
+
+    this.currentInference = nextInference;
+    this.currentInstructions = buildLiveKitInstructions(nextInference);
+    this.toolRegistry = buildToolRegistry(nextInference.tools);
+    this.currentTools = buildLiveKitToolContext(nextInference, this);
+
+    const realtimeSession = this.getRealtimeSession();
+    await realtimeSession?.updateInstructions?.(this.currentInstructions);
+    await realtimeSession?.updateTools?.(this.currentTools);
+
+    await this.config.session.updateInstructions?.(this.currentInstructions);
+    await this.config.session.updateTools?.(this.currentTools);
+
+    this.updateAgentSnapshot(this.config.agent, this.currentInstructions, this.currentTools);
+    // RoomIO can replace session.output.transcription after session.start(),
+    // so install the wrapper after each sync, not only at connect time.
+    this.assistantTranscripts.install();
+  }
+
+  private async forwardVisibleInput(context: RuntimeSyncContext): Promise<void> {
+    if (!this.isRealtimeActive(context)) return;
+    for (const { frameId, text } of userTextsFromFrames(context.visibleFrames)) {
+      if (this.forwardedInputFrameIds.has(frameId)) continue;
+      this.forwardedInputFrameIds.add(frameId);
+      await this.sendTextToRealtimeSession(text);
     }
   }
 
-  /**
-   * Clean up previously registered event handlers.
-   * Called before setting up new handlers to prevent accumulation.
-   */
-  private cleanupEventHandlers(): void {
-    if (!this.session) return;
-
-    if (this.eventHandlers.userInputTranscribed) {
-      this.session.off(voice.AgentSessionEventTypes.UserInputTranscribed, this.eventHandlers.userInputTranscribed);
-      this.log("Removed UserInputTranscribed handler");
-    }
-    if (this.eventHandlers.conversationItemAdded) {
-      this.session.off(voice.AgentSessionEventTypes.ConversationItemAdded, this.eventHandlers.conversationItemAdded);
-      this.log("Removed ConversationItemAdded handler");
-    }
-    this.eventHandlers = {};
-  }
-
-  /**
-   * Set up LiveKit event handlers that enqueue messages to the machine.
-   */
-  private setupEventHandlers(): void {
-    if (!this.session || !this.machine) return;
-
-    // Clean up any existing handlers first to prevent accumulation
-    this.cleanupEventHandlers();
-
-    const session = this.session;
-    const machine = this.machine;
-
-    // User speech transcription - store reference for later cleanup
-    this.eventHandlers.userInputTranscribed = (ev) => {
-      this.log(
-        `UserInputTranscribed: isFinal=${ev.isFinal} length=${ev.transcript?.length ?? 0}`
+  private async sendTextToRealtimeSession(userInput: string): Promise<void> {
+    if (this.config.session.generateReply) {
+      this.config.session.generateReply(
+        userInput ? { userInput } : { instructions: this.currentInstructions },
       );
-      if (ev.isFinal) {
-        this.log(`User transcript: "${ev.transcript}"`);
-        // Mark as external (from LiveKit STT)
-        machine.enqueue([userMessage(ev.transcript, { source: { external: true } })]);
-      }
-    };
-    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, this.eventHandlers.userInputTranscribed);
-
-    // Assistant speech / conversation items - store reference for later cleanup
-    this.eventHandlers.conversationItemAdded = (ev) => {
-      const item = ev.item;
-      const currentActiveNode = getActiveInstance(machine.instance);
-      const currentToolNames = this.agent?._tools ? Object.keys(this.agent._tools) : [];
-      console.log(`[LiveKit Response] Current active node: ${currentActiveNode.node.id} (${currentActiveNode.node.name ?? "unnamed"}), tools: [${currentToolNames.join(", ")}]`);
-      console.log(`[LiveKitExecutor] ConversationItemAdded: role=${item.role}, contentLength=${item.content?.length ?? 0}`);
-      if (item.role === "assistant") {
-        // Try textContent first (string parts), then fall back to audio transcript
-        let content = item.textContent;
-        if (!content && item.content) {
-          // Check for audio content with transcript
-          for (const part of item.content) {
-            if (typeof part === "object" && "type" in part && part.type === "audio_content" && "transcript" in part) {
-              content = part.transcript as string;
-              break;
-            }
-          }
-        }
-        console.log(`[LiveKitExecutor] Assistant content: "${content?.slice(0, 100) ?? "(undefined)"}"`);
-        if (content) {
-          console.log(`[LiveKitExecutor] Enqueuing assistant message: "${content.slice(0, 50)}..."`);
-          // Mark as external (from LiveKit TTS)
-          // Include a stable messageId for streaming/envelope upserts.
-          // For OpenAI Realtime mode, this matches the server item_id used in transcript delta events.
-          machine.enqueue([
-            assistantMessage(content, {
-              source: { external: true },
-              messageId: item.id,
-              stream: { state: "complete", seq: 1 },
-            }),
-          ]);
-        }
-      }
-    };
-    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, this.eventHandlers.conversationItemAdded);
-
-    // Tool calls - handled via function_call events
-    // Note: LiveKit tools are registered separately; here we intercept calls
-    // The actual tool registration happens in pushConfigToLiveKit
-  }
-
-  /**
-   * Render conversation history as a compact transcript for bootstrapping LiveKit context.
-   * Filters out tool_use/tool_result blocks and keeps only conversational text.
-   * 
-   * @param history - Machine history to render
-   * @param maxTurns - Maximum number of turns to include (default: 20)
-   * @param maxChars - Maximum total characters (default: 4000)
-   */
-  private renderHistoryForBootstrap(
-    history: MachineMessage[],
-    maxTurns = 20,
-    maxChars = 4000,
-  ): string {
-    const turns: string[] = [];
-    let charCount = 0;
-
-    // Process history in reverse to get most recent turns first
-    for (let i = history.length - 1; i >= 0 && turns.length < maxTurns; i--) {
-      const msg = history[i];
-      if (!msg || msg.role === "system" || msg.role === "command") continue;
-
-      const text = getMessageText(msg);
-      if (!text) continue;
-
-      const role = msg.role === "assistant" ? "Assistant" : "User";
-      const turn = `${role}: ${text}`;
-
-      if (charCount + turn.length > maxChars) break;
-
-      turns.unshift(turn); // Add to front since we're processing in reverse
-      charCount += turn.length;
-    }
-
-    if (turns.length === 0) return "";
-
-    return `## Conversation so far\n\n${turns.join("\n\n")}`;
-  }
-
-  /**
-   * Push current node's instructions and tools to the LiveKit agent.
-   * Call this after instance mutations to ensure LiveKit has the correct config.
-   *
-   * For realtime mode (OpenAI Realtime API), uses session.updateInstructions() and updateTools().
-   * For pipeline mode (STT->LLM->TTS), directly updates agent internals.
-   */
-  async pushConfigToLiveKit(): Promise<void> {
-    if (!this.machine || !this.session || !this.agent) return;
-
-    const charter = this.machine.charter;
-    const rootInstance = this.machine.instance;
-    // Get the active instance (leaf of the instance tree)
-    const activeInstance = getActiveInstance(rootInstance);
-    // Get the path from root to active, excluding the active instance itself
-    const instancePath = getInstancePath(rootInstance);
-    const ancestors = instancePath.slice(0, -1); // All except the last (active) instance
-    // Pack states are stored on the root instance
-    const packStates = rootInstance.packStates ?? {};
-    // Use deserialized packs from root instance (with correct instructions) or fall back to node.packs
-    const packs = rootInstance.packs ?? activeInstance.node.packs;
-
-    // Build system prompt
-    let instructions = buildSystemPrompt(
-      charter,
-      activeInstance.node,
-      activeInstance.state,
-      ancestors,
-      packStates,
-      {},
-      packs,
-    );
-
-    // Bootstrap history context when entering live mode
-    // Only do this once per live session, or when history has grown significantly
-    const currentHistoryLength = this.machine.history.length;
-    const shouldBootstrap = this.config.isLive && (
-      !this.hasBootstrappedHistory ||
-      currentHistoryLength > this.lastBootstrappedHistoryLength + 5
-    );
-
-    if (shouldBootstrap && currentHistoryLength > 0) {
-      const historyContext = this.renderHistoryForBootstrap(this.machine.history);
-      if (historyContext) {
-        instructions = `${historyContext}\n\n---\n\n${instructions}`;
-        this.hasBootstrappedHistory = true;
-        this.lastBootstrappedHistoryLength = currentHistoryLength;
-        this.log(`Bootstrapped history context (${currentHistoryLength} messages)`);
-      }
-    }
-
-    // Generate tool definitions
-    const tools = generateToolDefinitions(
-      charter,
-      activeInstance.node,
-      ancestors.map((a) => a.node),
-    );
-
-    // Convert to LiveKit tool format
-    const lkTools = this.convertToolsToLiveKit(tools);
-    const toolNames = lkTools.map((t) => t.name);
-
-    console.log(`[LiveKit Config Push] Active node: ${activeInstance.node.id} (${activeInstance.node.name ?? "unnamed"}), tools: [${toolNames.join(", ")}], timestamp: ${Date.now()}`);
-
-    // Branch based on realtime vs pipeline mode
-    if (this.isRealtimeMode()) {
-      // Realtime mode: use session API to update instructions and tools
-      // Access the existing session from AgentActivity (NOT realtimeModel.session() which creates a new one)
-      const rtSession = this.agent!._agentActivity!.realtimeLLMSession!;
-      this.log(`Updating realtime session: instructions (${instructions.length} chars), ${lkTools.length} tools`);
-
-      // Update instructions
-      await rtSession.updateInstructions(instructions);
-
-      // Build ToolContext for realtime session
-      const toolContext = this.buildToolContextForRealtime(lkTools);
-      await rtSession.updateTools(toolContext);
-    } else {
-      // Pipeline mode: directly update agent internals
-      this.agent._instructions = instructions;
-      this.log(`Updated instructions (${instructions.length} chars)`);
-
-      this.log(`Updating LiveKit agent config: ${lkTools.length} tools`);
-      this.registerToolsWithLiveKit(lkTools);
-    }
-  }
-
-  /**
-   * Build a ToolContext for the realtime session from our tool definitions.
-   */
-  private buildToolContextForRealtime(tools: LiveKitToolDefinition[]): llm.ToolContext {
-    const toolContext: llm.ToolContext = {};
-
-    for (const toolDef of tools) {
-      const lkTool = llm.tool({
-        description: toolDef.description,
-        parameters: toolDef.parameters as any,
-        execute: async (args: Record<string, unknown>) => {
-          const callId = generateToolCallId();
-          return this.handleToolCall({
-            id: callId,
-            name: toolDef.name,
-            input: args,
-          });
-        },
-      });
-
-      toolContext[toolDef.name] = lkTool as llm.FunctionTool<any, any, any>;
-    }
-
-    return toolContext;
-  }
-
-  /**
-   * Convert markov-machines tool definitions to LiveKit format.
-   */
-  private convertToolsToLiveKit(
-    tools: Array<{ name: string; description?: string; input_schema?: unknown }>,
-  ): LiveKitToolDefinition[] {
-    return tools
-      .filter((t) => t.input_schema) // Skip built-in tools without schema
-      .map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        parameters: t.input_schema as LiveKitToolDefinition["parameters"],
-      }));
-  }
-
-  /**
-   * Register tools with LiveKit agent.
-   * Each tool, when called by LiveKit, runs through our tool pipeline.
-   */
-  private registerToolsWithLiveKit(tools: LiveKitToolDefinition[]): void {
-    if (!this.agent) {
-      this.log("No agent to register tools with");
       return;
     }
 
-    // Build LiveKit tool context from our tool definitions
-    const toolContext: llm.ToolContext = {};
+    const realtimeSession = this.getRealtimeSession();
+    if (userInput && realtimeSession?.sendInput) {
+      await realtimeSession.sendInput(userInput);
+      return;
+    }
 
-    for (const toolDef of tools) {
-      // Create a LiveKit tool that calls back into our machine
-      const lkTool = llm.tool({
-        description: toolDef.description,
-        parameters: toolDef.parameters as any, // JSON schema format
-        execute: async (args: Record<string, unknown>) => {
-          const callId = generateToolCallId();
-          return this.handleToolCall({
-            id: callId,
-            name: toolDef.name,
-            input: args,
-          });
-        },
+    if (realtimeSession?.generateReply) {
+      await realtimeSession.generateReply(userInput ?? this.currentInstructions);
+      return;
+    }
+
+    const activity = this.config.agent?._agentActivity;
+    if (activity?.generateReply) {
+      activity.generateReply({ instructions: this.currentInstructions });
+      return;
+    }
+
+    throw new Error("No LiveKit realtime input method is available");
+  }
+
+  private getRealtimeSession(): LiveKitRealtimeSessionLike | undefined {
+    return (
+      this.config.agent?._agentActivity?.realtimeLLMSession ??
+      this.config.agent?._agentActivity?.realtimeSession ??
+      this.config.session.realtimeLLMSession ??
+      this.config.session.realtimeSession
+    );
+  }
+
+  private updateAgentSnapshot(
+    agent: LiveKitAgentLike | undefined,
+    instructions: string,
+    tools: LiveKitToolContext,
+  ): void {
+    if (!agent) return;
+    agent._instructions = instructions;
+    agent._tools = tools;
+  }
+
+  private installEventHandlers(): void {
+    const onUserStateChanged = (event: unknown) => {
+      if (readString(event, "newState") !== "speaking") return;
+      this.userTranscripts.begin();
+    };
+
+    const onUserInputTranscribed = (event: unknown) => {
+      const transcript = readString(event, "transcript");
+      if (!transcript || readBoolean(event, "isFinal") !== true) return;
+      void this.userTranscripts.complete(transcript, eventMetadata(event)).catch((error) => {
+        this.executor.log("Failed to enqueue user transcript", error);
       });
+    };
 
-      toolContext[toolDef.name] = lkTool as llm.FunctionTool<any, any, any>;
-    }
+    const onConversationItemAdded = (event: unknown) => {
+      if (this.assistantTranscripts.isInstalled()) return;
 
-    // Update the agent's tools
-    this.agent._tools = toolContext;
+      const item = readObject(event, "item");
+      if (!item || readString(item, "role") !== "assistant") return;
 
-    this.log(`Registered ${tools.length} tools with LiveKit: ${tools.map((t) => t.name).join(", ")}`);
+      const text = extractConversationItemText(item);
+      if (!text) return;
+
+      const metadata: Record<string, unknown> = eventMetadata(event);
+      const itemId = readString(item, "id");
+      if (itemId) metadata.messageId = itemId;
+
+      void this.enqueueAssistantTranscript(text, metadata).catch((error) => {
+        this.executor.log("Failed to enqueue assistant transcript", error);
+      });
+    };
+
+    const onDataReceived = (
+      payload: unknown,
+      participant?: unknown,
+      kind?: unknown,
+      topic?: unknown,
+    ) => {
+      if (!(payload instanceof Uint8Array)) return;
+      const parsedTopic = typeof topic === "string" ? topic : undefined;
+      const input = this.executor.config.input;
+      if (!input?.parseDataMessage) return;
+      if (input.messageTopic && parsedTopic && parsedTopic !== input.messageTopic) return;
+      const text = input.parseDataMessage(payload, {
+        participant,
+        kind,
+        topic: parsedTopic,
+      });
+      if (!text) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      this.enqueueExternalUserMessage(trimmed).catch((error) => {
+        this.executor.log("Failed to enqueue LiveKit data message", error);
+      });
+    };
+
+    this.onSession(this.eventNames.userStateChanged, onUserStateChanged);
+    this.onSession(this.eventNames.userInputTranscribed, onUserInputTranscribed);
+    this.onSession(this.eventNames.conversationItemAdded, onConversationItemAdded);
+    this.onRoom(this.eventNames.dataReceived, onDataReceived);
   }
 
-  /**
-   * Handle a tool call from LiveKit.
-   * Runs the tool through our pipeline and returns the result.
-   *
-   * Tool calls run in parallel (no mutex). Failures are enqueued as error messages.
-   */
-  async handleToolCall(call: ToolCall): Promise<string> {
+  logTranscriptError(message: string, error: unknown): void {
+    this.executor.log(message, error);
+  }
 
-    if (!this.machine) {
-      return "Error: Machine not connected";
-    }
+  emitAssistantTranscriptUpdate(update: LiveKitAssistantTranscriptUpdate): void {
+    const onAssistantTranscriptUpdate =
+      this.config.onAssistantTranscriptUpdate;
+    if (!onAssistantTranscriptUpdate) return;
+    void Promise.resolve()
+      .then(() => onAssistantTranscriptUpdate(update))
+      .catch((error) => {
+        this.executor.log("LiveKit assistant transcript update failed", error);
+      });
+  }
 
-    const machine = this.machine;
-    const instanceId = machine.instance.id;
+  emitUserTranscriptUpdate(update: LiveKitUserTranscriptUpdate): void {
+    const onUserTranscriptUpdate =
+      this.config.onUserTranscriptUpdate;
+    if (!onUserTranscriptUpdate) return;
+    void Promise.resolve()
+      .then(() => onUserTranscriptUpdate(update))
+      .catch((error) => {
+        this.executor.log("LiveKit user transcript update failed", error);
+      });
+  }
 
-    this.log(`Tool call: ${call.name} (id: ${call.id})`);
+  private onSession(event: string, handler: (...args: unknown[]) => void): void {
+    this.config.session.on?.(event, handler);
+    this.handlers.push({ target: "session", event, handler });
+  }
 
-    // Enqueue tool_use message immediately
-    machine.enqueue([
-      assistantMessage([
-        { type: "tool_use", id: call.id, name: call.name, input: call.input },
-      ]),
-    ]);
+  private onRoom(event: string, handler: (...args: unknown[]) => void): void {
+    this.config.room?.on?.(event, handler);
+    this.handlers.push({ target: "room", event, handler });
+  }
 
-    try {
-      // Check if instance still exists
-      if (!findInstanceById(machine.instance, instanceId)) {
-        throw new Error(`Instance ${instanceId} no longer exists in tree`);
-      }
-
-      // Build context for tool pipeline
-      const charter = machine.charter;
-      const rootInstance = machine.instance;
-      const instancePath = getInstancePath(rootInstance);
-      const activeInstance = instancePath[instancePath.length - 1]!;
-      const ancestors = instancePath.slice(0, -1);
-      const packStates = rootInstance.packStates ?? {};
-
-      // Temporary queue to collect messages from the pipeline
-      const pipelineQueue: MachineMessage[] = [];
-      const pipelineEnqueue = (msgs: MachineMessage[]) => pipelineQueue.push(...msgs);
-
-      // Run the tool pipeline - it enqueues all messages
-      const result = await runToolPipeline(
+  private async enqueueExternalUserMessage(text: string): Promise<Frame> {
+    return this.enqueueFrame({
+      metadata: { mode: "text", transport: "livekit" },
+      messages: [
         {
-          charter,
-          instance: activeInstance,
-          ancestors,
-          packStates,
-          history: machine.history,
-          enqueue: pipelineEnqueue,
-          source: { instanceId: activeInstance.id },
-        },
-        [call],
+          type: "user",
+          text,
+          audience: "broadcast",
+          source: { external: true, transport: "livekit" },
+        } as FrameMessage,
+      ],
+    });
+  }
+
+  private async enqueueToolFrame(name: string, value: unknown): Promise<Frame> {
+    return this.enqueueFrame({
+      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      inert: true,
+      messages: [
+        {
+          type: "tool",
+          name,
+          value,
+          audience: "self",
+          source: { external: true },
+        } as FrameMessage,
+      ],
+    });
+  }
+
+  private async enqueueFrame(frame: FrameDraft): Promise<Frame> {
+    const result = this.currentSyncContext?.machine.enqueueFrame(frame);
+    if (!result) {
+      throw new Error("LiveKitConnection cannot enqueue a frame before runtime sync");
+    }
+    return result.id ? result : { ...result, id: nextFrameId() };
+  }
+}
+
+class AssistantTranscriptStream {
+  private messageId?: string;
+  private text = "";
+  private seq = 0;
+
+  constructor(private readonly connection: LiveKitConnection) {}
+
+  install(): void {
+    const output = this.connection.config.session.output;
+    const current = output?.transcription;
+    if (!output || !current) return;
+    if (isAssistantTranscriptOutputWrapper(current, this)) return;
+
+    const wrapper = new AssistantTranscriptOutputWrapper(this, current);
+    output.transcription = wrapper;
+  }
+
+  restore(): void {
+    const output = this.connection.config.session.output;
+    const current = output?.transcription;
+    if (output && current && isAssistantTranscriptOutputWrapper(current, this)) {
+      output.transcription = current.inner;
+    }
+    this.reset();
+  }
+
+  isInstalled(): boolean {
+    const current = this.connection.config.session.output?.transcription;
+    return Boolean(current && isAssistantTranscriptOutputWrapper(current, this));
+  }
+
+  captureDelta(delta: string): void {
+    if (!delta) return;
+    if (!this.messageId) {
+      this.messageId = crypto.randomUUID();
+      this.text = "";
+      this.seq = 0;
+      this.connection.emitAssistantTranscriptUpdate({
+        messageId: this.messageId,
+        text: this.text,
+        streamState: "streaming",
+        streamSeq: this.seq,
+      });
+    }
+
+    this.text += delta;
+    this.seq += 1;
+    this.connection.emitAssistantTranscriptUpdate({
+      messageId: this.messageId,
+      text: this.text,
+      delta,
+      streamState: "streaming",
+      streamSeq: this.seq,
+    });
+  }
+
+  async flush(): Promise<void> {
+    const messageId = this.messageId;
+    if (!messageId) return;
+    const text = this.text;
+    const streamSeq = this.seq + 1;
+    this.reset();
+    await this.connection.enqueueAssistantTranscript(text, {
+      messageId,
+      streamState: "complete",
+      streamSeq,
+    });
+  }
+
+  logTranscriptError(message: string, error: unknown): void {
+    this.connection.logTranscriptError(message, error);
+  }
+
+  private reset(): void {
+    this.messageId = undefined;
+    this.text = "";
+    this.seq = 0;
+  }
+}
+
+class UserTranscriptEnvelope {
+  private messageId?: string;
+  private seq = 0;
+
+  constructor(private readonly connection: LiveKitConnection) {}
+
+  begin(): void {
+    if (this.messageId) return;
+    this.messageId = crypto.randomUUID();
+    this.seq = 0;
+    this.connection.emitUserTranscriptUpdate({
+      messageId: this.messageId,
+      text: "",
+      streamState: "streaming",
+      streamSeq: this.seq,
+    });
+  }
+
+  async complete(transcript: string, metadata: Record<string, unknown>): Promise<void> {
+    const messageId = this.messageId ?? crypto.randomUUID();
+    const streamSeq = this.seq + 1;
+    this.reset();
+    await this.connection.enqueueUserTranscript(transcript, {
+      ...metadata,
+      messageId,
+      streamState: "complete",
+      streamSeq,
+    });
+    this.connection.emitUserTranscriptUpdate({
+      messageId,
+      text: transcript,
+      streamState: "complete",
+      streamSeq,
+    });
+  }
+
+  reset(): void {
+    this.messageId = undefined;
+    this.seq = 0;
+  }
+}
+
+class AssistantTranscriptOutputWrapper implements LiveKitTextOutputLike {
+  readonly [ASSISTANT_TRANSCRIPT_OUTPUT_OWNER]: AssistantTranscriptStream;
+
+  constructor(
+    owner: AssistantTranscriptStream,
+    readonly inner: LiveKitTextOutputLike,
+  ) {
+    this[ASSISTANT_TRANSCRIPT_OUTPUT_OWNER] = owner;
+  }
+
+  async captureText(text: string): Promise<void> {
+    this[ASSISTANT_TRANSCRIPT_OUTPUT_OWNER].captureDelta(text);
+    await this.inner.captureText(text);
+  }
+
+  flush(): void {
+    const flushed = this[ASSISTANT_TRANSCRIPT_OUTPUT_OWNER].flush().catch((error) => {
+      this[ASSISTANT_TRANSCRIPT_OUTPUT_OWNER].logTranscriptError(
+        "Failed to flush assistant transcript",
+        error,
       );
-
-      // Check again after async work
-      if (!findInstanceById(machine.instance, instanceId)) {
-        throw new Error(`Instance ${instanceId} was replaced during tool execution`);
-      }
-
-      // Extract tool result content from the pipeline queue
-      const toolResultContent = this.extractToolResultContent(pipelineQueue);
-
-      // Enqueue ALL messages from the pipeline (including instance messages).
-      // runMachine will drain them, apply instance mutations, and yield a step
-      // that gets persisted to Convex. This keeps state in sync.
-      if (pipelineQueue.length > 0) {
-        machine.enqueue(pipelineQueue);
-      }
-
-      // Note: We don't apply instance mutations or update LiveKit config here.
-      // That happens when runMachine processes the queue and yields a step.
-      // The agent's main loop will then persist the updated instance to Convex.
-
-      return toolResultContent;
-    } catch (error) {
-      const errorMsg = `Tool "${call.name}" failed: ${error instanceof Error ? error.message : String(error)}`;
-      this.log(`Tool error: ${errorMsg}`);
-
-      // Enqueue failure as user message
-      machine.enqueue([
-        userMessage([
-          { type: "tool_result", tool_use_id: call.id, content: errorMsg, is_error: true },
-        ]),
-      ]);
-
-      return errorMsg;
-    }
+    });
+    this.inner.flush();
+    void flushed;
   }
 
-  /**
-   * Extract tool result content from pipeline messages.
-   */
-  private extractToolResultContent(messages: MachineMessage[]): string {
-    // Look for tool_result blocks in user messages
-    for (const msg of messages) {
-      if ("role" in msg && msg.role === "user" && Array.isArray(msg.items)) {
-        for (const item of msg.items) {
-          if (
-            typeof item === "object" &&
-            item !== null &&
-            "type" in item &&
-            item.type === "tool_result" &&
-            "content" in item
-          ) {
-            return String(item.content);
-          }
-        }
-      }
-    }
-    return "Tool completed";
+  onAttached(): void {
+    this.inner.onAttached?.();
   }
 
-  /**
-   * Log a debug message if debug is enabled.
-   */
-  private log(message: string): void {
-    if (this.config.debug) {
-      console.log(`[LiveKitExecutor] ${message}`);
+  onDetached(): void {
+    this.inner.onDetached?.();
+  }
+}
+
+function isAssistantTranscriptOutputWrapper(
+  output: LiveKitTextOutputLike,
+  owner: AssistantTranscriptStream,
+): output is AssistantTranscriptOutputWrapper {
+  return (output as Partial<Record<typeof ASSISTANT_TRANSCRIPT_OUTPUT_OWNER, AssistantTranscriptStream>>)[
+    ASSISTANT_TRANSCRIPT_OUTPUT_OWNER
+  ] === owner;
+}
+
+export function buildLiveKitInstructions(inference: CompiledInference): string {
+  return [
+    renderSection("System", inference.systemParts),
+    renderSection("Dynamic Context", inference.dynamicParts),
+    renderHistory(inference.history),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function isRuntimeSyncContext(
+  input: CompiledInference | RuntimeSyncContext,
+): input is RuntimeSyncContext {
+  return Boolean(
+    input &&
+      typeof input === "object" &&
+      "machine" in input &&
+      "inference" in input,
+  );
+}
+
+export function buildLiveKitToolDefinitions(
+  inference: CompiledInference,
+): LiveKitToolDefinition[] {
+  const definitions = new Map<string, LiveKitToolDefinition>();
+
+  for (const action of inference.tools) {
+    definitions.set(action.name, {
+      type: "function",
+      name: action.name,
+      description: action.description ?? "",
+      parameters: action.inputSchema
+        ? z.toJSONSchema(action.inputSchema)
+        : { type: "object", properties: {}, additionalProperties: false },
+    });
+  }
+
+  return [...definitions.values()];
+}
+
+export function buildLiveKitToolContext(
+  inference: CompiledInference,
+  connection: LiveKitConnection,
+): LiveKitToolContext {
+  const tools: LiveKitToolContext = {};
+
+  for (const action of inference.tools) {
+    tools[action.name] = createLiveKitTool({
+      description: action.description ?? "",
+      parameters: action.inputSchema ?? z.object({}),
+      execute: (input, liveKitContext) => connection.executeTool(action.name, input, liveKitContext),
+    });
+  }
+
+  return tools;
+}
+
+function createLiveKitTool({
+  description,
+  parameters,
+  execute,
+}: {
+  description: string;
+  parameters: unknown;
+  execute: (input: unknown, context?: unknown) => unknown | Promise<unknown>;
+}): LiveKitFunctionTool {
+  return (llm.tool as (tool: {
+    description: string;
+    parameters: unknown;
+    execute: (input: unknown, context?: unknown) => unknown | Promise<unknown>;
+  }) => unknown)({ description, parameters, execute }) as LiveKitFunctionTool;
+}
+
+function buildToolRegistry(actions: AnyAction[]): Map<string, AnyAction> {
+  const registry = new Map<string, AnyAction>();
+  for (const action of actions) {
+    registry.set(action.name, action);
+  }
+  return registry;
+}
+
+function renderSection(title: string, parts: string[]): string {
+  const body = parts.map((part) => part.trim()).filter(Boolean).join("\n\n");
+  return body ? `## ${title}\n\n${body}` : "";
+}
+
+function renderHistory(history: ActorMessage[]): string {
+  const lines = history.map(renderHistoryMessage).filter(Boolean);
+  return lines.length > 0 ? `## Conversation\n\n${lines.join("\n")}` : "";
+}
+
+function renderHistoryMessage(message: ActorMessage): string {
+  if (message.type === "user") return `User: ${message.text}`;
+  if (message.type === "assistant") return `Assistant: ${message.text}`;
+  const value = message.text ?? stringifyValue(message.value);
+  return value ? `Tool ${message.name}: ${value}` : "";
+}
+
+function userTextsFromFrames(frames: readonly Frame[]): Array<{ frameId: string; text: string }> {
+  const texts: Array<{ frameId: string; text: string }> = [];
+  for (const frame of frames) {
+    for (const message of frame.messages) {
+      if (message.type !== "user") continue;
+      if (!message.text.trim()) continue;
+      texts.push({ frameId: frame.id, text: message.text });
     }
   }
+  return texts;
+}
+
+function extractConversationItemText(item: Record<string, unknown>): string | undefined {
+  const textContent = readString(item, "textContent");
+  if (textContent) return textContent;
+
+  const content = item["content"];
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+
+  const parts: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      parts.push(part);
+      continue;
+    }
+
+    if (!part || typeof part !== "object") continue;
+    const record = part as Record<string, unknown>;
+    const text = readString(record, "text") ?? readString(record, "transcript");
+    if (text) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function eventMetadata(event: unknown): Record<string, unknown> {
+  if (!event || typeof event !== "object") return {};
+  const record = event as Record<string, unknown>;
+  const metadata: Record<string, unknown> = {};
+  const createdAt = record["createdAt"];
+  if (createdAt !== undefined) metadata.createdAt = createdAt;
+  const speakerId = record["speakerId"];
+  if (speakerId !== undefined) metadata.speakerId = speakerId;
+  const language = record["language"];
+  if (language !== undefined) metadata.language = language;
+  return metadata;
+}
+
+function readObject(source: unknown, key: string): Record<string, unknown> | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function readString(source: unknown, key: string): string | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readBoolean(source: unknown, key: string): boolean | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function stringifyValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function nextFrameId(): string {
+  frameIdCounter += 1;
+  return `frame_${Date.now()}_${frameIdCounter}`;
 }

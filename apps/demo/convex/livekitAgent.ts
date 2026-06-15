@@ -1,177 +1,330 @@
 import { v } from "convex/values";
-import { query, internalQuery, internalMutation } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { restoreConvexJson, stripClientSchemas } from "./convexJson";
+import { createDemoClientSnapshot } from "@projectors/demo-agent/src/projector-demo.js";
+import type { MachineSyncState } from "@projectors/core/client";
 
-/**
- * Voice Mode API - Queries and Mutations
- * =======================================
- *
- * Provides database operations for voice conversations.
- * Voice transcripts are stored as messages with mode="voice".
- *
- * Note: The getToken action is in livekitAgentActions.ts (requires Node.js runtime)
- */
+const DEFAULT_WORKER_LEASE_TTL_MS = 15_000;
 
-// Internal query to get session (used by action)
 export const getSession = internalQuery({
   args: { sessionId: v.id("sessions") },
-  handler: async (ctx, { sessionId }) => {
-    return await ctx.db.get(sessionId);
-  },
+  handler: async (ctx, { sessionId }) => await ctx.db.get(sessionId),
 });
 
-export const upsertVoiceRoom = internalMutation({
-  args: {
-    sessionId: v.id("sessions"),
-    roomName: v.string(),
-  },
+export const upsertAgentWorkerRoom = internalMutation({
+  args: { sessionId: v.id("sessions"), roomName: v.string() },
   handler: async (ctx, { sessionId, roomName }) => {
+    const now = Date.now();
     const existing = await ctx.db
-      .query("voiceRooms")
+      .query("agentWorkerRooms")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .first();
 
     if (existing) {
-      await ctx.db.patch(existing._id, { roomName, createdAt: Date.now() });
-    } else {
-      await ctx.db.insert("voiceRooms", {
-        sessionId,
+      await ctx.db.patch(existing._id, {
         roomName,
-        createdAt: Date.now(),
+        createdAt: now,
       });
+      return existing._id;
     }
+
+    return await ctx.db.insert("agentWorkerRooms", { sessionId, roomName, createdAt: now });
   },
 });
 
-// Best-effort lock to ensure we attempt at most one agent dispatch per room at a time.
-// This prevents duplicate LiveKit "dispatches" caused by multiple concurrent getToken() calls
-// (e.g. React strict mode / reloads / multiple tabs).
-export const claimAgentDispatchLock = internalMutation({
-  args: {
-    sessionId: v.id("sessions"),
-    lockTtlMs: v.optional(v.number()),
-  },
-  handler: async (ctx, { sessionId, lockTtlMs }) => {
-    const voiceRoom = await ctx.db
-      .query("voiceRooms")
+export const getAgentWorkerRoom = query({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) =>
+    await ctx.db.query("agentWorkerRooms").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).first(),
+});
+
+export const getAgentWorkerStatus = query({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) => {
+    const room = await ctx.db
+      .query("agentWorkerRooms")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .first();
-
-    if (!voiceRoom) return null;
+    if (!room) {
+      return {
+        status: "idle" as const,
+        ready: false,
+        now: Date.now(),
+      };
+    }
 
     const now = Date.now();
-    const expiresAt = voiceRoom.agentDispatchLockExpiresAt ?? 0;
-    if (expiresAt > now) return null;
+    const leaseExpiresAt = room.agentWorkerLeaseExpiresAt ?? 0;
+    const ready = leaseExpiresAt > now;
+    const lockExpiresAt = room.agentDispatchLockExpiresAt ?? 0;
+    const nextDispatchAt = room.agentNextDispatchAt ?? 0;
+    const hasDispatch = Boolean(room.agentDispatchId);
+    const waitingForDispatch = !ready && hasDispatch && now < nextDispatchAt;
 
-    const ttl = lockTtlMs ?? 20_000;
-    await ctx.db.patch(voiceRoom._id, {
-      agentDispatchLockExpiresAt: now + ttl,
-    });
+    const status = ready
+      ? "ready"
+      : lockExpiresAt > now
+        ? "connecting"
+        : waitingForDispatch
+          ? "reconnecting"
+          : hasDispatch || room.agentReconnectAttempt
+            ? "stale"
+            : "idle";
 
     return {
-      voiceRoomId: voiceRoom._id,
-      roomName: voiceRoom.roomName,
-      agentDispatchId: voiceRoom.agentDispatchId ?? null,
-      agentDispatchCreatedAt: voiceRoom.agentDispatchCreatedAt ?? null,
+      status,
+      ready,
+      now,
+      sessionId: room.sessionId,
+      roomName: room.roomName,
+      agentDispatchId: room.agentDispatchId,
+      agentDispatchCreatedAt: room.agentDispatchCreatedAt,
+      agentDispatchLockExpiresAt: room.agentDispatchLockExpiresAt,
+      agentReconnectAttempt: room.agentReconnectAttempt ?? 0,
+      agentNextDispatchAt: room.agentNextDispatchAt,
+      agentLastDispatchError: room.agentLastDispatchError,
+      agentLastStatusAt: room.agentLastStatusAt,
+      agentWorkerId: room.agentWorkerId,
+      agentWorkerHeartbeatAt: room.agentWorkerHeartbeatAt,
+      agentWorkerLeaseExpiresAt: room.agentWorkerLeaseExpiresAt,
     };
   },
 });
 
+export const getSessionIdByRoom = query({
+  args: { roomName: v.string() },
+  handler: async (ctx, { roomName }) => {
+    const room = await ctx.db.query("agentWorkerRooms").withIndex("by_room", (q) => q.eq("roomName", roomName)).first();
+    return room?.sessionId ?? null;
+  },
+});
+
+export const getAgentInit = query({
+  args: { roomName: v.string() },
+  handler: async (ctx, { roomName }) => {
+    const room = await ctx.db.query("agentWorkerRooms").withIndex("by_room", (q) => q.eq("roomName", roomName)).first();
+    if (!room) return null;
+
+    const session = await ctx.db.get(room.sessionId);
+    if (!session?.headFrameId) return null;
+
+    const logs = await ctx.db
+      .query("projectorInstanceLog")
+      .withIndex("by_session", (q) => q.eq("sessionId", room.sessionId))
+      .collect();
+    const ancestors = new Set(session.branchAncestors ?? [session.headFrameId]);
+    const latestLog = logs
+      .filter((entry) => !entry.frameId || ancestors.has(entry.frameId))
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!latestLog) return null;
+
+    const instance = restoreConvexJson(latestLog.instance);
+    const syncState = restoreConvexJson(
+      session.syncState ?? { recentCommandResidue: [] },
+    ) as MachineSyncState;
+
+    const messages = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", room.sessionId))
+      .collect();
+
+    return {
+      sessionId: room.sessionId,
+      instance,
+      instanceFrameId: latestLog.frameId,
+      clientSnapshot: stripClientSchemas(createDemoClientSnapshot(instance, syncState)),
+      syncState,
+      messages,
+    };
+  },
+});
+
+export const claimAgentDispatchLock = internalMutation({
+  args: { sessionId: v.id("sessions"), lockTtlMs: v.optional(v.number()) },
+  handler: async (ctx, { sessionId, lockTtlMs }) => {
+    const room = await ctx.db
+      .query("agentWorkerRooms")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .first();
+    if (!room) return null;
+
+    const now = Date.now();
+    const expiresAt = room.agentDispatchLockExpiresAt ?? 0;
+    if (expiresAt > now) return null;
+
+    await ctx.db.patch(room._id, { agentDispatchLockExpiresAt: now + (lockTtlMs ?? 20_000) });
+    return {
+      agentWorkerRoomId: room._id,
+      roomName: room.roomName,
+      agentDispatchId: room.agentDispatchId ?? null,
+      agentDispatchCreatedAt: room.agentDispatchCreatedAt ?? null,
+      agentReconnectAttempt: room.agentReconnectAttempt ?? 0,
+    };
+  },
+});
+
+export const hasLiveAgentWorkerLease = internalQuery({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) => {
+    const room = await ctx.db
+      .query("agentWorkerRooms")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .first();
+    return (room?.agentWorkerLeaseExpiresAt ?? 0) > Date.now();
+  },
+});
+
+export const getAgentDispatchSnapshot = internalQuery({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) => {
+    const room = await ctx.db
+      .query("agentWorkerRooms")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .first();
+    if (!room) return null;
+
+    const now = Date.now();
+    return {
+      agentWorkerRoomId: room._id,
+      roomName: room.roomName,
+      hasLiveWorkerLease: (room.agentWorkerLeaseExpiresAt ?? 0) > now,
+      agentDispatchId: room.agentDispatchId ?? null,
+      agentDispatchCreatedAt: room.agentDispatchCreatedAt ?? null,
+      agentNextDispatchAt: room.agentNextDispatchAt ?? null,
+      agentReconnectAttempt: room.agentReconnectAttempt ?? 0,
+    };
+  },
+});
+
+export const claimAgentWorkerLease = mutation({
+  args: {
+    roomName: v.string(),
+    workerId: v.string(),
+    leaseToken: v.string(),
+    leaseTtlMs: v.optional(v.number()),
+  },
+  handler: async (ctx, { roomName, workerId, leaseToken, leaseTtlMs }) => {
+    const room = await ctx.db.query("agentWorkerRooms").withIndex("by_room", (q) => q.eq("roomName", roomName)).first();
+    if (!room) return null;
+
+    const now = Date.now();
+    const expiresAt = room.agentWorkerLeaseExpiresAt ?? 0;
+    if (expiresAt > now && room.agentWorkerLeaseToken !== leaseToken) {
+      return null;
+    }
+
+    await ctx.db.patch(room._id, {
+      agentWorkerId: workerId,
+      agentWorkerLeaseToken: leaseToken,
+      agentWorkerLeaseExpiresAt: now + (leaseTtlMs ?? 15_000),
+      agentWorkerHeartbeatAt: now,
+      agentReconnectAttempt: 0,
+      agentNextDispatchAt: 0,
+      agentLastDispatchError: undefined,
+      agentLastStatusAt: now,
+    });
+
+    return {
+      agentWorkerRoomId: room._id,
+      sessionId: room.sessionId,
+      roomName: room.roomName,
+    };
+  },
+});
+
+export const renewAgentWorkerLease = mutation({
+  args: {
+    roomName: v.string(),
+    leaseToken: v.string(),
+    leaseTtlMs: v.optional(v.number()),
+  },
+  handler: async (ctx, { roomName, leaseToken, leaseTtlMs }) => {
+    const room = await ctx.db.query("agentWorkerRooms").withIndex("by_room", (q) => q.eq("roomName", roomName)).first();
+    if (!room || room.agentWorkerLeaseToken !== leaseToken) return false;
+
+    const now = Date.now();
+    if ((room.agentWorkerLeaseExpiresAt ?? 0) <= now) return false;
+
+    await ctx.db.patch(room._id, {
+      agentWorkerLeaseExpiresAt: now + (leaseTtlMs ?? DEFAULT_WORKER_LEASE_TTL_MS),
+      agentWorkerHeartbeatAt: now,
+      agentLastStatusAt: now,
+    });
+    return true;
+  },
+});
+
+export const releaseAgentWorkerLease = mutation({
+  args: {
+    roomName: v.string(),
+    leaseToken: v.string(),
+  },
+  handler: async (ctx, { roomName, leaseToken }) => {
+    const room = await ctx.db.query("agentWorkerRooms").withIndex("by_room", (q) => q.eq("roomName", roomName)).first();
+    if (!room || room.agentWorkerLeaseToken !== leaseToken) return false;
+
+    await ctx.db.patch(room._id, {
+      agentWorkerId: undefined,
+      agentWorkerLeaseToken: undefined,
+      agentWorkerLeaseExpiresAt: 0,
+      agentWorkerHeartbeatAt: Date.now(),
+      agentLastStatusAt: Date.now(),
+    });
+    return true;
+  },
+});
+
 export const releaseAgentDispatchLock = internalMutation({
-  args: { voiceRoomId: v.id("voiceRooms") },
-  handler: async (ctx, { voiceRoomId }) => {
-    await ctx.db.patch(voiceRoomId, { agentDispatchLockExpiresAt: 0 });
+  args: { agentWorkerRoomId: v.id("agentWorkerRooms") },
+  handler: async (ctx, { agentWorkerRoomId }) => {
+    await ctx.db.patch(agentWorkerRoomId, { agentDispatchLockExpiresAt: 0 });
   },
 });
 
 export const recordAgentDispatch = internalMutation({
   args: {
-    voiceRoomId: v.id("voiceRooms"),
+    agentWorkerRoomId: v.id("agentWorkerRooms"),
     agentDispatchId: v.string(),
     agentDispatchCreatedAt: v.number(),
+    nextDispatchAt: v.optional(v.number()),
+    reconnectAttempt: v.optional(v.number()),
   },
-  handler: async (ctx, { voiceRoomId, agentDispatchId, agentDispatchCreatedAt }) => {
-    await ctx.db.patch(voiceRoomId, { agentDispatchId, agentDispatchCreatedAt });
-  },
-});
-
-// Query voice room for a session
-export const getVoiceRoom = query({
-  args: { sessionId: v.id("sessions") },
-  handler: async (ctx, { sessionId }) => {
-    return await ctx.db
-      .query("voiceRooms")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .first();
+  handler: async (ctx, { agentWorkerRoomId, agentDispatchId, agentDispatchCreatedAt, nextDispatchAt, reconnectAttempt }) => {
+    await ctx.db.patch(agentWorkerRoomId, {
+      agentDispatchId,
+      agentDispatchCreatedAt,
+      agentNextDispatchAt: nextDispatchAt ?? agentDispatchCreatedAt,
+      agentReconnectAttempt: reconnectAttempt ?? 0,
+      agentLastDispatchError: undefined,
+      agentLastStatusAt: Date.now(),
+    });
   },
 });
 
-// Public query to lookup session by room name (for agent to resolve sessionId from CONVEX_URL)
-export const getSessionIdByRoom = query({
-  args: { roomName: v.string() },
-  handler: async (ctx, { roomName }) => {
-    const voiceRoom = await ctx.db
-      .query("voiceRooms")
-      .withIndex("by_room", (q) => q.eq("roomName", roomName))
-      .first();
-
-    if (!voiceRoom) return null;
-    return voiceRoom.sessionId;
+export const recordAgentDispatchFailure = internalMutation({
+  args: {
+    agentWorkerRoomId: v.id("agentWorkerRooms"),
+    error: v.string(),
+    nextDispatchAt: v.number(),
+    reconnectAttempt: v.number(),
+  },
+  handler: async (ctx, { agentWorkerRoomId, error, nextDispatchAt, reconnectAttempt }) => {
+    await ctx.db.patch(agentWorkerRoomId, {
+      agentLastDispatchError: error,
+      agentNextDispatchAt: nextDispatchAt,
+      agentReconnectAttempt: reconnectAttempt,
+      agentLastStatusAt: Date.now(),
+    });
   },
 });
 
-// Combined query for agent initialization - returns session, current turn, and full history
-export const getAgentInit = query({
-  args: { roomName: v.string() },
-  handler: async (ctx, { roomName }) => {
-    // 1. Look up voice room by room name
-    const voiceRoom = await ctx.db
-      .query("voiceRooms")
-      .withIndex("by_room", (q) => q.eq("roomName", roomName))
-      .first();
-
-    if (!voiceRoom) return null;
-
-    const sessionId = voiceRoom.sessionId;
-
-    // 2. Get session and current turn
-    const session = await ctx.db.get(sessionId);
-    if (!session?.currentTurnId) return null;
-
-    const currentTurn = await ctx.db.get(session.currentTurnId);
-    if (!currentTurn) return null;
-
-    // 3. Get full history (ordered messages from all turns)
-    const allTurns = await ctx.db
-      .query("machineTurns")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-
-    const turnMap = new Map(allTurns.map((t) => [t._id, t]));
-
-    const orderedTurns: typeof allTurns = [];
-    let currentId: typeof session.currentTurnId | undefined = session.currentTurnId;
-
-    while (currentId) {
-      const turn = turnMap.get(currentId);
-      if (!turn) break;
-      orderedTurns.unshift(turn);
-      currentId = turn.parentId;
-    }
-
-    const history: unknown[] = [];
-    for (const turn of orderedTurns) {
-      history.push(...turn.messages);
-    }
-
-    return {
-      sessionId,
-      turnId: session.currentTurnId,
-      branchRootTurnId: session.branchRootTurnId,
-      branchAncestors: session.branchAncestors,
-      instanceId: currentTurn.instanceId,
-      instance: currentTurn.instance,
-      displayInstance: currentTurn.displayInstance,
-      history,
-    };
+export const clearAgentDispatch = internalMutation({
+  args: { agentWorkerRoomId: v.id("agentWorkerRooms") },
+  handler: async (ctx, { agentWorkerRoomId }) => {
+    await ctx.db.patch(agentWorkerRoomId, {
+      agentDispatchId: undefined,
+      agentDispatchCreatedAt: undefined,
+      agentLastStatusAt: Date.now(),
+    });
   },
 });

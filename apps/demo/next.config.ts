@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["markov-machines"],
+  transpilePackages: ["@projectors/core", "@projectors/demo-agent"],
 };
 
 export default nextConfig;

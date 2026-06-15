@@ -1,50 +1,162 @@
-/**
- * Types for LiveKitExecutor
- */
+import type {
+  ActionContext,
+  AnyAction,
+  CompiledInference,
+  CompletionReason,
+  EnqueueFrame,
+  ExecutorRunRequest,
+  ExecutorRunResult,
+  Frame,
+  FrameDraft,
+  FrameMessage,
+  ProjectorExecutor,
+  RetrievableState,
+  RuntimeSyncContext,
+} from "@projectors/core";
 
-import type { voice } from "@livekit/agents";
+export type {
+  CompletionReason,
+  EnqueueFrame,
+  ExecutorRunRequest,
+  ExecutorRunResult,
+  Frame,
+  FrameDraft,
+  FrameMessage,
+  ProjectorExecutor,
+  RuntimeSyncContext,
+};
 
-/**
- * Configuration for LiveKitExecutor.
- */
-export interface LiveKitExecutorConfig {
-  /** Enable debug logging */
-  debug?: boolean;
-  /**
-   * When true, primary nodes delegate inference to LiveKit voice agent.
-   * When false, primary nodes use StandardExecutor (same as worker nodes).
-   * This allows the same agent to handle both live voice and text-only modes.
-   */
-  isLive?: boolean;
-  /** Anthropic API key for StandardExecutor (used for text mode and worker nodes) */
-  apiKey?: string;
-  /** Model to use for StandardExecutor */
-  model?: string;
-  /** Max tokens for StandardExecutor */
-  maxTokens?: number;
-}
-
-/**
- * Configuration for connecting the executor to a machine.
- */
-export interface ConnectConfig {
-  /** The LiveKit voice agent session */
-  session: voice.AgentSession;
-  /** The LiveKit voice agent instance */
-  agent: voice.Agent;
-  /** The LiveKit room context */
-  room: { name?: string };
-}
-
-/**
- * Tool definition in LiveKit format (JSON schema based).
- */
-export interface LiveKitToolDefinition {
+export type LiveKitToolDefinition = {
+  type: "function";
   name: string;
   description: string;
-  parameters: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required?: string[];
+  parameters: unknown;
+};
+
+export type LiveKitFunctionTool = {
+  type: "function";
+  description: string;
+  parameters?: unknown;
+  execute(input: unknown, context?: unknown): unknown | Promise<unknown>;
+};
+
+export type LiveKitToolContext = Record<string, LiveKitFunctionTool>;
+
+export type LiveKitTextOutputLike = {
+  captureText(text: string): unknown | Promise<unknown>;
+  flush(): void;
+  onAttached?: () => void;
+  onDetached?: () => void;
+};
+
+export type LiveKitRealtimeSessionLike = {
+  updateInstructions?: (instructions: string) => unknown | Promise<unknown>;
+  updateTools?: (tools: LiveKitToolContext) => unknown | Promise<unknown>;
+  generateReply?: (instructions?: string) => unknown | Promise<unknown>;
+  sendInput?: (input: string) => unknown | Promise<unknown>;
+  sendEvent?: (event: unknown) => unknown | Promise<unknown>;
+};
+
+export type LiveKitEventHandler = (...args: unknown[]) => void;
+
+export type LiveKitSessionLike = {
+  on?: (event: string, handler: LiveKitEventHandler) => unknown;
+  off?: (event: string, handler: LiveKitEventHandler) => unknown;
+  generateReply?: (options?: {
+    userInput?: string;
+    instructions?: string;
+    toolChoice?: unknown;
+    allowInterruptions?: boolean;
+  }) => unknown;
+  updateInstructions?: (instructions: string) => unknown | Promise<unknown>;
+  updateTools?: (tools: LiveKitToolContext) => unknown | Promise<unknown>;
+  realtimeLLMSession?: LiveKitRealtimeSessionLike;
+  realtimeSession?: LiveKitRealtimeSessionLike;
+  output?: {
+    transcription?: LiveKitTextOutputLike | null;
   };
-}
+};
+
+export type LiveKitAgentLike = {
+  instructions?: string;
+  toolCtx?: LiveKitToolContext;
+  _instructions?: string;
+  _tools?: LiveKitToolContext;
+  _agentActivity?: {
+    realtimeLLMSession?: LiveKitRealtimeSessionLike;
+    realtimeSession?: LiveKitRealtimeSessionLike;
+    generateReply?: (options: {
+      userMessage?: unknown;
+      instructions?: string;
+      toolChoice?: unknown;
+      allowInterruptions?: boolean;
+      scheduleSpeech?: boolean;
+    }) => unknown;
+  };
+};
+
+export type LiveKitRoomLike = {
+  name?: string;
+  on?: (event: string, handler: LiveKitEventHandler) => unknown;
+  off?: (event: string, handler: LiveKitEventHandler) => unknown;
+} & Record<string, unknown>;
+
+export type LiveKitEventNames = {
+  userInputTranscribed: string;
+  userStateChanged: string;
+  conversationItemAdded: string;
+  dataReceived: string;
+};
+
+export type RunActionInput = {
+  action: AnyAction;
+  input: unknown;
+  context: ActionContext<unknown>;
+  liveKitContext?: unknown;
+};
+
+export type StateGetterInput = {
+  address: string;
+  state: RetrievableState;
+};
+
+export type LiveKitAssistantTranscriptUpdate = {
+  messageId: string;
+  text: string;
+  delta?: string;
+  streamState: "streaming" | "error";
+  streamSeq: number;
+  error?: string;
+};
+
+export type LiveKitUserTranscriptUpdate = {
+  messageId: string;
+  text: string;
+  streamState: "streaming" | "complete" | "error";
+  streamSeq: number;
+  error?: string;
+};
+
+export type LiveKitExecutorConfig = {
+  debug?: boolean;
+  session: LiveKitSessionLike;
+  agent?: LiveKitAgentLike;
+  room?: LiveKitRoomLike;
+  discreteExecutor: ProjectorExecutor;
+  realtime?: {
+    enabled?: boolean | ((context: RuntimeSyncContext) => boolean);
+  };
+  input?: {
+    messageTopic?: string;
+    parseDataMessage?: (payload: Uint8Array, context: {
+      participant?: unknown;
+      kind?: unknown;
+      topic?: string;
+    }) => string | undefined;
+  };
+  eventNames?: Partial<LiveKitEventNames>;
+  runAction?: (input: RunActionInput) => unknown | Promise<unknown>;
+  getState?: (input: StateGetterInput) => unknown | Promise<unknown>;
+  onAssistantTranscriptUpdate?: (update: LiveKitAssistantTranscriptUpdate) => unknown | Promise<unknown>;
+  onUserTranscriptUpdate?: (update: LiveKitUserTranscriptUpdate) => unknown | Promise<unknown>;
+};

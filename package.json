@@ -1,10 +1,10 @@
 {
-  "name": "machines",
+  "name": "@projectors/root",
   "type": "module",
   "private": true,
   "license": "MIT",
   "catalog": {
-    "zod": "4"
+    "zod": "^4.4.3"
   },
   "workspaces": [
     "packages/*",

@@ -1,39 +1,43 @@
 # demo
 
-To install dependencies:
+Projector demo app with text chat, projected state/commands, and LiveKit voice mode.
+
+## Setup
+
+Install workspace dependencies from the repo root:
 
 ```bash
 bun install
 ```
 
-To run:
+Create `apps/demo/.env.local` with Convex and LiveKit values:
 
 ```bash
-bun run index.ts
+NEXT_PUBLIC_CONVEX_URL=https://your-deployment.convex.cloud
+CONVEX_DEPLOYMENT=your-convex-deployment
+LIVEKIT_API_KEY=your-livekit-api-key
+LIVEKIT_API_SECRET=your-livekit-api-secret
+LIVEKIT_URL=wss://your-project.livekit.cloud
 ```
 
-This project was created using `bun init` in bun v1.3.6. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+Set the same LiveKit values in the Convex dashboard environment variables because `convex/livekitAgentActions.ts` mints room tokens and dispatches the agent from Convex.
 
-## Time Travel & Branching
+## Run
 
-The demo app supports time travel through the HistoryTab:
+Start Convex:
 
-- **Steps view**: Preview the machine state at any step (client-side, ephemeral)
-- **Turns view**: Travel to any turn, changing the session's current position
+```bash
+cd apps/demo
+npx convex dev
+```
 
-### How Branching Works
+Start the Next app in another terminal:
 
-Branching is implicit via the turn tree structure:
-- Each turn has a `parentId` linking to its predecessor
-- Sending a message while time-traveled back creates a new branch
-- Messages are filtered by turn ancestry (only messages in the current branch are shown)
+```bash
+cd apps/demo
+bun run dev
+```
 
-### Current Limitations
+Open the printed Next URL, usually `http://localhost:3000`.
 
-> **TODO**: The current implementation is functional but has room for improvement:
-> - No explicit branch visualization or naming
-> - No branch merging capability
-> - Ancestry queries walk the tree on each request
-> - Consider denormalizing the turn path for efficiency at scale
-
-See `convex/messages.ts` for implementation details.
+Voice mode also requires the worker from `apps/demo-agent` to be running. See `apps/demo-agent/README.md`.

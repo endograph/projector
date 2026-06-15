@@ -1,0 +1,29 @@
+{
+  "name": "@projectors/aisdk-executor",
+  "version": "0.0.0",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
+  },
+  "dependencies": {
+    "ai": "^6.0.0",
+    "@projectors/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "^4.0.17",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "zod": "catalog:"
+  }
+}

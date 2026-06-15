@@ -1,5 +1,5 @@
 {
-  "name": "demo",
+  "name": "@projectors/demo",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -12,7 +12,9 @@
     "typecheck": "tsgo"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.71",
     "@livekit/components-react": "^2.9.19",
+    "@projectors/aisdk-executor": "workspace:*",
     "cli-spinners": "^3.4.0",
     "convex": "^1.31.2",
     "jotai": "^2.16.1",
@@ -20,8 +22,8 @@
     "json5": "^2.2.3",
     "livekit-client": "^2.17.0",
     "livekit-server-sdk": "^2.15.0",
-    "demo-agent": "workspace:*",
-    "markov-machines": "workspace:*",
+    "@projectors/demo-agent": "workspace:*",
+    "@projectors/core": "workspace:*",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",

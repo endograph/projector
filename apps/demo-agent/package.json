@@ -1,25 +1,26 @@
 {
-  "name": "demo-agent",
+  "name": "@projectors/demo-agent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "./scripts/kill-zombies.sh && bun run src/agent.ts dev",
-    "start": "node dist/agent.js start",
-    "build": "tsc",
+    "start": "bun run src/agent.ts start",
+    "build": "tsgo",
     "download-files": "tsx src/agent.ts download-files",
     "kill-zombies": "./scripts/kill-zombies.sh"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.71",
     "@livekit/agents": "^1.0.40",
     "@livekit/agents-plugin-openai": "^1.0.40",
-    "@livekit/agents-plugin-silero": "^1.0.40",
-    "@markov-machines/livekit-executor": "workspace:*",
-    "convex": "^1.24.0",
-    "demo": "workspace:*",
-    "markov-machines": "workspace:*",
-    "markov-skills": "workspace:*"
+    "@projectors/livekit-executor": "workspace:*",
+    "@projectors/aisdk-executor": "workspace:*",
+    "convex": "^1.31.2",
+    "@projectors/demo": "workspace:*",
+    "@projectors/core": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^22",

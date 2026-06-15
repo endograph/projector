@@ -9,8 +9,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Demo - Markov Machines",
-  description: "A showcase of markov-machines features with a retro terminal UI",
+  title: "Projector Demo",
+  description: "A projector agent demo with a retro terminal UI",
 };
 
 export default function RootLayout({

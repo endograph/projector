@@ -1,6 +1,16 @@
-export type {
-  DisplayCommand,
-  DisplayInstance,
-  DisplayNode,
-  DisplayPack,
-} from "markov-machines/client";
+import type { CompiledProjectionTree } from "@projectors/core";
+import type { ClientInstance, MachineClientSnapshot } from "@projectors/core/client";
+
+export type DemoClientInstance = ClientInstance;
+export type DemoClientSnapshot = MachineClientSnapshot<DemoClientInstance[]> & {
+  projectionTree?: CompiledProjectionTree;
+};
+
+export type DemoMessage = {
+  _id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+  frameId?: string;
+  mode?: "text" | "voice";
+};

@@ -1,0 +1,36 @@
+{
+  "name": "@projectors/core",
+  "version": "0.0.0",
+  "module": "index.ts",
+  "type": "module",
+  "license": "MIT",
+  "types": "./index.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./client": "./src/client/index.ts"
+  },
+  "files": [
+    "src",
+    "!src/**/__tests__",
+    "!src/**/*.test.ts",
+    "index.ts"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:conformance": "vitest run test/conformance",
+    "test:impl": "vitest run src",
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "^4.0.17"
+  },
+  "peerDependencies": {
+    "zod": ">=4.0.0 <5"
+  },
+  "dependencies": {}
+}
