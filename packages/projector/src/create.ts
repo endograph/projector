@@ -2,6 +2,7 @@ import type {
   ActionConfigEntry,
   ActionBindings,
   AnyAction,
+  BoundaryProjection,
   Node,
   NodeConfig,
   NormalizedRuntime,
@@ -9,8 +10,10 @@ import type {
   Projection,
   Runtime,
   StateDescriptor,
+  StaticBoundaryProjection,
   StaticProjection,
 } from "./types.ts";
+import { isProjectionFunction } from "./projection-functions.ts";
 
 type InferActions<TConfig, TKey extends "tools" | "commands"> = TConfig extends Record<
   TKey,
@@ -33,7 +36,10 @@ type InferState<TConfig> = TConfig extends { state: StateDescriptor<infer S> }
   ? NormalizedStateDescriptor<S>
   : undefined;
 
-export type CreatedNode<TConfig extends NodeConfig> = Node & {
+export type CreatedNode<
+  TDataContent,
+  TConfig extends NodeConfig<TDataContent>,
+> = Node<TDataContent> & {
   state: InferState<TConfig>;
   __tools?: InferActionMetas<TConfig, "tools">;
   __commands?: InferActionMetas<TConfig, "commands">;
@@ -45,7 +51,9 @@ export const DEFAULT_STATIC_PROJECTION: Required<StaticProjection> = {
   tools: "provider-static",
 };
 
-export const DEFAULT_BOUNDARY_PROJECTION: StaticProjection = { mode: "hidden" };
+export const DEFAULT_BOUNDARY_PROJECTION: Required<StaticBoundaryProjection> = {
+  mode: "hidden",
+};
 
 export function normalizeStaticProjection(
   projection: StaticProjection | undefined,
@@ -53,30 +61,68 @@ export function normalizeStaticProjection(
   return { ...DEFAULT_STATIC_PROJECTION, ...projection };
 }
 
-export function normalizeProjection(projection: Projection | undefined): Projection {
+export function normalizeStaticBoundaryProjection(
+  projection: StaticBoundaryProjection | undefined,
+): Required<StaticBoundaryProjection> {
+  assertStaticBoundaryProjection(projection);
+  return { ...DEFAULT_BOUNDARY_PROJECTION, ...projection };
+}
+
+export function normalizeProjection<TDataContent = never>(
+  projection: Projection<TDataContent> | undefined,
+): Projection<TDataContent> {
   if (!projection) {
     return { ...DEFAULT_STATIC_PROJECTION };
   }
 
-  if (typeof projection === "function" || typeof projection === "string") {
+  if (isProjectionFunction<TDataContent>(projection) || typeof projection === "string") {
     return projection;
   }
 
   return normalizeStaticProjection(projection);
 }
 
+export function normalizeBoundaryProjection<
+  TDataContent = never,
+>(
+  projection: BoundaryProjection<TDataContent> | undefined,
+): BoundaryProjection<TDataContent> {
+  if (!projection) {
+    return { ...DEFAULT_BOUNDARY_PROJECTION };
+  }
+
+  if (isProjectionFunction<TDataContent>(projection) || typeof projection === "string") {
+    return projection;
+  }
+
+  return normalizeStaticBoundaryProjection(projection);
+}
+
 export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
 ): NormalizedStateDescriptor<S> {
+  const scope = descriptor.scope ?? "top";
+  const onInitConflict = descriptor.onInitConflict ?? "replace";
+  const projection = descriptor.projection ?? "hidden";
+  if (
+    descriptor.scope === scope &&
+    descriptor.onInitConflict === onInitConflict &&
+    descriptor.projection === projection
+  ) {
+    return descriptor as NormalizedStateDescriptor<S>;
+  }
+
   return {
     ...descriptor,
-    scope: descriptor.scope ?? "top",
-    onInitConflict: descriptor.onInitConflict ?? "replace",
-    projection: descriptor.projection ?? "hidden",
+    scope,
+    onInitConflict,
+    projection,
   };
 }
 
-export function normalizeRuntime(runtime: Runtime | undefined): NormalizedRuntime {
+export function normalizeRuntime<TDataContent = never>(
+  runtime: Runtime<TDataContent> | undefined,
+): NormalizedRuntime<TDataContent> {
   if (!runtime || !runtime.type || runtime.type === "component") {
     return { type: "component" };
   }
@@ -86,8 +132,8 @@ export function normalizeRuntime(runtime: Runtime | undefined): NormalizedRuntim
       ...runtime,
       concurrency: runtime.concurrency ?? "serial",
       activationHistory: runtime.activationHistory ?? "live",
-      historyProjection: runtime.historyProjection ?? { type: "actor" },
-      boundaryProjection: normalizeProjection(runtime.boundaryProjection ?? DEFAULT_BOUNDARY_PROJECTION),
+      historyProjection: runtime.historyProjection ?? { type: "messages" },
+      boundaryProjection: normalizeBoundaryProjection(runtime.boundaryProjection),
     };
   }
 
@@ -99,15 +145,21 @@ export function normalizeRuntime(runtime: Runtime | undefined): NormalizedRuntim
     ...runtime,
     concurrency: runtime.concurrency ?? "serial",
     activationHistory: runtime.activationHistory ?? "live",
-    historyProjection: runtime.historyProjection ?? { type: "actor" },
-    boundaryProjection: normalizeProjection(runtime.boundaryProjection ?? DEFAULT_BOUNDARY_PROJECTION),
+    historyProjection: runtime.historyProjection ?? { type: "messages" },
+    boundaryProjection: normalizeBoundaryProjection(runtime.boundaryProjection),
   };
 }
 
-export function createNode<const TConfig extends NodeConfig>(config: TConfig): CreatedNode<TConfig> {
+export function createNode<
+  TDataContent = never,
+  const TConfig extends NodeConfig<TDataContent> = NodeConfig<TDataContent>,
+>(config: TConfig): CreatedNode<TDataContent, TConfig> {
   const key = config.key ?? config.name;
   if (!key) {
     throw new Error("Node requires key or name");
+  }
+  if (config.stateless && config.state) {
+    throw new Error(`Stateless node "${key}" cannot declare state`);
   }
   const tools = normalizeActionEntries(config.tools ?? []);
   const commands = normalizeActionEntries(config.commands ?? []);
@@ -117,6 +169,7 @@ export function createNode<const TConfig extends NodeConfig>(config: TConfig): C
     sourceNodeKey: config.sourceNodeKey,
     name: config.name,
     instructions: config.instructions,
+    stateless: config.stateless ?? false,
     toolBindings: tools.bindings,
     toolRefs: tools.refs,
     commandBindings: commands.bindings,
@@ -126,7 +179,19 @@ export function createNode<const TConfig extends NodeConfig>(config: TConfig): C
     output: config.output,
     projection: normalizeProjection(config.projection),
     runtime: normalizeRuntime(config.runtime),
-  } as CreatedNode<TConfig>;
+  } as CreatedNode<TDataContent, TConfig>;
+}
+
+function assertStaticBoundaryProjection(
+  projection: StaticBoundaryProjection | undefined,
+): void {
+  if (!projection) {
+    return;
+  }
+  const record = projection as Record<string, unknown>;
+  if ("instructions" in record || "tools" in record) {
+    throw new Error('Static boundary projection only supports "mode"');
+  }
 }
 
 function normalizeActionEntries(entries: readonly ActionConfigEntry[]): {
@@ -149,8 +214,10 @@ function normalizeActionEntries(entries: readonly ActionConfigEntry[]): {
   return { bindings, refs };
 }
 
-function normalizeMembers(configs: Node[]): Node[] {
-  const members: Node[] = [];
+function normalizeMembers<TDataContent>(
+  configs: Node<TDataContent>[],
+): Node<TDataContent>[] {
+  const members: Node<TDataContent>[] = [];
   const keys = new Set<string>();
 
   for (const node of configs) {

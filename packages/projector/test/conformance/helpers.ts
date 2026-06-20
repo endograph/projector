@@ -1,20 +1,24 @@
 import {
   createCharter,
   type Charter,
+  type CharterConfig,
   type ExecutorRunRequest,
   type ExecutorRunResult,
   type Frame,
   type MachineRun,
 } from "../../index.ts";
 
-export function charter(overrides: Partial<Charter> = {}): Charter {
+export function charter(overrides: Partial<CharterConfig> = {}): Charter {
   return createCharter({
-    executor: { run: () => ({ completionReason: "done" as const }) },
-    nodes: {},
-    tools: {},
-    commands: {},
-    states: {},
-    projections: {},
+    executor: {
+      run: () => ({ completionReason: "done" as const }),
+      realizePrompt: (request) => ({ provider: "test", input: request.inference }),
+    },
+    nodes: [],
+    tools: [],
+    commands: [],
+    states: [],
+    projections: [],
     ...overrides,
   });
 }
@@ -35,6 +39,7 @@ export function createRecordingExecutor(
         requests.push(request);
         return await run(request);
       },
+      realizePrompt: (request) => ({ provider: "test", input: request.inference }),
     },
   };
 }

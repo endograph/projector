@@ -1,16 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAction, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { useAtom, useAtomValue } from "jotai";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import type { LocalVideoTrack } from "livekit-client";
 import {
   activeAgentTabAtom,
   inputAtom,
   isLoadingAtom,
   messageTransportAtom,
   scanlinesEnabledAtom,
+  timeTravelFrameIdAtom,
   type MessageTransport,
 } from "@/src/atoms";
 import { useKeyboardFocus, useSessionId } from "@/src/hooks";
@@ -27,14 +29,36 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
   const sendMessage = useAction(api.sessionActions.sendMessage);
   const sendClientMessage = useAction(api.sessionActions.sendClientMessage);
   const ensureAgentDispatched = useAction(api.livekitAgentActions.ensureAgentDispatched);
+  const cloneFromFrame = useMutation(api.sessions.cloneFromFrame);
+  const [timeTravelFrameId, setTimeTravelFrameId] = useAtom(timeTravelFrameIdAtom);
 
-  const session = useQuery(api.sessions.get, sessionId ? { id: sessionId } : "skip");
-  const serverMessages = useQuery(api.messages.list, sessionId ? { sessionId } : "skip");
+  const session = useQuery(
+    api.sessions.get,
+    sessionId
+      ? {
+          id: sessionId,
+          ...(timeTravelFrameId ? { headFrameId: timeTravelFrameId } : {}),
+        }
+      : "skip",
+  );
+  const serverMessages = useQuery(
+    api.messages.listForFramePath,
+    sessionId
+      ? {
+          sessionId,
+          ...(timeTravelFrameId ? { upToFrameId: timeTravelFrameId } : {}),
+        }
+      : "skip",
+  );
   const liveKitWorkerStatus = useQuery(api.livekitAgent.getAgentWorkerStatus, sessionId ? { sessionId } : "skip");
 
   useEffect(() => {
     if (sessionId && session === undefined) return;
     if (sessionId && session === null) {
+      if (timeTravelFrameId) {
+        setTimeTravelFrameId(null);
+        return;
+      }
       setSessionId(null);
       return;
     }
@@ -48,24 +72,50 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
           setConnectionError(error instanceof Error ? error.message : "Unable to create session");
         });
     }
-  }, [createSession, session, sessionId, setSessionId]);
+  }, [createSession, session, sessionId, setSessionId, setTimeTravelFrameId, timeTravelFrameId]);
+
+  const previousSessionIdRef = useRef<Id<"sessions"> | null>(sessionId);
+  useEffect(() => {
+    if (previousSessionIdRef.current !== sessionId) {
+      previousSessionIdRef.current = sessionId;
+      setTimeTravelFrameId(null);
+    }
+  }, [sessionId, setTimeTravelFrameId]);
+
+  useEffect(() => {
+    if (!timeTravelFrameId || !session?.frameId) return;
+    if (session.frameId !== timeTravelFrameId) {
+      setTimeTravelFrameId(session.frameId === session.headFrameId ? null : session.frameId);
+    }
+  }, [session?.frameId, session?.headFrameId, setTimeTravelFrameId, timeTravelFrameId]);
+
+  useEffect(() => {
+    if (session?.headFrameId && timeTravelFrameId === session.headFrameId) {
+      setTimeTravelFrameId(null);
+    }
+  }, [session?.headFrameId, setTimeTravelFrameId, timeTravelFrameId]);
 
   return (
     <ProjectorProvider
       sessionId={sessionId}
       sendClientMessage={sendClientMessage}
       snapshot={session?.clientSnapshot as DemoClientSnapshot | undefined}
+      readOnly={Boolean(timeTravelFrameId && session?.headFrameId && timeTravelFrameId !== session.headFrameId)}
     >
       <HomeClientContent
         sessionId={sessionId}
         setSessionId={setSessionId}
         createSession={createSession}
         sendMessage={sendMessage}
+        cloneFromFrame={cloneFromFrame}
         ensureAgentDispatched={ensureAgentDispatched}
         serverMessages={serverMessages}
         liveKitWorkerStatus={liveKitWorkerStatus}
         connectionError={connectionError}
         onConnectionErrorChange={setConnectionError}
+        headFrameId={session?.headFrameId ?? null}
+        timeTravelFrameId={timeTravelFrameId}
+        onTimeTravelFrameChange={setTimeTravelFrameId}
       />
     </ProjectorProvider>
   );
@@ -76,16 +126,24 @@ function HomeClientContent({
   setSessionId,
   createSession,
   sendMessage,
+  cloneFromFrame,
   ensureAgentDispatched,
   serverMessages,
   liveKitWorkerStatus,
   connectionError,
   onConnectionErrorChange,
+  headFrameId,
+  timeTravelFrameId,
+  onTimeTravelFrameChange,
 }: {
   sessionId: Id<"sessions"> | null;
   setSessionId: (id: Id<"sessions"> | null) => void;
   createSession: () => Promise<Id<"sessions">>;
   sendMessage: (args: { sessionId: Id<"sessions">; content: string }) => Promise<unknown>;
+  cloneFromFrame: (args: {
+    sourceSessionId: Id<"sessions">;
+    targetFrameId: Id<"frames">;
+  }) => Promise<Id<"sessions">>;
   ensureAgentDispatched: (args: { sessionId: Id<"sessions">; reason: string }) => Promise<unknown>;
   serverMessages: DemoMessage[] | undefined;
   liveKitWorkerStatus:
@@ -103,18 +161,23 @@ function HomeClientContent({
     | undefined;
   connectionError: string | null;
   onConnectionErrorChange: (error: string | null) => void;
+  headFrameId: Id<"frames"> | null;
+  timeTravelFrameId: Id<"frames"> | null;
+  onTimeTravelFrameChange: (frameId: Id<"frames"> | null) => void;
 }) {
   const [input, setInput] = useAtom(inputAtom);
   const [isLoading, setIsLoading] = useAtom(isLoadingAtom);
   const [messageTransport, setMessageTransport] = useAtom(messageTransportAtom);
   const [voiceStatus, setVoiceStatus] = useState<{ status: string; detail?: string }>({ status: "idle" });
   const [sendLiveKitMessage, setSendLiveKitMessage] = useState<((content: string) => Promise<void>) | null>(null);
+  const [localCameraTrack, setLocalCameraTrack] = useState<LocalVideoTrack | null>(null);
   const [agentDocked, setAgentDocked] = useState(false);
   const [agentVisible, setAgentVisible] = useState(true);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const scanlinesEnabled = useAtomValue(scanlinesEnabledAtom);
   const activeTab = useAtomValue(activeAgentTabAtom);
   const { instances: clientInstances, snapshot } = useProjector();
+  const isTimeTraveling = Boolean(timeTravelFrameId && headFrameId && timeTravelFrameId !== headFrameId);
 
   const terminalRef = useRef<HTMLTextAreaElement>(null);
   const agentRef = useRef<HTMLDivElement>(null);
@@ -129,15 +192,20 @@ function HomeClientContent({
 
   const handleSend = useCallback(async () => {
     const content = input.trim();
-    if (!content || !sessionId || isLoading) return;
+    if (!content || !sessionId || isLoading || isTimeTraveling) return;
+
+    if (messageTransport === "livekit" && !sendLiveKitMessage) {
+      onConnectionErrorChange("LiveKit agent is not ready");
+      return;
+    }
+
+    const liveKitSender = sendLiveKitMessage;
     setInput("");
     setIsLoading(true);
     try {
       if (messageTransport === "livekit") {
-        if (!sendLiveKitMessage) {
-          throw new Error("LiveKit agent is not ready");
-        }
-        await sendLiveKitMessage(content);
+        if (!liveKitSender) throw new Error("LiveKit agent is not ready");
+        await liveKitSender(content);
       } else {
         await sendMessage({ sessionId, content });
       }
@@ -157,6 +225,47 @@ function HomeClientContent({
     sessionId,
     setInput,
     setIsLoading,
+    isTimeTraveling,
+  ]);
+
+  const handleTimeTravelFrame = useCallback(
+    (frameId: Id<"frames">) => {
+      onTimeTravelFrameChange(frameId === headFrameId ? null : frameId);
+    },
+    [headFrameId, onTimeTravelFrameChange],
+  );
+
+  const handleReturnToHead = useCallback(() => {
+    onTimeTravelFrameChange(null);
+  }, [onTimeTravelFrameChange]);
+
+  const handleForkSession = useCallback(async () => {
+    if (!sessionId || !timeTravelFrameId || isLoading) return;
+    setIsLoading(true);
+    try {
+      const nextSessionId = await cloneFromFrame({
+        sourceSessionId: sessionId,
+        targetFrameId: timeTravelFrameId,
+      });
+      setInput("");
+      onConnectionErrorChange(null);
+      onTimeTravelFrameChange(null);
+      setSessionId(nextSessionId);
+    } catch (error) {
+      onConnectionErrorChange(error instanceof Error ? error.message : "Unable to fork session");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [
+    cloneFromFrame,
+    isLoading,
+    onConnectionErrorChange,
+    onTimeTravelFrameChange,
+    sessionId,
+    setInput,
+    setIsLoading,
+    setSessionId,
+    timeTravelFrameId,
   ]);
 
   const handleReset = useCallback(async () => {
@@ -175,13 +284,16 @@ function HomeClientContent({
 
   const handleLiveKitSenderChange = useCallback((sender: ((content: string) => Promise<void>) | null) => {
     setSendLiveKitMessage(sender ? () => sender : null);
-  }, []);
+    if (sender) {
+      onConnectionErrorChange(null);
+    }
+  }, [onConnectionErrorChange]);
 
   const themeHue = getThemeHue(clientInstances);
-  const persistedAgentControls = getAgentControlsState(snapshot.instances);
+  const persistedAgentControls = getAgentControlsState(snapshot.root ? [snapshot.root] : []);
   const persistedVoiceEnabled = Boolean(persistedAgentControls?.liveMode);
   const persistedCameraEnabled = Boolean(persistedAgentControls?.cameraEnabled);
-  const liveKitEnabled = persistedVoiceEnabled || messageTransport === "livekit";
+  const liveKitEnabled = persistedVoiceEnabled || persistedCameraEnabled || messageTransport === "livekit";
   const liveKitWorkerReady = Boolean(
     liveKitWorkerStatus?.agentWorkerLeaseExpiresAt && liveKitWorkerStatus.agentWorkerLeaseExpiresAt > statusClock,
   );
@@ -227,6 +339,11 @@ function HomeClientContent({
       docked={agentDocked}
       onToggleDock={toggleAgentDock}
       onResetSession={handleReset}
+      headFrameId={headFrameId}
+      timeTravelFrameId={timeTravelFrameId}
+      onTimeTravelFrame={handleTimeTravelFrame}
+      onReturnToHead={handleReturnToHead}
+      onSwitchSession={setSessionId}
       messageTransport={messageTransport}
       onMessageTransportChange={setMessageTransport}
       liveKitStatus={combinedLiveKitStatus}
@@ -246,9 +363,14 @@ function HomeClientContent({
           input={input}
           onInputChange={setInput}
           onSend={handleSend}
+          onForkSession={handleForkSession}
+          onReturnToHead={handleReturnToHead}
           isLoading={isLoading}
+          isTimeTraveling={isTimeTraveling}
+          timeTravelFrameId={timeTravelFrameId}
           connectionError={connectionError}
           voiceStatus={voiceStatus}
+          localCameraTrack={localCameraTrack}
         />
         {!agentDocked && agentVisible && agentPane}
         {agentDocked && agentVisible && (
@@ -271,6 +393,7 @@ function HomeClientContent({
           cameraEnabled={persistedCameraEnabled}
           onStatusChange={handleVoiceStatus}
           onSendMessageChange={handleLiveKitSenderChange}
+          onLocalCameraTrackChange={setLocalCameraTrack}
         />
       </div>
     </main>

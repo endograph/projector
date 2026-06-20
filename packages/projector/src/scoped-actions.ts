@@ -3,29 +3,29 @@ import type { AnyAction, Charter, Node } from "./types.ts";
 
 export type ActionKind = "tool" | "command";
 
-export function resolveFrameTools(
-  frame: ProjectionFrame,
-  charter: Charter | undefined,
+export function resolveFrameTools<TDataContent>(
+  frame: ProjectionFrame<TDataContent>,
+  charter: Charter<TDataContent> | undefined,
 ): AnyAction[] {
   return frame.node.toolRefs.map((name) =>
     resolveScopedAction(frame, name, "tool", charter)
   );
 }
 
-export function resolveFrameCommands(
-  frame: ProjectionFrame,
-  charter: Charter | undefined,
+export function resolveFrameCommands<TDataContent>(
+  frame: ProjectionFrame<TDataContent>,
+  charter: Charter<TDataContent> | undefined,
 ): AnyAction[] {
   return frame.node.commandRefs.map((name) =>
     resolveScopedAction(frame, name, "command", charter)
   );
 }
 
-export function resolveScopedAction(
-  frame: ProjectionFrame,
+export function resolveScopedAction<TDataContent>(
+  frame: ProjectionFrame<TDataContent>,
   name: string,
   kind: ActionKind,
-  charter: Charter | undefined,
+  charter: Charter<TDataContent> | undefined,
 ): AnyAction {
   const selfBinding = actionBinding(frame.node, name, kind);
   if (selfBinding) {
@@ -49,7 +49,7 @@ export function resolveScopedAction(
 }
 
 function actionBinding(
-  node: Node,
+  node: Node<any>,
   name: string,
   kind: ActionKind,
 ): AnyAction | undefined {

@@ -1,5 +1,5 @@
-import type { ProjectionFrame, SyntheticRoot } from "./frames.ts";
-import { traversalFrames } from "./frames.ts";
+import type { ProjectionFrame } from "./frames.ts";
+import { topStateInstance, traversalFrames } from "./frames.ts";
 import type {
   Instance,
   NormalizedStateDescriptor,
@@ -8,25 +8,27 @@ import type {
   StateKey,
 } from "./types.ts";
 
-export type ResolvedState = {
+export type ResolvedState<TDataContent = any> = {
   address: StateAddress;
-  targetInstance: Instance;
+  targetInstance: Instance<TDataContent>;
   descriptor: NormalizedStateDescriptor;
   container: StateContainer;
-  sourceFrame: ProjectionFrame;
+  sourceFrame: ProjectionFrame<TDataContent>;
 };
 
-type StateGroup = {
-  targetInstance: Instance;
+type StateGroup<TDataContent = any> = {
+  targetInstance: Instance<TDataContent>;
   stateKey: StateKey;
   entries: Array<{
     descriptor: NormalizedStateDescriptor;
-    frame: ProjectionFrame;
+    frame: ProjectionFrame<TDataContent>;
   }>;
 };
 
-export function resolveStates(root: SyntheticRoot | Instance): ResolvedState[] {
-  const groups = new Map<string, StateGroup>();
+export function resolveStates<TDataContent>(
+  root: Instance<TDataContent>,
+): ResolvedState<TDataContent>[] {
+  const groups = new Map<string, StateGroup<TDataContent>>();
 
   for (const frame of traversalFrames(root)) {
     const descriptor = frame.node.state;
@@ -35,7 +37,7 @@ export function resolveStates(root: SyntheticRoot | Instance): ResolvedState[] {
     }
 
     const targetInstance =
-      descriptor.scope === "local" ? frame.concreteInstance : frame.topInstance;
+      descriptor.scope === "local" ? frame.concreteInstance : topStateInstance(frame);
     const groupKey = `${targetInstance.id}\u0000${descriptor.key}`;
     const group =
       groups.get(groupKey) ??
@@ -43,12 +45,12 @@ export function resolveStates(root: SyntheticRoot | Instance): ResolvedState[] {
         targetInstance,
         stateKey: descriptor.key,
         entries: [],
-      } satisfies StateGroup);
+      } satisfies StateGroup<TDataContent>);
     group.entries.push({ descriptor, frame });
     groups.set(groupKey, group);
   }
 
-  const resolved: ResolvedState[] = [];
+  const resolved: ResolvedState<TDataContent>[] = [];
   for (const group of groups.values()) {
     resolved.push(resolveStateGroup(group));
   }
@@ -56,7 +58,9 @@ export function resolveStates(root: SyntheticRoot | Instance): ResolvedState[] {
   return resolved;
 }
 
-function resolveStateGroup(group: StateGroup): ResolvedState {
+function resolveStateGroup<TDataContent>(
+  group: StateGroup<TDataContent>,
+): ResolvedState<TDataContent> {
   const scope = group.entries[0]?.descriptor.scope;
   if (!scope) {
     throw new Error("State group has no descriptors");
@@ -136,15 +140,15 @@ function mergeDescriptors(
   };
 }
 
-function allSchemasValidate(
-  entries: StateGroup["entries"],
+function allSchemasValidate<TDataContent>(
+  entries: StateGroup<TDataContent>["entries"],
   value: unknown,
 ): boolean {
   return entries.every((entry) => entry.descriptor.schema.safeParse(value).success);
 }
 
 function validateAllSchemas(
-  entries: StateGroup["entries"],
+  entries: StateGroup<any>["entries"],
   value: unknown,
   stateKey: string,
 ): void {

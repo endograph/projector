@@ -2,6 +2,7 @@ import { isWorkActivationMessage } from "./history.ts";
 import { encodeRuntimeAddress } from "./runtime-address.ts";
 import type {
   ActorMessage,
+  AnyActorMessage,
   Audience,
   AudienceTarget,
   Frame,
@@ -20,22 +21,24 @@ export type RuntimeVisibilityTarget = {
   runtimeInstanceId: RuntimeInstanceId;
 };
 
-export function isActorMessage(message: unknown): message is ActorMessage {
+export function isActorMessage<TDataContent = never>(
+  message: unknown,
+): message is ActorMessage<TDataContent> {
   if (!message || typeof message !== "object") return false;
   const record = message as Record<string, unknown>;
   if (record.type === "user" || record.type === "assistant") {
-    return typeof record.text === "string";
+    return true;
   }
   return record.type === "tool" && typeof record.name === "string";
 }
 
-export function defaultAudienceForActorMessage(message: ActorMessage): Audience {
+export function defaultAudienceForActorMessage(message: AnyActorMessage): Audience {
   return message.type === "user" ? "broadcast" : "self";
 }
 
-export function actorMessageVisibleToGenerator(
-  message: ActorMessage,
-  frame: Frame,
+export function actorMessageVisibleToGenerator<TDataContent>(
+  message: ActorMessage<TDataContent>,
+  frame: Frame<TDataContent>,
   target: Generator,
 ): boolean {
   const audience = message.audience ?? defaultAudienceForActorMessage(message);
@@ -50,9 +53,9 @@ export function actorMessageVisibleToGenerator(
   );
 }
 
-export function actorMessageVisibleToRuntime(
-  message: ActorMessage,
-  frame: Frame,
+export function actorMessageVisibleToRuntime<TDataContent>(
+  message: ActorMessage<TDataContent>,
+  frame: Frame<TDataContent>,
   target: RuntimeVisibilityTarget,
   resolveGeneratorRuntimeId: ResolveGeneratorRuntimeId,
 ): boolean {
@@ -75,8 +78,8 @@ function audienceTargets(audience: Exclude<Audience, "self" | "broadcast">): Aud
   return Array.isArray(audience) ? audience : [audience];
 }
 
-export function activationFrameIndexFor(
-  frames: readonly Frame[],
+export function activationFrameIndexFor<TDataContent>(
+  frames: readonly Frame<TDataContent>[],
   activationId: string | undefined,
   options: { requireActivationFrame?: boolean } = {},
 ): number {
@@ -102,7 +105,7 @@ export function activationFrameIndexFor(
 }
 
 export function actorMessageVisibleByDelivery(
-  message: ActorMessage,
+  message: AnyActorMessage,
   frameIndex: number,
   activationFrameIndex: number,
 ): boolean {
@@ -110,10 +113,26 @@ export function actorMessageVisibleByDelivery(
 }
 
 export function actorMessageVisibleByActivationHistory(
-  frame: Frame,
+  frame: Frame<any>,
   frameIndex: number,
   activationFrameIndex: number,
-  runtime: PrimaryRuntime | WorkerRuntime,
+  runtime: PrimaryRuntime<any> | WorkerRuntime<any>,
+  activationId: string | undefined,
+): boolean {
+  return frameVisibleByActivationHistory(
+    frame,
+    frameIndex,
+    activationFrameIndex,
+    runtime,
+    activationId,
+  );
+}
+
+export function frameVisibleByActivationHistory(
+  frame: Frame<any>,
+  frameIndex: number,
+  activationFrameIndex: number,
+  runtime: PrimaryRuntime<any> | WorkerRuntime<any>,
   activationId: string | undefined,
 ): boolean {
   if (runtime.activationHistory !== "snapshot" || activationId === undefined) {

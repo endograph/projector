@@ -8,9 +8,10 @@ import type { Id } from "./_generated/dataModel";
 import { openai as aiSdkOpenAI } from "@ai-sdk/openai";
 import { AiSdkExecutor } from "@projectors/aisdk-executor";
 import {
+  ROOT_RUNTIME_INSTANCE_ID,
   createMachine,
-  encodeRuntimeAddress,
   runMachine,
+  textContent,
   type Executor,
   type Frame,
 } from "@projectors/core";
@@ -23,7 +24,7 @@ import {
 } from "@projectors/demo-agent/src/projector-demo.js";
 import type { ClientMachineMessage } from "@projectors/core/client";
 
-const DISCRETE_MODEL = process.env.OPENAI_DISCRETE_MODEL ?? "gpt-4o-mini";
+const DISCRETE_MODEL = process.env.OPENAI_DISCRETE_MODEL ?? "gpt-5.5";
 
 const discreteExecutor = new AiSdkExecutor({
   model: aiSdkOpenAI(DISCRETE_MODEL),
@@ -54,53 +55,64 @@ export const sendMessage = action({
     }
 
     const rootInstance = hydrateDemoInstance(session.instance);
-    const rootRuntimeInstanceId = encodeRuntimeAddress({
-      type: "instance",
-      instanceId: rootInstance.id,
-    });
-    const memoryRuntimeInstanceId = encodeRuntimeAddress({
-      type: "member",
-      ownerInstanceId: rootInstance.id,
-      memberPath: ["memory"],
-    });
-    const branchFrames = (await ctx.runQuery(api.sessions.listBranchFrames, { sessionId })) as Frame[];
+    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame[];
     const memoryExecutor = new AiSdkExecutor({
       model: aiSdkOpenAI(DISCRETE_MODEL),
       maxOutputTokens: 1024,
       maxSteps: 3,
-      toolChoice: "required",
     });
+    const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>
+      request.inference.tools.some((tool) => tool.name === "saveMemories");
     const executor: Executor = {
       run: (request) =>
-        request.runtimeInstanceId === memoryRuntimeInstanceId
+        isMemoryRequest(request)
           ? memoryExecutor.run(request)
           : discreteExecutor.run(request),
+      realizePrompt: (request) =>
+        isMemoryRequest(request)
+          ? memoryExecutor.realizePrompt(request)
+          : discreteExecutor.realizePrompt(request),
     };
     const machine = createMachine({
       id: sessionId,
       root: rootInstance,
       charter: { ...createDemoCharter(), executor },
-      frames: branchFrames,
+      frames: contextFrames,
     });
 
     machine.enqueueFrame({
       metadata: { mode: "text", transport: "convex" },
-      messages: [{ type: "user", text: content }],
+      messages: [{ type: "user", content: [textContent(content)], text: content }],
     });
 
-    let lastFrameId: Id<"machineFrames"> | undefined;
+    const producedFrames: Frame[] = [];
     for await (const frame of runMachine(machine)) {
-      const frameId = await persistMachineFrame(ctx, {
+      producedFrames.push(frame);
+    }
+
+    const durableFrames = producedFrames.map((frame) =>
+      prepareMachineFrame(frame, ROOT_RUNTIME_INSTANCE_ID)
+    );
+    const frameIds = await ctx.runMutation(api.sessions.appendMachineFrameSequence, {
+      sessionId,
+      expectedHeadFrameId: session.headFrameId,
+      frames: durableFrames,
+    }) as Id<"frames">[];
+
+    for (const [index, frame] of durableFrames.entries()) {
+      const frameId = frameIds[index];
+      if (!frameId) continue;
+      await persistFrameMessages(ctx, {
         sessionId,
         frame,
-        rootRuntimeInstanceId,
+        frameId,
+        rootRuntimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
       });
-      lastFrameId = frameId;
     }
 
     await ctx.runMutation(api.sessions.commitMachineInstance, {
       sessionId,
-      frameId: lastFrameId,
+      frameId: frameIds.at(-1),
       message: { type: "machine.run", trigger: "user", text: content },
       instance: serializeDemoInstance(rootInstance),
     });
@@ -133,34 +145,35 @@ export const sendClientMessage = action({
 
 export const createSessionAtFoo = createSession;
 
-async function persistMachineFrame(
-  ctx: ActionCtx,
-  {
-    sessionId,
-    frame,
-    rootRuntimeInstanceId,
-  }: {
-    sessionId: Id<"sessions">;
-    frame: Frame;
-    rootRuntimeInstanceId: string;
-  },
-): Promise<Id<"machineFrames">> {
+function prepareMachineFrame(frame: Frame, rootRuntimeInstanceId: string): Frame {
   const mode =
     frame.metadata?.mode === "text" || frame.runtimeInstanceId === rootRuntimeInstanceId
       ? "text"
       : "memory";
-  const frameId = await ctx.runMutation(api.sessions.appendMachineFrame, {
-    sessionId,
-    frame: {
-      ...frame,
-      metadata: {
-        ...frame.metadata,
-        mode,
-        transport: "convex",
-      },
+  return {
+    ...frame,
+    metadata: {
+      ...frame.metadata,
+      mode,
+      transport: "convex",
     },
-  });
+  };
+}
 
+async function persistFrameMessages(
+  ctx: ActionCtx,
+  {
+    sessionId,
+    frame,
+    frameId,
+    rootRuntimeInstanceId,
+  }: {
+    sessionId: Id<"sessions">;
+    frame: Frame;
+    frameId: Id<"frames">;
+    rootRuntimeInstanceId: string;
+  },
+): Promise<void> {
   for (const message of frame.messages) {
     const text = typeof message.text === "string" ? message.text : "";
     if (message.type === "user" && text.trim()) {
@@ -189,8 +202,6 @@ async function persistMachineFrame(
       });
     }
   }
-
-  return frameId;
 }
 
 function idempotencyKey(prefix: string, source: unknown): string {

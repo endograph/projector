@@ -1,6 +1,10 @@
 import type { RuntimeAddress } from "./types.ts";
 
-export const SYNTHETIC_ROOT_RUNTIME_ID = "synthetic-root";
+export const ROOT_INSTANCE_ID = "root";
+export const ROOT_RUNTIME_INSTANCE_ID = encodeRuntimeAddress({
+  type: "instance",
+  instanceId: ROOT_INSTANCE_ID,
+});
 
 export function encodeRuntimeAddress(address: RuntimeAddress): string {
   if (address.type === "instance") {

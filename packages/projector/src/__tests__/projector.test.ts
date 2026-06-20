@@ -2,11 +2,16 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import {
   actorMessages,
+  appendState,
+  applyStaticProjection,
   compileProjection,
   createActivationFrame,
+  createCompletionFrame,
   createCharter,
   createCommand,
   createMachine,
+  createHistoryProjectionFunction,
+  createProjectionFunction,
   createRuntimeCompletionFrame,
   createNode,
   createRoot,
@@ -18,9 +23,12 @@ import {
   hydrateProjection,
   hydrateStateDescriptor,
   inspectCompiledProjectionTree,
+  isActorMessage,
   messagesBeforeLastCompletion,
   messagesSinceLastCompletion,
+  patchState,
   resolveStates,
+  replaceState,
   runMachine,
   serializeHistoryProjection,
   serializeInstance,
@@ -28,30 +36,122 @@ import {
   serializeProjection,
   serializeStateDescriptor,
   syncMachineRuntime,
-  SYNTHETIC_ROOT_RUNTIME_ID,
+  textAssistantMessage,
+  textUserMessage,
+  ROOT_RUNTIME_INSTANCE_ID,
   traversalFrames,
   type Action,
+  type ActorMessage,
   type Charter,
+  type CharterConfig,
+  type CompiledInference,
+  type ContentPart,
   type ExecutorRunRequest,
   type Frame,
-  type HistoryProjectionFunction,
   type Instance,
-  type ProjectionFunction,
 } from "../../index.ts";
 
-const executor = { run: () => ({ completionReason: "done" as const }) };
+const executor = {
+  run: () => ({ completionReason: "done" as const }),
+  realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
+};
 
-function charter(overrides: Partial<Charter> = {}): Charter {
-  return createCharter({
-    executor,
-    nodes: {},
-    tools: {},
-    commands: {},
-    states: {},
-    projections: {},
+function textParts(...texts: string[]) {
+  return texts.map((text) => ({ type: "text" as const, text }));
+}
+
+function charter<TDataContent = never>(
+  overrides: Partial<CharterConfig<TDataContent>> = {},
+): Charter<TDataContent> {
+  return createCharter<TDataContent>({
+    executor: executor as Charter<TDataContent>["executor"],
+    nodes: [],
+    tools: [],
+    commands: [],
+    states: [],
+    projections: [],
     ...overrides,
   });
 }
+
+describe("actor message typing", () => {
+  it("allows text-only actor messages while preserving typed data content parts", () => {
+    type AppDataContent =
+      | { answer: string }
+      | { blocks: Array<{ type: "text"; text: string }> };
+    type RichActorMessage = ActorMessage<AppDataContent>;
+
+    const textOnlyUser = { type: "user", text: "hello" } satisfies RichActorMessage;
+    const textOnlyAssistant = { type: "assistant", text: "hi" } satisfies RichActorMessage;
+    const structuredPart = {
+      type: "data",
+      data: { answer: "42" },
+    } satisfies ContentPart<AppDataContent>;
+
+    expect(isActorMessage(textOnlyUser)).toBe(true);
+    expect(isActorMessage(textOnlyAssistant)).toBe(true);
+    expect(structuredPart.data).toEqual({ answer: "42" });
+  });
+
+  it("anchors data content types at charter and validates node output against data content", () => {
+    type AppDataContent = { answer: string };
+    const schema = z.object({ answer: z.string() });
+    const appNode = createNode<AppDataContent>({
+      key: "typed",
+      output: {
+        schema,
+        mapTextBlock: (text) => ({ answer: text }),
+      },
+    });
+
+    const appCharter = createCharter<AppDataContent>({
+      executor: executor as Charter<AppDataContent>["executor"],
+      nodes: [appNode],
+      tools: [],
+      commands: [],
+      states: [],
+      projections: [],
+    });
+
+    expectTypeOf(appCharter).toMatchTypeOf<Charter<AppDataContent>>();
+
+    createNode<AppDataContent>({
+      key: "badOutput",
+      output: {
+        // @ts-expect-error output.schema must parse the configured data content.
+        schema: z.string(),
+      },
+    });
+
+    const stringOutputNode = createNode<string>({
+      key: "stringOutput",
+      output: { schema: z.string() },
+    });
+    createCharter<AppDataContent>({
+      executor: executor as Charter<AppDataContent>["executor"],
+      nodes: [
+        // @ts-expect-error registered nodes must use the charter data content type.
+        stringOutputNode,
+      ],
+      tools: [],
+      commands: [],
+      states: [],
+      projections: [],
+    });
+  });
+
+  it("types compiled inference history as all frame messages", () => {
+    type AppDataContent = { answer: string };
+    const workMessage = {
+      type: "work",
+      kind: "completion",
+      activationId: "activation-1",
+      reason: "done",
+    } satisfies Extract<CompiledInference<AppDataContent>["history"][number], { type: "work" }>;
+
+    expect(workMessage.type).toBe("work");
+  });
+});
 
 describe("node normalization", () => {
   it("applies node, runtime, state, and member defaults", () => {
@@ -64,6 +164,7 @@ describe("node normalization", () => {
       runtime: { type: "primary", trigger: { type: "actor-frame" } },
     });
 
+    expect(node.stateless).toBe(false);
     expect(node.projection).toEqual({
       mode: "augment",
       instructions: "system",
@@ -82,6 +183,16 @@ describe("node normalization", () => {
       projection: "hidden",
     });
     expect(node.members).toEqual([member]);
+  });
+
+  it("rejects state on stateless nodes", () => {
+    expect(() =>
+      createNode({
+        key: "wrapper",
+        stateless: true,
+        state: { key: "session", schema: z.number(), init: 1 },
+      }),
+    ).toThrow(/Stateless node "wrapper" cannot declare state/);
   });
 
   it("rejects duplicate member keys", () => {
@@ -107,14 +218,14 @@ describe("action state requirements", () => {
       run: (input, ctx) => {
         expectTypeOf(input).toEqualTypeOf<{ value: number }>();
         expectTypeOf(ctx.state).toEqualTypeOf<{ count: number } | undefined>();
-        ctx.patchState?.({ count: input.value });
-        ctx.replaceState?.({ count: input.value });
+        ctx.updateState?.(patchState({ count: input.value }));
+        ctx.updateState?.(replaceState({ count: input.value }));
 
         if (false) {
           // @ts-expect-error patch keys come from the action state descriptor
-          ctx.patchState?.({ missing: true });
+          ctx.updateState?.(patchState({ missing: true }));
           // @ts-expect-error replacement must match the action state descriptor
-          ctx.replaceState?.({ missing: true });
+          ctx.updateState?.(replaceState({ missing: true }));
         }
       },
     });
@@ -201,12 +312,36 @@ describe("projection traversal", () => {
     ]);
 
     expect(traversalFrames(root).map((frame) => frame.node.key)).toEqual([
+      "root",
       "rootA",
       "critic",
       "childA",
       "childB",
       "rootB",
     ]);
+    expect(traversalFrames(root)[1]?.parent?.runtimeInstanceId).toBe(ROOT_RUNTIME_INSTANCE_ID);
+  });
+
+  it("rejects duplicate instance ids without reserving root globally", () => {
+    const node = createNode({ key: "node" });
+
+    expect(() => createRoot([{ id: "root", node }])).toThrow(/Duplicate instance id "root"/);
+    expect(() => createMachine({
+      root: { id: "root", node },
+      charter: charter(),
+    })).not.toThrow();
+    expect(() => createMachine({
+      root: { id: "custom", node },
+      charter: charter(),
+    })).not.toThrow();
+    expect(() => createMachine({
+      root: {
+        id: "custom",
+        node,
+        children: [{ id: "custom", node }],
+      },
+      charter: charter(),
+    })).toThrow(/Duplicate instance id "custom"/);
   });
 
   it("uses stable virtual member addresses and does not materialize members", () => {
@@ -255,22 +390,81 @@ describe("projection compilation", () => {
       instructions: "replace",
       tools: [secondTool],
       projection: { mode: "replace", instructions: "dynamic" },
-      members: [hidden],
+      members: [hidden, createNode({ key: "replaceChild", instructions: "replace child" })],
     });
     const root = createNode({ key: "root", instructions: "root", members: [first, replace] });
 
     const compiled = compileProjection(
       { id: "i", node: root },
-      { history: [{ type: "user", text: "kept" }] },
+      { history: [{ ...textUserMessage("kept") }] },
     );
 
-    expect(compiled.systemParts).toEqual([]);
-    expect(compiled.dynamicParts).toEqual(["replace"]);
-    expect(compiled.history).toEqual([{ type: "user", text: "kept" }]);
+    expect(compiled.systemParts).toEqual(textParts("replace child"));
+    expect(compiled.dynamicParts).toEqual(textParts("replace"));
+    expect(compiled.history).toEqual([{ ...textUserMessage("kept") }]);
     expect(compiled.tools.map((tool) => tool.name)).toEqual(["dup"]);
   });
 
-  it("hides runtime boundaries by default and exports boundaryProjection aggregates", () => {
+  it("lets projection functions mutate the projection draft", () => {
+    let callSite: string | undefined;
+    let runtimeInstanceId: string | undefined;
+    const hiddenTool: Action = { state: null, name: "hiddenTool" };
+    const projectSensor = createProjectionFunction({
+      name: "projectSensor",
+      method: (ctx, draft, source) => {
+        callSite = ctx.callSite;
+        runtimeInstanceId = ctx.runtimeInstanceId;
+        applyStaticProjection(draft, source, { tools: "hidden" });
+        draft.dynamicParts.push({
+          type: "text",
+          text: "Camera sees: a red marker",
+        });
+      },
+    });
+    const sensor = createNode({
+      key: "sensor",
+      instructions: "base",
+      tools: [hiddenTool],
+      projection: projectSensor,
+    });
+
+    const compiled = compileProjection({ id: "sensor-instance", node: sensor });
+
+    expect(callSite).toBe("node");
+    expect(runtimeInstanceId).toBe("instance:sensor-instance");
+    expect(compiled.systemParts).toEqual(textParts("base"));
+    expect(compiled.dynamicParts).toEqual(textParts("Camera sees: a red marker"));
+    expect(compiled.tools).toEqual([]);
+  });
+
+  it("rejects static boundaryProjection instructions and tools", () => {
+    expect(() =>
+      createNode({
+        key: "worker",
+        runtime: {
+          type: "worker",
+          trigger: { type: "spawn" },
+          boundaryProjection: { mode: "augment", instructions: "dynamic" } as any,
+        },
+      }),
+    ).toThrow(/only supports "mode"/);
+
+    expect(() =>
+      hydrateNode(
+        {
+          key: "worker",
+          runtime: {
+            type: "worker",
+            trigger: { type: "spawn" },
+            boundaryProjection: { mode: "augment", tools: "hidden" },
+          },
+        } as any,
+        charter(),
+      ),
+    ).toThrow(/only supports "mode"/);
+  });
+
+  it("hides runtime boundaries by default and exports static boundaryProjection aggregates as compiled", () => {
     const inside = createNode({ key: "inside", instructions: "inside" });
     const worker = createNode({
       key: "worker",
@@ -279,7 +473,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "worker",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment", instructions: "dynamic" },
+        boundaryProjection: { mode: "augment" },
       },
     });
     const hiddenWorker = createNode({
@@ -294,9 +488,9 @@ describe("projection compilation", () => {
     });
 
     const parent = compileProjection({ id: "r", node: root });
-    expect(parent.systemParts).toEqual(["root"]);
-    expect(parent.dynamicParts).toEqual(["worker", "inside"]);
-    expect(parent.systemParts).not.toContain("hiddenWorker");
+    expect(parent.systemParts).toEqual(textParts("root", "worker", "inside"));
+    expect(parent.dynamicParts).toEqual([]);
+    expect(parent.systemParts).not.toContainEqual({ type: "text", text: "hiddenWorker" });
 
     const own = compileProjection(
       { id: "r", node: root },
@@ -308,7 +502,7 @@ describe("projection compilation", () => {
         },
       },
     );
-    expect(own.systemParts).toEqual(["worker", "inside"]);
+    expect(own.systemParts).toEqual(textParts("worker", "inside"));
   });
 
   it("lets boundaryProjection replace clear previous parent sections", () => {
@@ -323,7 +517,7 @@ describe("projection compilation", () => {
     });
     const root = createNode({ key: "root", instructions: "root", members: [worker] });
 
-    expect(compileProjection({ id: "r", node: root }).systemParts).toEqual(["worker"]);
+    expect(compileProjection({ id: "r", node: root }).systemParts).toEqual(textParts("worker"));
   });
 
   it("inspects nested runtime boundaries and their compiled projection payloads", () => {
@@ -335,7 +529,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "worker",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment", instructions: "dynamic" },
+        boundaryProjection: { mode: "augment" },
       },
     });
     const root = createNode({
@@ -350,12 +544,12 @@ describe("projection compilation", () => {
     const workerProjection = rootProjection?.children[0];
 
     expect(rootProjection?.nodeKey).toBe("root");
-    expect(rootProjection?.compiled.systemParts).toEqual(["root"]);
-    expect(rootProjection?.compiled.dynamicParts).toEqual(["worker", "inside"]);
+    expect(rootProjection?.compiled.systemParts).toEqual(textParts("root", "worker", "inside"));
+    expect(rootProjection?.compiled.dynamicParts).toEqual([]);
     expect(rootProjection?.frames.map((frame) => frame.nodeKey)).toEqual(["root"]);
     expect(workerProjection?.nodeKey).toBe("worker");
     expect(workerProjection?.kind).toBe("worker");
-    expect(workerProjection?.compiled.systemParts).toEqual(["worker", "inside"]);
+    expect(workerProjection?.compiled.systemParts).toEqual(textParts("worker", "inside"));
     expect(workerProjection?.frames.map((frame) => frame.nodeKey)).toEqual(["worker", "inside"]);
     expect(workerProjection?.parentRuntimeInstanceId).toBe("instance:r");
   });
@@ -376,8 +570,8 @@ describe("projection compilation", () => {
     const tree = inspectCompiledProjectionTree({ id: "r", node: root });
 
     expect(tree.roots[0]?.children[0]?.nodeKey).toBe("hiddenWorker");
-    expect(tree.roots[0]?.compiled.systemParts).toEqual(["root"]);
-    expect(tree.roots[0]?.compiled.systemParts).not.toContain("hiddenWorker");
+    expect(tree.roots[0]?.compiled.systemParts).toEqual(textParts("root"));
+    expect(tree.roots[0]?.compiled.systemParts).not.toContainEqual({ type: "text", text: "hiddenWorker" });
   });
 
   it("inspects replace projection output after previous sections are cleared", () => {
@@ -399,7 +593,7 @@ describe("projection compilation", () => {
 
     const tree = inspectCompiledProjectionTree({ id: "r", node: root });
 
-    expect(tree.roots[0]?.compiled.systemParts).toEqual(["worker"]);
+    expect(tree.roots[0]?.compiled.systemParts).toEqual(textParts("worker"));
     expect(tree.roots[0]?.projection.own.mode).toBe("augment");
     expect(tree.roots[0]?.children[0]?.projection.boundary.mode).toBe("replace");
   });
@@ -424,8 +618,42 @@ describe("projection compilation", () => {
       { targetGenerator: generator("member:r/worker", "worker") },
     );
 
-    expect(compiled.systemParts).toEqual(["worker"]);
+    expect(compiled.systemParts).toEqual(textParts("worker"));
     expect(compiled.tools.map((entry) => entry.name)).toEqual(["save"]);
+  });
+
+  it("preserves the supplied target generator identity in projection context", () => {
+    const seenTargets: string[] = [];
+    const captureTarget = createProjectionFunction({
+      name: "captureTarget",
+      method: (ctx, draft, source) => {
+        seenTargets.push(ctx.target?.id ?? "");
+        applyStaticProjection(draft, source);
+      },
+    });
+    const worker = createNode({
+      key: "worker",
+      projection: captureTarget,
+      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+    });
+    const root = createNode({
+      key: "root",
+      members: [worker],
+      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+    });
+
+    compileProjection(
+      { id: "r", node: root },
+      {
+        targetGenerator: {
+          id: "worker:activation-specific",
+          kind: "worker",
+          runtimeInstanceId: "member:r/worker",
+        },
+      },
+    );
+
+    expect(seenTargets).toEqual(["worker:activation-specific"]);
   });
 
   it("projects fully compiled child generators through their boundaryProjection", () => {
@@ -435,7 +663,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "worker",
         trigger: { type: "parent-completion" },
-        boundaryProjection: { mode: "augment", instructions: "dynamic" },
+        boundaryProjection: { mode: "augment" },
       },
     });
     const worker = createNode({
@@ -445,20 +673,20 @@ describe("projection compilation", () => {
       runtime: {
         type: "worker",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment", instructions: "dynamic" },
+        boundaryProjection: { mode: "augment" },
       },
     });
     const root = createNode({ key: "root", instructions: "root", members: [worker] });
 
     const compiled = compileProjection({ id: "r", node: root });
 
-    expect(compiled.systemParts).toEqual(["root"]);
-    expect(compiled.dynamicParts).toEqual(["worker", "leaf"]);
+    expect(compiled.systemParts).toEqual(textParts("root", "worker", "leaf"));
+    expect(compiled.dynamicParts).toEqual([]);
   });
 });
 
 describe("state resolution and state projection", () => {
-  it("initializes local state on the owner and top state on the real root", () => {
+  it("initializes local state on the owner and top state on a direct root", () => {
     const local = createNode({
       key: "local",
       state: { key: "local", scope: "local", schema: z.number(), init: 1 },
@@ -482,6 +710,20 @@ describe("state resolution and state projection", () => {
     expect(instance.children?.[0]?.states).toBeUndefined();
   });
 
+  it("skips the stateless createRoot wrapper for top state ownership", () => {
+    const memory = createNode({
+      key: "memory",
+      state: { key: "top", scope: "top", schema: z.number(), init: 2 },
+    });
+    const app = createNode({ key: "app", members: [memory] });
+    const root = createRoot([{ id: "app", node: app }]);
+
+    resolveStates(root);
+
+    expect(root.states).toBeUndefined();
+    expect(root.children?.[0]?.states?.top?.value).toBe(2);
+  });
+
   it("shares compatible state keys and applies latest projection policy", () => {
     const stateA = {
       key: "shared",
@@ -503,7 +745,7 @@ describe("state resolution and state projection", () => {
     const states = resolveStates(instance);
     expect(states).toHaveLength(1);
     expect(states[0]?.descriptor.projection).toBe("dynamic");
-    expect(compileProjection(instance).dynamicParts).toEqual(['State `shared`: {"value":1}']);
+    expect(compileProjection(instance).dynamicParts).toEqual(textParts('State `shared`: {"value":1}'));
   });
 
   it("detects incompatible descriptors and init conflicts", () => {
@@ -591,7 +833,7 @@ describe("retrieval aliases", () => {
     const state = (key: string) =>
       createNode({
         key: `${key}Node`,
-        state: { key, schema: z.number(), init: 1, projection: "retrieval" },
+        state: { key, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
       });
     const root = createRoot([
       { id: "a", node: state("shared") },
@@ -612,7 +854,7 @@ describe("retrieval aliases", () => {
     const state = (nodeKey: string, stateKey: string) =>
       createNode({
         key: nodeKey,
-        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval" },
+        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
       });
     const unique = compileProjection({ id: "one", node: state("one", "memory") });
     const duplicate = compileProjection(
@@ -633,7 +875,7 @@ describe("retrieval aliases", () => {
     const retrieval = (nodeKey: string, stateKey: string) =>
       createNode({
         key: nodeKey,
-        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval" },
+        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
       });
     const root = createRoot([
       { id: "x", node: retrieval("a", "a") },
@@ -665,13 +907,22 @@ describe("retrieval aliases", () => {
     expect(compiled.retrievableStates).toEqual([]);
     expect(compiled.systemParts).toEqual([]);
 
+    const omitRetrievalBoundary = createProjectionFunction({
+      name: "omitRetrievalBoundary",
+      method: (_ctx, draft, source) => {
+        const promptParts = [...source.systemParts, ...source.dynamicParts].filter(
+          (part) => !(part.type === "state" && part.section === "retrieval"),
+        );
+        draft.systemParts.push(...promptParts);
+      },
+    });
     const boundary = createNode({
       key: "boundary",
-      state: { key: "hidden", schema: z.number(), init: 2, projection: "retrieval" },
+      state: { key: "hidden", schema: z.number(), init: 2, projection: "retrieval", scope: "local" },
       runtime: {
         type: "worker",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment", tools: "hidden" },
+        boundaryProjection: omitRetrievalBoundary,
       },
     });
     const root = createNode({ key: "root", members: [boundary] });
@@ -681,7 +932,8 @@ describe("retrieval aliases", () => {
     expect(parentCompiled.systemParts).toEqual([]);
   });
 
-  it("exports dynamic runtime state through boundary projection while hiding tools", () => {
+  it("projects top-scoped worker member state from the owner while hiding worker tools", () => {
+    const workerTool = createTool({ state: null, name: "workerTool" });
     const worker = createNode({
       key: "worker",
       state: {
@@ -690,10 +942,10 @@ describe("retrieval aliases", () => {
         init: [],
         projection: "dynamic",
       },
+      tools: [workerTool],
       runtime: {
         type: "worker",
         trigger: { type: "parent-completion" },
-        boundaryProjection: { mode: "augment", instructions: "dynamic", tools: "hidden" },
       },
     });
     const root = createNode({
@@ -707,13 +959,13 @@ describe("retrieval aliases", () => {
       { targetGenerator: generator("instance:r", "primary") },
     );
 
-    expect(compiled.dynamicParts).toContain('State `memories`: []');
+    expect(compiled.dynamicParts).toContainEqual({ type: "text", text: "State `memories`: []" });
     expect(compiled.tools).toEqual([]);
   });
 });
 
 describe("history projection", () => {
-  it("uses actor history projection by default for target generators", () => {
+  it("uses full message history projection by default for target generators", () => {
     const worker = createNode({
       key: "worker",
       runtime: { type: "worker", trigger: { type: "parent-completion" } },
@@ -724,29 +976,45 @@ describe("history projection", () => {
     const compiled = compileProjection(instance, {
       targetGenerator: generator("member:r/worker", "worker"),
       frameHistory: [
-        frame("one", [{ type: "user", text: "hello" }]),
-        frame("two", []),
-        frame("three", [{ type: "assistant", text: "hi", audience: "broadcast" }]),
+        frame("one", [{ ...textUserMessage("hello") }]),
+        frame("two", [
+          {
+            type: "instance",
+            kind: "state.update",
+            instanceId: "r",
+            stateKey: "status",
+            update: { op: "replace", value: "ready" },
+          },
+        ]),
+        frame("three", [{ ...textAssistantMessage("hi"), audience: "broadcast" }]),
       ],
     });
 
     expect(compiled.history).toEqual([
-      { type: "user", text: "hello" },
-      { type: "assistant", text: "hi", audience: "broadcast" },
+      { ...textUserMessage("hello") },
+      {
+        type: "instance",
+        kind: "state.update",
+        instanceId: "r",
+        stateKey: "status",
+        update: { op: "replace", value: "ready" },
+      },
+      { ...textAssistantMessage("hi"), audience: "broadcast" },
     ]);
   });
 
   it("lets runtime history projection return synthetic messages from frames and state", () => {
-    const projection: HistoryProjectionFunction = (ctx) => [
-      {
-        type: "user",
-        text: JSON.stringify({
+    const projection = createHistoryProjectionFunction({
+      name: "syntheticHistory",
+      method: (ctx) => {
+        const text = JSON.stringify({
           messages: actorMessages(ctx),
           state: ctx.states.memory,
           trigger: ctx.trigger.type,
-        }),
+        });
+        return [textUserMessage(text)];
       },
-    ];
+    });
     const worker = createNode({
       key: "worker",
       state: {
@@ -765,28 +1033,28 @@ describe("history projection", () => {
 
     const compiled = compileProjection(instance, {
       targetGenerator: generator("member:r/worker", "worker"),
-      frameHistory: [frame("one", [{ type: "user", text: "remember tea" }])],
+      frameHistory: [frame("one", [{ ...textUserMessage("remember tea") }])],
     });
 
     expect(compiled.history).toEqual([
-      {
-        type: "user",
-        text: JSON.stringify({
-          messages: [{ type: "user", text: "remember tea" }],
+      textUserMessage(
+        JSON.stringify({
+          messages: [{ ...textUserMessage("remember tea") }],
           state: { memories: ["existing"] },
           trigger: "parent-completion",
         }),
-      },
+      ),
     ]);
   });
 
   it("qualifies duplicate state keys in history projection state values", () => {
-    const projection: HistoryProjectionFunction = (ctx) => [
-      { type: "user", text: JSON.stringify(ctx.states) },
-    ];
+    const projection = createHistoryProjectionFunction({
+      name: "stateHistory",
+      method: (ctx) => [textUserMessage(JSON.stringify(ctx.states))],
+    });
     const node = createNode({
       key: "agent",
-      state: { key: "shared", schema: z.number(), init: 1 },
+      state: { key: "shared", schema: z.number(), init: 1, scope: "local" },
       runtime: {
         type: "primary",
         trigger: { type: "actor-frame" },
@@ -806,7 +1074,7 @@ describe("history projection", () => {
     );
 
     expect(compiled.history).toEqual([
-      { type: "user", text: JSON.stringify({ "shared:a": 1, "shared:b": 1 }) },
+      textUserMessage(JSON.stringify({ "shared:a": 1, "shared:b": 1 })),
     ]);
   });
 
@@ -818,7 +1086,7 @@ describe("history projection", () => {
       trigger: { type: "parent-completion" as const },
       states: {},
       history: [
-        frame("before", [{ type: "user", text: "old" }]),
+        frame("before", [{ ...textUserMessage("old") }]),
         {
           id: "completion",
           ...createRuntimeCompletionFrame({
@@ -828,27 +1096,37 @@ describe("history projection", () => {
             completionReason: "done",
           }),
         },
-        frame("after", [{ type: "user", text: "new" }]),
-        frame("other", [{ type: "assistant", text: "answer" }]),
+        frame("after", [{ ...textUserMessage("new") }]),
+        frame("other", [{ ...textAssistantMessage("answer") }]),
       ],
     };
 
-    expect(messagesBeforeLastCompletion(ctx)).toEqual([{ type: "user", text: "old" }]);
+    expect(messagesBeforeLastCompletion(ctx)).toEqual([{ ...textUserMessage("old") }]);
     expect(messagesSinceLastCompletion(ctx)).toEqual([
-      { type: "user", text: "new" },
-      { type: "assistant", text: "answer" },
+      { ...textUserMessage("new") },
+      { ...textAssistantMessage("answer") },
     ]);
   });
 
   it("serializes registered history projection functions by ref", () => {
-    const historyProjection: HistoryProjectionFunction = () => [];
-    const registry = charter({ historyProjections: { memory: historyProjection } });
+    const historyProjection = createHistoryProjectionFunction({
+      name: "memory",
+      method: () => [],
+    });
+    const registry = charter({ historyProjections: [historyProjection] });
 
+    expect(serializeHistoryProjection({ type: "messages" }, registry)).toEqual({ type: "messages" });
+    expect(hydrateHistoryProjection({ type: "messages" }, registry)).toEqual({ type: "messages" });
     expect(serializeHistoryProjection({ type: "actor" }, registry)).toEqual({ type: "actor" });
     expect(hydrateHistoryProjection({ type: "actor" }, registry)).toEqual({ type: "actor" });
     expect(serializeHistoryProjection(historyProjection, registry)).toBe("memory");
     expect(hydrateHistoryProjection("memory", registry)).toBe(historyProjection);
-    expect(() => serializeHistoryProjection(() => [], registry)).toThrow(
+    expect(() =>
+      serializeHistoryProjection(
+        createHistoryProjectionFunction({ name: "missing", method: () => [] }),
+        registry,
+      )
+    ).toThrow(
       /unregistered history projection/,
     );
   });
@@ -872,8 +1150,8 @@ describe("history projection", () => {
         targetGenerator: generator(runtimeInstanceId, "worker"),
         activationId,
         frameHistory: [
-          frame("before", [{ type: "user", text: "queued before", delivery: "queued" }]),
-          frame("self-other", [{ type: "assistant", text: "hidden self" }]),
+          frame("before", [{ ...textUserMessage("queued before"), delivery: "queued" }]),
+          frame("self-other", [{ ...textAssistantMessage("hidden self") }]),
           {
             id: "activation",
             ...createActivationFrame({
@@ -885,24 +1163,34 @@ describe("history projection", () => {
               concurrency: "serial",
             }),
           },
-          frame("after", [{ type: "user", text: "hidden by snapshot" }]),
+          frame("after", [{ ...textUserMessage("hidden by snapshot") }]),
           frame("queued-after", [
-            { type: "user", text: "hidden queued", delivery: "queued" },
+            { ...textUserMessage("hidden queued"), delivery: "queued" },
           ]),
           {
             id: "same-activation",
             generatorId: runtimeInstanceId,
             runtimeInstanceId,
             activationId,
-            messages: [{ type: "assistant", text: "same activation" }],
+            messages: [{ ...textAssistantMessage("same activation") }],
           },
         ],
       },
     );
 
     expect(compiled.history).toEqual([
-      { type: "user", text: "queued before", delivery: "queued" },
-      { type: "assistant", text: "same activation" },
+      { ...textUserMessage("queued before"), delivery: "queued" },
+      {
+        type: "work",
+        kind: "activation",
+        activationId,
+        runtimeInstanceId,
+        generatorId: runtimeInstanceId,
+        sourceFrameId: "before",
+        concurrencyKey: runtimeInstanceId,
+        concurrency: "serial",
+      },
+      { ...textAssistantMessage("same activation") },
     ]);
   });
 });
@@ -920,11 +1208,11 @@ describe("commands and instance mutations", () => {
       inputSchema: z.object({ value: z.number() }),
       run: (input, ctx) => {
         expect(ctx.state).toEqual({ count: 0 });
-        ctx.patchState?.({ count: 1 });
+        ctx.updateState?.(patchState({ count: 1 }));
         expect(ctx.state).toEqual({ count: 1 });
-        ctx.replaceState?.({ count: input.value });
+        ctx.updateState?.(replaceState({ count: input.value }));
         expect(ctx.state).toEqual({ count: 4 });
-        return { type: "assistant", text: "updated", audience: "broadcast" };
+        return { ...textAssistantMessage("updated"), audience: "broadcast" };
       },
     });
     const controls = createNode({
@@ -949,17 +1237,60 @@ describe("commands and instance mutations", () => {
       }),
     ).resolves.toEqual({
       success: true,
-      value: { type: "assistant", text: "updated", audience: "broadcast" },
+      value: { ...textAssistantMessage("updated"), audience: "broadcast" },
       clientId: "client-1",
     });
 
     expect(instance.states?.counter?.value).toEqual({ count: 4 });
     expect(machine.frames.map((item) => item.messages[0])).toMatchObject([
       { type: "command", name: "setCounter", clientId: "client-1" },
-      { type: "instance", kind: "state.patch", instanceId: "r", stateKey: "counter" },
-      { type: "instance", kind: "state.replace", instanceId: "r", stateKey: "counter" },
-      { type: "assistant", text: "updated", audience: "broadcast" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
+      { ...textAssistantMessage("updated"), audience: "broadcast" },
     ]);
+  });
+
+  it("appends to array state through state update helpers", async () => {
+    const logState = {
+      key: "log",
+      schema: z.array(z.string()),
+      init: [] as string[],
+    };
+    const appendLog = createCommand({
+      state: logState,
+      name: "appendLog",
+      inputSchema: z.object({ value: z.string() }),
+      run: ({ value }, ctx) => {
+        ctx.updateState?.(appendState(value, "indexed"));
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      node: createNode({
+        key: "logger",
+        state: logState,
+        commands: [appendLog],
+      }),
+    };
+    const machine = createMachine({
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "command",
+      name: "appendLog",
+      input: { value: "created" },
+    });
+
+    expect(instance.states?.log?.value).toEqual(["created", "indexed"]);
+    expect(machine.frames[1]?.messages[0]).toMatchObject({
+      type: "instance",
+      kind: "state.update",
+      instanceId: "r",
+      stateKey: "log",
+      update: { op: "append", values: ["created", "indexed"] },
+    });
   });
 
   it("folds spawn messages and derives spawn-triggered runtime work", async () => {
@@ -977,7 +1308,7 @@ describe("commands and instance mutations", () => {
     const machine = createMachine({
       id: "spawn-demo",
       root: instance,
-      charter: charter({ nodes: { worker } }),
+      charter: charter({ nodes: [worker] }),
     });
     const spawnFrame = machine.enqueueFrame({
       messages: [
@@ -996,7 +1327,7 @@ describe("commands and instance mutations", () => {
       ],
     });
 
-    const frames = await collectFrames(runMachine(machine, { startWork: false }));
+    const frames = await collectFrames(runMachine(machine, { scheduleWork: false }));
     const activation = frames.find((item) => item.messages[0]?.type === "work");
 
     expect(instance.children?.map((child) => child.id)).toEqual(["child"]);
@@ -1011,6 +1342,149 @@ describe("commands and instance mutations", () => {
     });
   });
 
+  it("lets member commands spawn children under their concrete owner", async () => {
+    const child = createNode({ key: "child" });
+    const spawnChild = createCommand({
+      state: null,
+      name: "spawnChild",
+      run: (_input, ctx) => {
+        ctx.instance.spawn(child);
+      },
+    });
+    const controls = createNode({ key: "controls", commands: [spawnChild] });
+    const root = createNode({ key: "root", members: [controls] });
+    const instance: Instance = { id: "r", node: root };
+    const machine = createMachine({
+      id: "member-spawn-demo",
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "command",
+      name: "spawnChild",
+      input: {},
+      target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+    });
+
+    expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
+    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+      type: "instance",
+      kind: "spawn",
+      parentInstanceId: "r",
+      children: [{ node: { key: "child" } }],
+    });
+  });
+
+  it("lets concrete commands spawn children under themselves", async () => {
+    const child = createNode({ key: "child" });
+    const spawnChild = createCommand({
+      state: null,
+      name: "spawnChild",
+      run: (_input, ctx) => {
+        ctx.instance.spawn(child);
+      },
+    });
+    const root = createNode({ key: "root", commands: [spawnChild] });
+    const instance: Instance = { id: "r", node: root };
+    const machine = createMachine({
+      id: "concrete-spawn-demo",
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "command",
+      name: "spawnChild",
+      input: {},
+    });
+
+    expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
+    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+      type: "instance",
+      kind: "spawn",
+      parentInstanceId: "r",
+    });
+  });
+
+  it("lets commands cede matching child nodes", async () => {
+    const camera = createNode({ key: "camera" });
+    const other = createNode({ key: "other" });
+    const cedeCamera = createCommand({
+      state: null,
+      name: "cedeCamera",
+      run: (_input, ctx) => {
+        ctx.instance.cede(camera);
+      },
+    });
+    const controls = createNode({ key: "controls", commands: [cedeCamera] });
+    const root = createNode({ key: "root", members: [controls] });
+    const instance: Instance = {
+      id: "r",
+      node: root,
+      children: [
+        { id: "camera-1", node: camera },
+        { id: "other-1", node: other },
+      ],
+    };
+    const machine = createMachine({
+      id: "cede-child-demo",
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "command",
+      name: "cedeCamera",
+      input: {},
+      target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+    });
+
+    expect(instance.children?.map((item) => item.id)).toEqual(["other-1"]);
+    expect(machine.frames.at(-1)?.messages).toMatchObject([
+      {
+        type: "instance",
+        kind: "remove",
+        instanceId: "camera-1",
+        reason: "cede",
+      },
+    ]);
+  });
+
+  it("lets commands transition their concrete owner", async () => {
+    const next = createNode({ key: "next" });
+    const transitionOwner = createCommand({
+      state: null,
+      name: "transitionOwner",
+      run: (_input, ctx) => {
+        ctx.instance.transition(next);
+      },
+    });
+    const controls = createNode({ key: "controls", commands: [transitionOwner] });
+    const root = createNode({ key: "root", members: [controls] });
+    const instance: Instance = { id: "r", node: root };
+    const machine = createMachine({
+      id: "transition-owner-demo",
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "command",
+      name: "transitionOwner",
+      input: {},
+      target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+    });
+
+    expect(instance.node.key).toBe("next");
+    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+      type: "instance",
+      kind: "transition",
+      instanceId: "r",
+      node: { key: "next" },
+    });
+  });
+
   it("folds dry inline spawn nodes with serialized refs", () => {
     const search: Action = { state: null, name: "search" };
     const worker = createNode({
@@ -1018,7 +1492,7 @@ describe("commands and instance mutations", () => {
       tools: [search],
     });
     const root = createNode({ key: "root" });
-    const registry = charter({ tools: { search } });
+    const registry = charter({ tools: [search] });
     const serializedWorker = serializeNode(worker, registry);
     if (typeof serializedWorker === "string") {
       throw new Error("Expected an inline serialized worker");
@@ -1058,7 +1532,7 @@ describe("commands and instance mutations", () => {
       sourceNodeKey: "source",
       tools: [search],
     });
-    const registry = charter({ nodes: { source } });
+    const registry = charter({ nodes: [source] });
     const serialized = serializeNode(inline, registry);
 
     expect(serialized).toMatchObject({
@@ -1082,6 +1556,7 @@ describe("work scheduling", () => {
         calls.push(request.runtimeInstanceId);
         return { completionReason: "done" as const };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const memory = createNode({
       key: "memory",
@@ -1098,7 +1573,7 @@ describe("work scheduling", () => {
       charter: charter({ executor: runtimeExecutor }),
     });
     const userFrame = machine.enqueueFrame({
-      messages: [{ type: "user", text: "remember my name" }],
+      messages: [{ ...textUserMessage("remember my name") }],
     });
 
     const iterator = runMachine(machine)[Symbol.asyncIterator]();
@@ -1172,6 +1647,7 @@ describe("work scheduling", () => {
           value: request.runtimeInstanceId,
         };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const memory = createNode({
       key: "memory",
@@ -1187,7 +1663,7 @@ describe("work scheduling", () => {
       root: { id: "r", node: root },
       charter: charter({ executor: runtimeExecutor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "go" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
 
     const iterator = runMachine(machine)[Symbol.asyncIterator]();
     await iterator.next();
@@ -1209,13 +1685,13 @@ describe("work scheduling", () => {
     expect(machine.frames.map((frame) => frame.messages[0])).toMatchObject([
       { type: "user" },
       { type: "work", kind: "activation", runtimeInstanceId: "instance:r" },
-      { type: "assistant", text: "instance:r" },
+      { type: "assistant", content: textParts("instance:r"), text: "instance:r" },
       { type: "work", kind: "completion" },
     ]);
     expect(calls).toEqual(["instance:r"]);
 
     await expect(assistant).resolves.toMatchObject({
-      value: { messages: [{ type: "assistant", text: "instance:r" }] },
+      value: { messages: [{ type: "assistant", content: textParts("instance:r"), text: "instance:r" }] },
     });
     expect(calls).toEqual(["instance:r"]);
 
@@ -1235,13 +1711,14 @@ describe("work scheduling", () => {
     expect(calls).toEqual(["instance:r"]);
   });
 
-  it("does not reconcile new work after stopAndDrainFrames stops the run", async () => {
+  it("stops scheduling executor work while still yielding activation frames", async () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
         calls.push(request.runtimeInstanceId);
         return { completionReason: "done" as const };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const memory = createNode({
       key: "memory",
@@ -1257,7 +1734,7 @@ describe("work scheduling", () => {
       root: { id: "r", node: root },
       charter: charter({ executor: runtimeExecutor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "go" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
 
     const run = runMachine(machine);
     const iterator = run[Symbol.asyncIterator]();
@@ -1272,17 +1749,30 @@ describe("work scheduling", () => {
       reason: "end-turn",
     });
 
-    await expect(run.stopAndDrainFrames()).resolves.toEqual([]);
+    run.stopSchedulingWork();
+    const memoryActivation = await iterator.next();
+    expect(memoryActivation.value?.messages[0]).toMatchObject({
+      type: "work",
+      kind: "activation",
+      runtimeInstanceId: "member:r/memory",
+    });
+    const memoryActivationId = (memoryActivation.value?.messages[0] as { activationId?: string } | undefined)
+      ?.activationId;
+    expect(memoryActivationId).toBeDefined();
     await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    expect(calls).toEqual(["instance:r"]);
     expect(
       machine.frames
         .flatMap((frame) => frame.messages)
         .some((message) =>
           message.type === "work" &&
-            message.kind === "activation" &&
-            message.runtimeInstanceId === "member:r/memory"
+            message.kind === "completion" &&
+            message.activationId === memoryActivationId
         ),
     ).toBe(false);
+
+    await collectFrames(runMachine(machine));
+    expect(calls).toEqual(["instance:r", "member:r/memory"]);
   });
 
   it("reconciles deterministic activation frames idempotently without starting work", async () => {
@@ -1298,9 +1788,9 @@ describe("work scheduling", () => {
     });
     first.enqueueFrame({
       id: "user-1",
-      messages: [{ type: "user", text: "hi" }],
+      messages: [{ ...textUserMessage("hi") }],
     } as Frame);
-    const firstFrames = await collectFrames(runMachine(first, { startWork: false }));
+    const firstFrames = await collectFrames(runMachine(first, { scheduleWork: false }));
     const firstActivation = firstFrames.find((item) => item.messages[0]?.type === "work");
 
     const second = createMachine({
@@ -1310,13 +1800,13 @@ describe("work scheduling", () => {
     });
     second.enqueueFrame({
       id: "user-1",
-      messages: [{ type: "user", text: "hi" }],
+      messages: [{ ...textUserMessage("hi") }],
     } as Frame);
-    const secondFrames = await collectFrames(runMachine(second, { startWork: false }));
+    const secondFrames = await collectFrames(runMachine(second, { scheduleWork: false }));
     const secondActivation = secondFrames.find((item) => item.messages[0]?.type === "work");
 
     expect(firstActivation?.messages[0]).toMatchObject(secondActivation?.messages[0] ?? {});
-    await expect(collectFrames(runMachine(first, { startWork: false }))).resolves.toEqual([]);
+    await expect(collectFrames(runMachine(first, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
   it("does not let a runtime actor frame trigger its own runtime again", async () => {
@@ -1333,25 +1823,26 @@ describe("work scheduling", () => {
       generatorId: "instance:r",
       runtimeInstanceId: "instance:r",
       activationId: "activation-existing",
-      messages: [{ type: "assistant", text: "self output" }],
+      messages: [{ ...textAssistantMessage("self output") }],
     });
 
-    const frames = await collectFrames(runMachine(machine, { startWork: false }));
+    const frames = await collectFrames(runMachine(machine, { scheduleWork: false }));
     expect(frames).toHaveLength(1);
     expect(frames[0]?.messages[0]).toMatchObject({ type: "assistant" });
   });
 
-  it("maps synthetic root completion reasons through the normal runtime policy", async () => {
+  it("maps root completion reasons through the normal runtime policy", async () => {
     const runtimeExecutor = {
       run: async () => ({ completionReason: "delegated" as const }),
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const machine = createMachine({
-      id: "synthetic-demo",
+      id: "root-completion-demo",
       root: createRoot([{ id: "r", node: createNode({ key: "root" }) }]),
       charter: charter({ executor: runtimeExecutor }),
     });
     machine.enqueueFrame({
-      messages: [{ type: "user", text: "hi" }],
+      messages: [{ ...textUserMessage("hi") }],
     });
 
     const frames = await collectFrames(runMachine(machine));
@@ -1362,39 +1853,125 @@ describe("work scheduling", () => {
     expect(completion).toMatchObject({ reason: "delegated" });
   });
 
-  it("does not double-activate top-level primary roots under a synthetic root", async () => {
+  it("activates the root runtime and structurally visible primary children", async () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
         calls.push(request.runtimeInstanceId);
         return { completionReason: "delegated" as const };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const root = createNode({
       key: "root",
       runtime: { type: "primary", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
-      id: "synthetic-primary-demo",
+      id: "root-primary-demo",
       root: createRoot([{ id: "r", node: root }]),
       charter: charter({ executor: runtimeExecutor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "hi" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
     await collectFrames(runMachine(machine));
 
-    expect(calls).toEqual([SYNTHETIC_ROOT_RUNTIME_ID]);
+    expect(calls).toEqual([ROOT_RUNTIME_INSTANCE_ID, "instance:r"]);
   });
 
-  it("lets a host persist frames and sync the synthetic root after each non-inert frame", async () => {
+  it("uses the nearest concrete generator boundary before the root runtime", async () => {
+    const calls: string[] = [];
+    const runtimeExecutor = {
+      run: async (request: ExecutorRunRequest) => {
+        calls.push(request.runtimeInstanceId);
+        return { completionReason: "done" as const };
+      },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
+    };
+    const memory = createNode({
+      key: "memory",
+      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+    });
+    const root = createNode({
+      key: "root",
+      members: [memory],
+      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+    });
+    const machine = createMachine({
+      id: "root-nearest-boundary-demo",
+      root: createRoot([{ id: "r", node: root }]),
+      charter: charter({ executor: runtimeExecutor }),
+    });
+    const userFrame = machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
+    const activationId = "root-activation";
+    machine.enqueueFrame(createActivationFrame({
+      activationId,
+      runtimeInstanceId: "instance:r",
+      generatorId: "instance:r",
+      sourceFrameId: userFrame.id,
+      concurrencyKey: "instance:r",
+      concurrency: "serial",
+    }));
+    const rootCompletion = machine.enqueueFrame(createCompletionFrame({
+      activationId,
+      sourceFrameId: userFrame.id,
+      reason: "end-turn",
+    }));
+
+    const frames = await collectFrames(runMachine(machine));
+    const memoryActivation = frames
+      .flatMap((frame) => frame.messages)
+      .find((message) =>
+        message.type === "work" &&
+        message.kind === "activation" &&
+        message.runtimeInstanceId === "member:r/memory" &&
+        message.sourceFrameId === rootCompletion.id
+      );
+
+    expect(memoryActivation).toBeDefined();
+    expect(calls).toContain("member:r/memory");
+  });
+
+  it("treats the root runtime as the parent runtime for workers under component children", async () => {
+    const calls: string[] = [];
+    const runtimeExecutor = {
+      run: async (request: ExecutorRunRequest) => {
+        calls.push(request.runtimeInstanceId);
+        return { completionReason: "done" as const };
+      },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
+    };
+    const memory = createNode({
+      key: "memory",
+      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+    });
+    const root = createNode({
+      key: "root",
+      members: [memory],
+    });
+    const machine = createMachine({
+      id: "root-component-child-demo",
+      root: createRoot([{ id: "r", node: root }]),
+      charter: charter({ executor: runtimeExecutor }),
+    });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
+
+    await collectFrames(runMachine(machine));
+
+    expect(calls).toEqual([ROOT_RUNTIME_INSTANCE_ID, "member:r/memory"]);
+  });
+
+  it("lets a host persist frames and sync the root runtime after each non-inert frame", async () => {
     const syncs: Array<{ visibleFrameIds: string[]; historyTexts: string[] }> = [];
     const runtimeExecutor = {
       run: async () => ({ completionReason: "delegated" as const }),
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
       syncRuntime: async (context: Awaited<ReturnType<typeof syncMachineRuntime>>) => {
         if (!context) return;
         syncs.push({
           visibleFrameIds: context.visibleFrames.map((frame) => frame.id),
-          historyTexts: context.inference.history.map((message) => message.text ?? ""),
+          historyTexts: context.inference.history
+            .filter(isActorMessage)
+            .map((message) => message.text ?? ""),
         });
       },
     };
@@ -1406,11 +1983,11 @@ describe("work scheduling", () => {
     const transcriptFrame = machine.enqueueFrame({
       id: "transcript-1",
       inert: true,
-      messages: [{ type: "user", text: "voice transcript" }],
+      messages: [{ ...textUserMessage("voice transcript") }],
     } as Frame);
     const userFrame = machine.enqueueFrame({
       id: "user-1",
-      messages: [{ type: "user", text: "hi" }],
+      messages: [{ ...textUserMessage("hi") }],
     } as Frame);
     const persisted: string[] = [];
 
@@ -1418,7 +1995,7 @@ describe("work scheduling", () => {
       persisted.push(frame.id);
       if (!frame.inert) {
         await syncMachineRuntime(machine, {
-          runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+          runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
           visibleFrames: [frame],
         });
       }
@@ -1432,6 +2009,46 @@ describe("work scheduling", () => {
       [persisted[3]!],
     ]);
     expect(syncs[0]?.historyTexts).toEqual(["voice transcript", "hi"]);
+  });
+
+  it("ingests inert frames without enqueue notifications or pending yields", async () => {
+    const root = createNode({
+      key: "root",
+      state: {
+        key: "counter",
+        schema: z.object({ count: z.number() }),
+        init: { count: 0 },
+      },
+      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+    });
+    const machine = createMachine({
+      id: "inert-ingest-demo",
+      root: { id: "r", node: root },
+      charter: charter(),
+    });
+    const observed: string[] = [];
+    machine.subscribe((frame) => {
+      observed.push(frame.id);
+    });
+
+    machine.ingestInertFrame({
+      id: "external-state-update",
+      inert: true,
+      messages: [
+        {
+          type: "instance",
+          kind: "state.update",
+          instanceId: "r",
+          stateKey: "counter",
+          update: { op: "patch", value: { count: 1 } },
+        },
+        { ...textUserMessage("imported context") },
+      ],
+    });
+
+    expect(observed).toEqual([]);
+    expect(resolveStates(machine.root)[0]?.container.value).toEqual({ count: 1 });
+    await expect(collectFrames(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
   it("creates external action contexts that patch and replace bound state", async () => {
@@ -1453,12 +2070,13 @@ describe("work scheduling", () => {
         runtime: {
           type: "primary",
           trigger: { type: "actor-frame" },
-          boundaryProjection: { mode: "augment", tools: "provider-static" },
+          boundaryProjection: { mode: "augment" },
         },
       }),
     };
     const runtimeExecutor = {
       run: async () => ({ completionReason: "done" as const }),
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
       syncRuntime: async (context: Awaited<ReturnType<typeof syncMachineRuntime>>) => {
         const action = context?.inference.tools.find((tool) => tool.name === "updateCounter");
         if (!context || !action) {
@@ -1466,9 +2084,9 @@ describe("work scheduling", () => {
         }
         const actionContext = context.createActionContext(action);
         expect(actionContext.state).toEqual({ count: 0 });
-        actionContext.patchState?.({ count: 1 });
+        actionContext.updateState?.(patchState({ count: 1 }));
         expect(actionContext.state).toEqual({ count: 1 });
-        actionContext.replaceState?.({ count: 2 });
+        actionContext.updateState?.(replaceState({ count: 2 }));
         expect(actionContext.state).toEqual({ count: 2 });
       },
     };
@@ -1479,15 +2097,122 @@ describe("work scheduling", () => {
     });
 
     await syncMachineRuntime(machine, {
-      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
       visibleFrames: [],
     });
 
-    expect(instance.states?.counter?.value).toEqual({ count: 2 });
+    expect(machine.root.states).toBeUndefined();
+    expect(machine.root.children?.[0]?.states?.counter?.value).toEqual({ count: 2 });
     expect(machine.frames.map((frame) => frame.messages[0])).toMatchObject([
-      { type: "instance", kind: "state.patch", instanceId: "r", stateKey: "counter" },
-      { type: "instance", kind: "state.replace", instanceId: "r", stateKey: "counter" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
     ]);
+  });
+
+  it("creates external action contexts that can spawn from the source instance", async () => {
+    const child = createNode({ key: "child" });
+    const spawnChild = createTool({
+      state: null,
+      name: "spawnChild",
+      run: (_input, ctx) => {
+        ctx.instance.spawn(child);
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      node: createNode({
+        key: "root",
+        tools: [spawnChild],
+        runtime: {
+          type: "primary",
+          trigger: { type: "actor-frame" },
+          boundaryProjection: { mode: "augment" },
+        },
+      }),
+    };
+    const runtimeExecutor = {
+      run: async () => ({ completionReason: "done" as const }),
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
+      syncRuntime: async (context: Awaited<ReturnType<typeof syncMachineRuntime>>) => {
+        const action = context?.inference.tools.find((tool) => tool.name === "spawnChild");
+        if (!context || !action) {
+          throw new Error("Expected spawnChild in synced inference");
+        }
+        const actionContext = context.createActionContext(action);
+        expect(actionContext.instance.ownerInstanceId).toBe("r");
+        await action.run?.({}, actionContext);
+      },
+    };
+    const machine = createMachine({
+      id: "external-action-spawn-demo",
+      root: createRoot([instance]),
+      charter: charter({ executor: runtimeExecutor }),
+    });
+
+    await syncMachineRuntime(machine, {
+      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      visibleFrames: [],
+    });
+
+    expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
+    expect(machine.frames[0]).toMatchObject({
+      generatorId: ROOT_RUNTIME_INSTANCE_ID,
+      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      messages: [
+        {
+          type: "instance",
+          kind: "spawn",
+          parentInstanceId: "r",
+        },
+      ],
+    });
+  });
+
+  it("gives unbound synthetic actions a failing instance lifecycle context", async () => {
+    const state = {
+      key: "memory",
+      schema: z.object({ text: z.string() }),
+      init: { text: "hello" },
+      projection: "retrieval" as const,
+      scope: "local" as const,
+    };
+    const child = createNode({ key: "child" });
+    const instance: Instance = {
+      id: "r",
+      node: createNode({
+        key: "root",
+        state,
+        runtime: {
+          type: "primary",
+          trigger: { type: "actor-frame" },
+          boundaryProjection: { mode: "augment" },
+        },
+      }),
+    };
+    const runtimeExecutor = {
+      run: async () => ({ completionReason: "done" as const }),
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
+      syncRuntime: async (context: Awaited<ReturnType<typeof syncMachineRuntime>>) => {
+        const action = context?.inference.tools.find((tool) => tool.name === "getState");
+        if (!context || !action) {
+          throw new Error("Expected getState in synced inference");
+        }
+        const actionContext = context.createActionContext(action);
+        expect(() => actionContext.instance.spawn(child)).toThrow(
+          /Action has no source instance/,
+        );
+      },
+    };
+    const machine = createMachine({
+      id: "unbound-action-context-demo",
+      root: createRoot([instance]),
+      charter: charter({ executor: runtimeExecutor }),
+    });
+
+    await syncMachineRuntime(machine, {
+      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      visibleFrames: [],
+    });
   });
 
   it("enqueues executor frames and maps text output to an assistant message", async () => {
@@ -1501,6 +2226,7 @@ describe("work scheduling", () => {
           value: "hello from the model",
         };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
     const root = createNode({
       key: "root",
@@ -1512,16 +2238,17 @@ describe("work scheduling", () => {
       root: { id: "r", node: root },
       charter: charter({ executor: runtimeExecutor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "hi" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
     const frames = await collectFrames(runMachine(machine));
 
     expect(frames.map((frame) => frame.messages[0])).toMatchObject([
-      { type: "user", text: "hi" },
+      { ...textUserMessage("hi") },
       { type: "work", kind: "activation" },
       { type: "tool", name: "trace", text: "ran" },
       {
         type: "assistant",
+        content: textParts("hello from the model"),
         text: "hello from the model",
         audience,
       },
@@ -1538,30 +2265,27 @@ describe("work scheduling", () => {
   });
 
   it("maps text output through an output schema and mapper", async () => {
+    type StructuredDataContent = { answer: string };
     const structuredOutputSchema = z.object({
-      type: z.literal("tool"),
-      name: z.literal("structured"),
-      value: z.object({ answer: z.string() }),
-      audience: z.literal("broadcast").optional(),
+      answer: z.string(),
     });
     const runtimeExecutor = {
-      run: async (request: ExecutorRunRequest) => {
+      run: async (request: ExecutorRunRequest<StructuredDataContent>) => {
         expect(request.output?.schema).toBe(structuredOutputSchema);
         return {
           completionReason: "done" as const,
           value: JSON.stringify({ answer: "yes" }),
         };
       },
+      realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
-    const root = createNode({
+    const root = createNode<StructuredDataContent>({
       key: "root",
       output: {
         audience: "broadcast",
         schema: structuredOutputSchema,
         mapTextBlock: (text) => ({
-          type: "tool" as const,
-          name: "structured" as const,
-          value: JSON.parse(text) as { answer: string },
+          answer: (JSON.parse(text) as { answer: string }).answer,
         }),
       },
       runtime: { type: "primary", trigger: { type: "actor-frame" } },
@@ -1569,36 +2293,56 @@ describe("work scheduling", () => {
     const machine = createMachine({
       id: "structured-output-demo",
       root: { id: "r", node: root },
-      charter: charter({ executor: runtimeExecutor }),
+      charter: charter<StructuredDataContent>({ executor: runtimeExecutor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "hi" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
     const frames = await collectFrames(runMachine(machine));
 
     expect(frames[2]?.messages[0]).toEqual({
-      type: "tool",
-      name: "structured",
-      value: { answer: "yes" },
+      type: "assistant",
+      content: [{ type: "data", data: { answer: "yes" } }],
+      text: JSON.stringify({ answer: "yes" }),
       audience: "broadcast",
     });
   });
 });
 
 describe("serialization and refs", () => {
-  it("serializes registered projection functions by ref and rejects unregistered functions", () => {
-    const projection: ProjectionFunction = () => ({ mode: "augment" });
-    const registry = charter({ projections: { summary: projection } });
+  it("serializes registered projection functions by name and rejects unregistered functions", () => {
+    const projection = createProjectionFunction({
+      name: "summary",
+      method: () => {},
+    });
+    const registry = charter({ projections: [projection] });
 
     expect(serializeProjection(projection, registry)).toBe("summary");
-    expect(() => serializeProjection(() => ({ mode: "augment" }), registry)).toThrow(
-      /unregistered projection/,
+    expect(hydrateProjection("summary", registry)).toBe(projection);
+    expect(() =>
+      serializeProjection(
+        createProjectionFunction({ name: "missing", method: () => {} }),
+        registry,
+      ),
+    ).toThrow(
+      /unregistered projection function "missing"/,
     );
+  });
+
+  it("rejects duplicate projection function names", () => {
+    expect(() =>
+      charter({
+        projections: [
+          createProjectionFunction({ name: "duplicate", method: () => {} }),
+          createProjectionFunction({ name: "duplicate", method: () => {} }),
+        ],
+      }),
+    ).toThrow(/Duplicate projection function "duplicate"/);
   });
 
   it("hydrates location-aware plain refs and rejects unknown refs", () => {
     const tool: Action = { state: null, name: "search" };
     const node = createNode({ key: "agent", tools: [tool] });
-    const registry = charter({ nodes: { agent: node }, tools: { search: tool } });
+    const registry = charter({ nodes: [node], tools: [tool] });
 
     expect(hydrateNode("agent", registry)).toBe(node);
     expect(() => hydrateProjection("search", registry)).toThrow(/Unknown projection ref/);
@@ -1609,7 +2353,7 @@ describe("serialization and refs", () => {
     const search: Action = { state: null, name: "search" };
     const approve: Action = { state: null, name: "approve" };
     const source = createNode({ key: "source", tools: [search], commands: [approve] });
-    const registry = charter({ nodes: { source } });
+    const registry = charter({ nodes: [source] });
 
     const hydrated = hydrateNode(
       {
@@ -1631,12 +2375,12 @@ describe("serialization and refs", () => {
     ).toThrow(/Unknown command ref "missing"/);
   });
 
-  it("requires hydrated action refs to match action names", () => {
-    const aliased: Action = { state: null, name: "actualName" };
-    const registry = charter({ tools: { alias: aliased } });
+  it("rejects duplicate charter action refs", () => {
+    const first: Action = { state: null, name: "search", description: "first" };
+    const second: Action = { state: null, name: "search", description: "second" };
 
-    expect(() => hydrateNode({ key: "inline", tools: ["alias"] }, registry)).toThrow(
-      /resolved action name is "actualName"/,
+    expect(() => charter({ tools: [first, second] })).toThrow(
+      /Duplicate tool ref "search"/,
     );
   });
 
@@ -1652,7 +2396,7 @@ describe("serialization and refs", () => {
       state: { key: "count", schema: z.number(), init: 1 },
     });
     const registered = createNode({ key: "registered", state: registeredState });
-    const registry = charter({ states: { thread: registeredState }, nodes: { registered } });
+    const registry = charter({ states: [registeredState], nodes: [registered] });
 
     expect(serializeStateDescriptor(registeredState, registry)).toBe("thread");
 
@@ -1676,12 +2420,13 @@ describe("serialization and refs", () => {
   });
 
   it("serializes inline output schema and rejects inline output mappers", () => {
-    const outputSchema = z.object({ type: z.literal("assistant"), text: z.string() });
-    const inline = createNode({
+    type StructuredDataContent = { answer: string };
+    const outputSchema = z.object({ answer: z.string() });
+    const inline = createNode<StructuredDataContent>({
       key: "inlineOutput",
       output: { audience: "broadcast", schema: outputSchema },
     });
-    const registry = charter({});
+    const registry = charter<StructuredDataContent>({});
 
     const serialized = serializeInstance({ id: "i", node: inline }, registry);
 
@@ -1690,15 +2435,12 @@ describe("serialization and refs", () => {
     }
     expect(serialized.node.output?.audience).toBe("broadcast");
     const hydrated = hydrateInstance(serialized, registry);
-    expect(hydrated.node.output?.schema?.parse({ type: "assistant", text: "ok" })).toEqual({
-      type: "assistant",
-      text: "ok",
-    });
+    expect(hydrated.node.output?.schema?.parse({ answer: "ok" })).toEqual({ answer: "ok" });
 
-    const mapped = createNode({
+    const mapped = createNode<StructuredDataContent>({
       key: "mappedOutput",
       output: {
-        mapTextBlock: (text) => ({ type: "assistant" as const, text }),
+        mapTextBlock: (text) => ({ answer: text }),
       },
     });
     expect(() => serializeInstance({ id: "m", node: mapped }, registry)).toThrow(
@@ -1728,8 +2470,10 @@ function frame(id: string, messages: Frame["messages"]): Frame {
   return { id, generatorId: id, messages };
 }
 
-async function collectFrames(run: AsyncIterable<Frame>): Promise<Frame[]> {
-  const frames: Frame[] = [];
+async function collectFrames<TDataContent = never>(
+  run: AsyncIterable<Frame<TDataContent>>,
+): Promise<Frame<TDataContent>[]> {
+  const frames: Frame<TDataContent>[] = [];
   for await (const frame of run) {
     frames.push(frame);
   }

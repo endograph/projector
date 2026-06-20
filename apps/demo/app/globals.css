@@ -32,6 +32,10 @@ body {
   isolation: isolate;
 }
 
+.bg-lightener {
+  background-color: color-mix(in srgb, var(--terminal-green) 3%, transparent);
+}
+
 /* Gradient overlay that affects text/borders via blend mode */
 body::after {
   content: "";
@@ -108,6 +112,25 @@ body::after {
 
 .terminal-scrollbar::-webkit-scrollbar-thumb:hover {
   background: var(--terminal-green-dim);
+}
+
+.hide-horizontal-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.terminal-scrollbar.hide-horizontal-scrollbar::-webkit-scrollbar,
+.hide-horizontal-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.terminal-scrollbar.hide-horizontal-scrollbar::-webkit-scrollbar-track,
+.terminal-scrollbar.hide-horizontal-scrollbar::-webkit-scrollbar-thumb,
+.hide-horizontal-scrollbar::-webkit-scrollbar-track,
+.hide-horizontal-scrollbar::-webkit-scrollbar-thumb {
+  background: transparent;
 }
 
 /* Input styling */

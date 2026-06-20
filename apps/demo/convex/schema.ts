@@ -3,16 +3,18 @@ import { v } from "convex/values";
 
 export default defineSchema({
   sessions: defineTable({
-    headFrameId: v.optional(v.id("machineFrames")),
-    branchRootFrameId: v.optional(v.id("machineFrames")),
-    branchAncestors: v.optional(v.array(v.id("machineFrames"))), // ordered root->head
+    headFrameId: v.optional(v.id("frames")),
+    contextEpoch: v.number(),
+    familyRootSessionId: v.optional(v.id("sessions")),
+    forkedFromSessionId: v.optional(v.id("sessions")),
+    forkedFromFrameId: v.optional(v.id("frames")),
     syncState: v.optional(v.any()),
-  }),
+  })
+    .index("by_family_root", ["familyRootSessionId"])
+    .index("by_fork_source", ["forkedFromSessionId"]),
 
-  machineFrames: defineTable({
-    sessionId: v.id("sessions"),
-    parentFrameId: v.optional(v.id("machineFrames")),
-    branchRootFrameId: v.optional(v.id("machineFrames")),
+  frames: defineTable({
+    parentFrameId: v.optional(v.id("frames")),
     instanceId: v.string(),
     generatorId: v.optional(v.string()),
     runtimeInstanceId: v.optional(v.string()),
@@ -21,15 +23,20 @@ export default defineSchema({
     metadata: v.optional(v.any()),
     messages: v.array(v.any()),
     createdAt: v.number(),
+  }).index("by_parent", ["parentFrameId"]),
+
+  frameIndex: defineTable({
+    sessionId: v.id("sessions"),
+    frameId: v.id("frames"),
+    contextEpoch: v.number(),
   })
     .index("by_session", ["sessionId"])
-    .index("by_parent", ["parentFrameId"])
-    .index("by_branch", ["branchRootFrameId"]),
+    .index("by_session_context", ["sessionId", "contextEpoch"])
+    .index("by_session_frame", ["sessionId", "frameId"]),
 
   projectorInstanceLog: defineTable({
     sessionId: v.id("sessions"),
-    frameId: v.optional(v.id("machineFrames")),
-    parentFrameId: v.optional(v.id("machineFrames")),
+    frameId: v.optional(v.id("frames")),
     message: v.any(),
     instance: v.any(),
     createdAt: v.number(),
@@ -38,10 +45,9 @@ export default defineSchema({
     .index("by_frame", ["frameId"]),
 
   messages: defineTable({
-    sessionId: v.id("sessions"),
+    frameId: v.id("frames"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
-    frameId: v.optional(v.id("machineFrames")),
     createdAt: v.number(),
     // Voice mode fields
     mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),
@@ -50,20 +56,18 @@ export default defineSchema({
     streamState: v.optional(v.union(v.literal("streaming"), v.literal("complete"), v.literal("error"))),
     streamSeq: v.optional(v.number()),
   })
-    .index("by_session", ["sessionId"])
+    .index("by_frame", ["frameId"])
     .index("by_idempotency_key", ["idempotencyKey"])
-    .index("by_session_idempotency_key", ["sessionId", "idempotencyKey"]),
+    .index("by_frame_idempotency_key", ["frameId", "idempotencyKey"]),
 
-  // Message index - denormalized mapping of messages to branches for efficient queries
   messageIndex: defineTable({
     sessionId: v.id("sessions"),
     messageId: v.id("messages"),
-    branchRootFrameId: v.id("machineFrames"),
-    frameId: v.optional(v.id("machineFrames")),
+    idempotencyKey: v.optional(v.string()),
   })
-    .index("by_branch", ["branchRootFrameId"])
-    .index("by_session_branch", ["sessionId", "branchRootFrameId"])
-    .index("by_message", ["messageId"]),
+    .index("by_session", ["sessionId"])
+    .index("by_session_message", ["sessionId", "messageId"])
+    .index("by_session_idempotency_key", ["sessionId", "idempotencyKey"]),
 
   // Ephemeral session state (processing indicators, etc.)
   sessionEphemera: defineTable({

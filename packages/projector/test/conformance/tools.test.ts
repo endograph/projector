@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMachine, createNode, createTool, runMachine } from "../../index.ts";
+import { createMachine, createNode, createTool, runMachine, textUserMessage } from "../../index.ts";
 import { charter, createRecordingExecutor, drain, requestForRuntime, toolByNameLastWins } from "./helpers.ts";
 
 describe("conformance: projected tools", () => {
@@ -19,7 +19,7 @@ describe("conformance: projected tools", () => {
       root: { id: "r", node: root },
       charter: charter({ executor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "search" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("search") }] });
 
     await drain(runMachine(machine));
 
@@ -44,10 +44,10 @@ describe("conformance: projected tools", () => {
     });
     const machine = createMachine({
       root: { id: "r", node: root },
-      charter: charter({ executor, nodes: { source }, tools: { search: charterSearch } }),
+      charter: charter({ executor, nodes: [source], tools: [charterSearch] }),
     });
 
-    machine.enqueueFrame({ messages: [{ type: "user", text: "search" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("search") }] });
 
     await drain(runMachine(machine));
 
@@ -73,10 +73,10 @@ describe("conformance: projected tools", () => {
     });
     const machine = createMachine({
       root: { id: "r", node: root },
-      charter: charter({ executor, tools: { search: baseSearch } }),
+      charter: charter({ executor, tools: [baseSearch] }),
     });
 
-    machine.enqueueFrame({ messages: [{ type: "user", text: "search" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("search") }] });
 
     await drain(runMachine(machine));
 
@@ -98,10 +98,10 @@ describe("conformance: projected tools", () => {
     });
     const machine = createMachine({
       root: { id: "r", node: root },
-      charter: charter({ executor, tools: { search: baseSearch } }),
+      charter: charter({ executor, tools: [baseSearch] }),
     });
 
-    machine.enqueueFrame({ messages: [{ type: "user", text: "search" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("search") }] });
 
     await drain(runMachine(machine));
 

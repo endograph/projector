@@ -1,8 +1,11 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { restoreConvexJson, stripClientSchemas } from "./convexJson";
 import { createDemoClientSnapshot } from "@projectors/demo-agent/src/projector-demo.js";
 import type { MachineSyncState } from "@projectors/core/client";
+import { collectSessionFramePath } from "./frameHistory";
+import { listMessagesForSession } from "./messages";
 
 const DEFAULT_WORKER_LEASE_TTL_MS = 15_000;
 
@@ -112,7 +115,8 @@ export const getAgentInit = query({
       .query("projectorInstanceLog")
       .withIndex("by_session", (q) => q.eq("sessionId", room.sessionId))
       .collect();
-    const ancestors = new Set(session.branchAncestors ?? [session.headFrameId]);
+    const framePath = await collectSessionFramePath(ctx, session, session.headFrameId);
+    const ancestors = new Set(framePath.map((frame) => frame._id));
     const latestLog = logs
       .filter((entry) => !entry.frameId || ancestors.has(entry.frameId))
       .sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -123,18 +127,14 @@ export const getAgentInit = query({
       session.syncState ?? { recentCommandResidue: [] },
     ) as MachineSyncState;
 
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", room.sessionId))
-      .collect();
-
     return {
       sessionId: room.sessionId,
+      headFrameId: session.headFrameId,
       instance,
       instanceFrameId: latestLog.frameId,
       clientSnapshot: stripClientSchemas(createDemoClientSnapshot(instance, syncState)),
       syncState,
-      messages,
+      messages: await listMessagesForSession(ctx, room.sessionId),
     };
   },
 });

@@ -1,26 +1,26 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
+import { collectSessionFramePath, getFrameIndexForSession } from "./frameHistory";
 
-export const list = query({
-  args: { sessionId: v.id("sessions") },
-  handler: async (ctx, { sessionId }) => {
-    return await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-  },
-});
+type DbCtx = MutationCtx | QueryCtx;
+type MessageDoc = Doc<"messages">;
 
 export const listForFramePath = query({
   args: {
     sessionId: v.id("sessions"),
-    upToFrameId: v.optional(v.id("machineFrames")),
+    upToFrameId: v.optional(v.id("frames")),
   },
-  handler: async (ctx, { sessionId }) => {
-    return await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
+  handler: async (ctx, { sessionId, upToFrameId }) => {
+    const session = await ctx.db.get(sessionId);
+    if (!session?.headFrameId) return [];
+
+    const frameId = upToFrameId ?? session.headFrameId;
+    const framePath = await collectSessionFramePath(ctx, session, frameId);
+    const frameIds = new Set(framePath.map((frame) => frame._id));
+    const messages = await listMessagesForSession(ctx, sessionId);
+    return messages.filter((message) => frameIds.has(message.frameId));
   },
 });
 
@@ -29,33 +29,41 @@ export const add = mutation({
     sessionId: v.id("sessions"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
-    frameId: v.optional(v.id("machineFrames")),
+    frameId: v.optional(v.id("frames")),
     mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),
     idempotencyKey: v.optional(v.string()),
     streamState: v.optional(v.union(v.literal("streaming"), v.literal("complete"), v.literal("error"))),
     streamSeq: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session?.headFrameId) throw new Error("Session not found");
+
+    const frameId = args.frameId ?? session.headFrameId;
+    const frameIndex = await getFrameIndexForSession(ctx, args.sessionId, frameId);
+    if (!frameIndex) throw new Error("Message frame is not indexed for session");
+
     if (args.idempotencyKey) {
-      const existing = await ctx.db
-        .query("messages")
+      const existingIndex = await ctx.db
+        .query("messageIndex")
         .withIndex("by_session_idempotency_key", (q) =>
           q.eq("sessionId", args.sessionId).eq("idempotencyKey", args.idempotencyKey),
         )
         .first();
+      const existing = existingIndex ? await ctx.db.get(existingIndex.messageId) : null;
 
       if (existing) {
         // Streaming updates can arrive out of order; never regress visible message content.
-        const existingSeq =
-          typeof existing.streamSeq === "number" ? existing.streamSeq : -1;
+        const existingSeq = typeof existing.streamSeq === "number" ? existing.streamSeq : -1;
         const nextSeq = typeof args.streamSeq === "number" ? args.streamSeq : existingSeq;
         if (nextSeq < existingSeq) {
           return existing._id;
         }
-        const patch: Partial<typeof existing> = {
+
+        const patch: Partial<MessageDoc> = {
           content: args.content,
+          frameId,
         };
-        if (args.frameId !== undefined) patch.frameId = args.frameId;
         if (args.mode !== undefined) patch.mode = args.mode;
         if (args.streamState !== undefined) patch.streamState = args.streamState;
         if (args.streamSeq !== undefined) patch.streamSeq = args.streamSeq;
@@ -64,10 +72,7 @@ export const add = mutation({
       }
     }
 
-    const session = await ctx.db.get(args.sessionId);
-    const frameId = args.frameId ?? session?.headFrameId;
     const messageId = await ctx.db.insert("messages", {
-      sessionId: args.sessionId,
       role: args.role,
       content: args.content,
       frameId,
@@ -77,16 +82,26 @@ export const add = mutation({
       streamSeq: args.streamSeq,
       createdAt: Date.now(),
     });
-
-    if (session?.branchRootFrameId) {
-      await ctx.db.insert("messageIndex", {
-        sessionId: args.sessionId,
-        messageId,
-        branchRootFrameId: session.branchRootFrameId,
-        frameId,
-      });
-    }
+    await ctx.db.insert("messageIndex", {
+      sessionId: args.sessionId,
+      messageId,
+      idempotencyKey: args.idempotencyKey,
+    });
 
     return messageId;
   },
 });
+
+export async function listMessagesForSession(
+  ctx: DbCtx,
+  sessionId: Id<"sessions">,
+): Promise<MessageDoc[]> {
+  const rows = await ctx.db
+    .query("messageIndex")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .collect();
+  const messages = await Promise.all(rows.map((row) => ctx.db.get(row.messageId)));
+  return messages
+    .filter((message): message is MessageDoc => message !== null)
+    .sort((a, b) => a.createdAt - b.createdAt || a._id.localeCompare(b._id));
+}

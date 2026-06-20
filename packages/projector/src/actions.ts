@@ -5,8 +5,9 @@ import type {
   AnyAction,
   Node,
   RuntimeInstanceId,
-  StateAddress,
+  StatePath,
   StateDescriptor,
+  StateUpdate,
 } from "./types.ts";
 
 const ACTION_BINDING = Symbol.for("projector.actionBinding");
@@ -14,7 +15,6 @@ export const GET_STATE_ACTION_NAME = "getState";
 
 export type ActionBinding = {
   runtimeInstanceId: RuntimeInstanceId;
-  stateAddress?: StateAddress;
 };
 
 export type BoundAction<TAction extends AnyAction = AnyAction> = TAction & {
@@ -31,11 +31,12 @@ type ActionConfig<
   I,
   O,
   TName extends string,
+  TDataContent,
 > = {
   state: TState;
   name: TName;
   description?: string;
-  run?: (input: I, ctx: ActionContext<StateOf<TState>>) => O | Promise<O>;
+  run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent>) => O | Promise<O>;
 };
 
 type CreatedAction<
@@ -43,7 +44,8 @@ type CreatedAction<
   I,
   O,
   TName extends string,
-> = Action<StateOf<TState>, I, O, TName> & {
+  TDataContent,
+> = Action<StateOf<TState>, I, O, TName, TDataContent> & {
   state: TState;
 };
 
@@ -52,7 +54,8 @@ type ActionWithSchema<
   TSchema extends z.ZodType,
   O,
   TName extends string,
-> = CreatedAction<TState, InputOf<TSchema>, O, TName> & {
+  TDataContent,
+> = CreatedAction<TState, InputOf<TSchema>, O, TName, TDataContent> & {
   inputSchema: TSchema;
 };
 
@@ -61,16 +64,18 @@ export function createAction<
   const TState extends ActionStateRequirement,
   const TSchema extends z.ZodType,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, InputOf<TSchema>, O, TName> & { inputSchema: TSchema },
-): ActionWithSchema<TState, TSchema, O, TName>;
+  action: ActionConfig<TState, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
+): ActionWithSchema<TState, TSchema, O, TName, TDataContent>;
 export function createAction<
   const TName extends string,
   const TState extends ActionStateRequirement,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, unknown, O, TName>,
-): CreatedAction<TState, unknown, O, TName>;
+  action: ActionConfig<TState, unknown, O, TName, TDataContent>,
+): CreatedAction<TState, unknown, O, TName, TDataContent>;
 export function createAction(action: AnyAction): AnyAction {
   return action;
 }
@@ -80,16 +85,18 @@ export function createTool<
   const TState extends ActionStateRequirement,
   const TSchema extends z.ZodType,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, InputOf<TSchema>, O, TName> & { inputSchema: TSchema },
-): ActionWithSchema<TState, TSchema, O, TName>;
+  action: ActionConfig<TState, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
+): ActionWithSchema<TState, TSchema, O, TName, TDataContent>;
 export function createTool<
   const TName extends string,
   const TState extends ActionStateRequirement,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, unknown, O, TName>,
-): CreatedAction<TState, unknown, O, TName>;
+  action: ActionConfig<TState, unknown, O, TName, TDataContent>,
+): CreatedAction<TState, unknown, O, TName, TDataContent>;
 export function createTool(action: AnyAction): AnyAction {
   return action;
 }
@@ -99,16 +106,18 @@ export function createCommand<
   const TState extends ActionStateRequirement,
   const TSchema extends z.ZodType,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, InputOf<TSchema>, O, TName> & { inputSchema: TSchema },
-): ActionWithSchema<TState, TSchema, O, TName>;
+  action: ActionConfig<TState, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
+): ActionWithSchema<TState, TSchema, O, TName, TDataContent>;
 export function createCommand<
   const TName extends string,
   const TState extends ActionStateRequirement,
   O = unknown,
+  TDataContent = never,
 >(
-  action: ActionConfig<TState, unknown, O, TName>,
-): CreatedAction<TState, unknown, O, TName>;
+  action: ActionConfig<TState, unknown, O, TName, TDataContent>,
+): CreatedAction<TState, unknown, O, TName, TDataContent>;
 export function createCommand(action: AnyAction): AnyAction {
   return action;
 }
@@ -127,9 +136,89 @@ export function getActionBinding(action: AnyAction): ActionBinding | undefined {
   return (action as BoundAction)[ACTION_BINDING];
 }
 
+export function replaceState<S>(value: S): StateUpdate<S> {
+  return { op: "replace", value };
+}
+
+export function patchState<const TPatch extends Record<string, unknown>>(
+  value: TPatch,
+  options: { path?: StatePath } = {},
+): {
+  op: "patch";
+  value: TPatch;
+  path?: StatePath;
+} {
+  return {
+    op: "patch",
+    value,
+    ...(options.path ? { path: options.path } : {}),
+  };
+}
+
+export function appendState(
+  options: { path?: StatePath },
+  ...values: [unknown, ...unknown[]]
+): {
+  op: "append";
+  path?: StatePath;
+  values: unknown[];
+};
+export function appendState(
+  ...values: [unknown, ...unknown[]]
+): {
+  op: "append";
+  values: unknown[];
+};
+export function appendState(
+  first: unknown | { path?: StatePath },
+  ...rest: unknown[]
+): {
+  op: "append";
+  path?: StatePath;
+  values: unknown[];
+} {
+  const hasOptions = rest.length > 0 && isAppendStateOptions(first);
+  const options = hasOptions ? first : {};
+  const values = hasOptions ? rest : [first, ...rest];
+  return {
+    op: "append",
+    values,
+    ...(options.path ? { path: options.path } : {}),
+  };
+}
+
+function isAppendStateOptions(value: unknown): value is { path?: StatePath } {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      "path" in value,
+  );
+}
+export function createUnboundActionContext<
+  TDataContent = never,
+>(
+  getState?: ActionContext["getState"],
+): ActionContext<unknown, TDataContent> {
+  const fail = (): never => {
+    throw new Error("Action has no source instance");
+  };
+  return {
+    ...(getState ? { getState } : {}),
+    instance: {
+      runtimeInstanceId: "",
+      address: { type: "instance", instanceId: "" },
+      ownerInstanceId: "",
+      spawn: fail,
+      cede: fail,
+      transition: fail,
+    },
+  };
+}
+
 export function assertNodeActionStateCompatibility(
   action: AnyAction,
-  node: Node,
+  node: Node<any>,
   kind: "tool" | "command",
 ): void {
   if (action.state === null) {

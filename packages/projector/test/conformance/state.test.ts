@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createMachine, createNode, createRoot, createTool, runMachine, type Instance } from "../../index.ts";
+import {
+  createMachine,
+  createNode,
+  createRoot,
+  createTool,
+  createUnboundActionContext,
+  runMachine,
+  textUserMessage,
+  type Instance,
+} from "../../index.ts";
 import { charter, createRecordingExecutor, drain, requestForRuntime } from "./helpers.ts";
 
 describe("conformance: state access", () => {
@@ -26,7 +35,7 @@ describe("conformance: state access", () => {
       root: { id: "root", node: root, children: [{ id: "child", node: child }] },
       charter: charter({ executor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "run" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 
     await drain(runMachine(machine));
 
@@ -42,7 +51,7 @@ describe("conformance: state access", () => {
     expect(getState).toBeDefined();
     expect(getState?.run?.(
       { address: "localSecret" },
-      childRequest.createActionContext?.(getState) ?? {},
+      childRequest.createActionContext?.(getState) ?? createUnboundActionContext(),
     )).toEqual({ owner: "child" });
   });
 
@@ -69,7 +78,7 @@ describe("conformance: state access", () => {
       root: rootInstance,
       charter: charter({ executor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "run" }] });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 
     await drain(runMachine(machine));
 
@@ -82,8 +91,9 @@ describe("conformance: state access", () => {
     expect(rootInstance.states?.session?.value).toEqual({ owner: "root" });
   });
 
-  it("does not share top state between separate root instances", async () => {
-    const { executor, requests } = createRecordingExecutor();
+  it("keeps top state isolated between direct root machines", async () => {
+    const first = createRecordingExecutor();
+    const second = createRecordingExecutor();
     const node = createNode({
       key: "root",
       state: {
@@ -94,20 +104,24 @@ describe("conformance: state access", () => {
       },
       runtime: { type: "primary", trigger: { type: "actor-frame" } },
     });
-    const machine = createMachine({
-      id: "separate-roots-demo",
-      root: createRoot([
-        { id: "a", node, states: { session: { value: { owner: "a" } } } },
-        { id: "b", node, states: { session: { value: { owner: "b" } } } },
-      ]),
-      charter: charter({ executor }),
+    const machineA = createMachine({
+      id: "root-a-demo",
+      root: { id: "a", node, states: { session: { value: { owner: "a" } } } },
+      charter: charter({ executor: first.executor }),
     });
-    machine.enqueueFrame({ messages: [{ type: "user", text: "run" }] });
+    const machineB = createMachine({
+      id: "root-b-demo",
+      root: { id: "b", node, states: { session: { value: { owner: "b" } } } },
+      charter: charter({ executor: second.executor }),
+    });
+    machineA.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
+    machineB.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 
-    await drain(runMachine(machine));
+    await drain(runMachine(machineA));
+    await drain(runMachine(machineB));
 
-    const a = requestForRuntime(requests, "instance:a");
-    const b = requestForRuntime(requests, "instance:b");
+    const a = requestForRuntime(first.requests, "instance:a");
+    const b = requestForRuntime(second.requests, "instance:b");
     expect(a.inference.retrievableStates).toEqual([
       { address: "session", target: { instanceId: "a", stateKey: "session" } },
     ]);
@@ -118,17 +132,23 @@ describe("conformance: state access", () => {
     const getStateB = b.inference.tools.find((tool) => tool.name === "getState");
     expect(getStateA?.run?.(
       { address: "session" },
-      a.createActionContext?.(getStateA) ?? {},
+      a.createActionContext?.(getStateA) ?? createUnboundActionContext(),
     )).toEqual({ owner: "a" });
     expect(getStateB?.run?.(
       { address: "session" },
-      b.createActionContext?.(getStateB) ?? {},
+      b.createActionContext?.(getStateB) ?? createUnboundActionContext(),
     )).toEqual({ owner: "b" });
     expect(() =>
-      getStateA?.run?.({ address: "session:b" }, a.createActionContext?.(getStateA) ?? {}),
+      getStateA?.run?.(
+        { address: "session:b" },
+        a.createActionContext?.(getStateA) ?? createUnboundActionContext(),
+      ),
     ).toThrow(/Unknown retrievable state address/);
     expect(() =>
-      getStateB?.run?.({ address: "session:a" }, b.createActionContext?.(getStateB) ?? {}),
+      getStateB?.run?.(
+        { address: "session:a" },
+        b.createActionContext?.(getStateB) ?? createUnboundActionContext(),
+      ),
     ).toThrow(/Unknown retrievable state address/);
   });
 });

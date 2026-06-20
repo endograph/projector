@@ -1,5 +1,6 @@
 import type {
   ActionContext,
+  ActorMessage,
   AnyAction,
   CompiledInference,
   CompletionReason,
@@ -108,10 +109,10 @@ export type LiveKitEventNames = {
   dataReceived: string;
 };
 
-export type RunActionInput = {
+export type RunActionInput<TDataContent = never> = {
   action: AnyAction;
   input: unknown;
-  context: ActionContext<unknown>;
+  context: ActionContext<unknown, TDataContent>;
   liveKitContext?: unknown;
 };
 
@@ -137,14 +138,16 @@ export type LiveKitUserTranscriptUpdate = {
   error?: string;
 };
 
-export type LiveKitExecutorConfig = {
+export type LiveKitExecutorConfig<TDataContent = never> = {
   debug?: boolean;
   session: LiveKitSessionLike;
   agent?: LiveKitAgentLike;
   room?: LiveKitRoomLike;
-  discreteExecutor: ProjectorExecutor;
+  discreteExecutor: ProjectorExecutor<TDataContent>;
+  realtimeRuntimeInstanceId?: string;
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined;
   realtime?: {
-    enabled?: boolean | ((context: RuntimeSyncContext) => boolean);
+    enabled?: boolean | ((context: RuntimeSyncContext<TDataContent>) => boolean);
   };
   input?: {
     messageTopic?: string;
@@ -155,7 +158,7 @@ export type LiveKitExecutorConfig = {
     }) => string | undefined;
   };
   eventNames?: Partial<LiveKitEventNames>;
-  runAction?: (input: RunActionInput) => unknown | Promise<unknown>;
+  runAction?: (input: RunActionInput<TDataContent>) => unknown | Promise<unknown>;
   getState?: (input: StateGetterInput) => unknown | Promise<unknown>;
   onAssistantTranscriptUpdate?: (update: LiveKitAssistantTranscriptUpdate) => unknown | Promise<unknown>;
   onUserTranscriptUpdate?: (update: LiveKitUserTranscriptUpdate) => unknown | Promise<unknown>;

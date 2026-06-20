@@ -1,10 +1,11 @@
 export {
   LiveKitConnection,
   LiveKitExecutor,
-  SYNTHETIC_ROOT_GENERATOR_ID,
+  REALTIME_GENERATOR_ID,
   buildLiveKitInstructions,
   buildLiveKitToolContext,
   buildLiveKitToolDefinitions,
+  realizeLiveKitPrompt,
 } from "./src/executor.ts";
 export type {
   CompletionReason,

@@ -29,8 +29,8 @@ export type ExecuteCommandResult<T = unknown> =
   | { success: true; value?: T; clientId?: string }
   | { success: false; error: string; clientId?: string };
 
-export type MachineClientSnapshot<TInstances = unknown> = {
-  instances: TInstances;
+export type MachineClientSnapshot<TRoot = unknown> = {
+  root: TRoot;
   recentCommandResidue: string[];
 };
 
@@ -382,11 +382,11 @@ export function consumeCommandResidue(
 }
 
 export function createMachineClientSnapshot<TInstances>(
-  instances: TInstances,
+  root: TInstances,
   syncState: MachineSyncState = createMachineSyncState(),
 ): MachineClientSnapshot<TInstances> {
   return {
-    instances,
+    root,
     recentCommandResidue: [...syncState.recentCommandResidue],
   };
 }
@@ -394,17 +394,17 @@ export function createMachineClientSnapshot<TInstances>(
 export function realizeClientInstances(
   instances: Instance | readonly Instance[],
   options: { charter?: Charter } = {},
-): ClientInstance[] {
-  const root = createRoot(Array.isArray(instances) ? [...instances] : [instances]);
+): ClientInstance {
+  const root: Instance = Array.isArray(instances)
+    ? createRoot([...instances])
+    : instances as Instance;
   const states = resolveStates(root);
   const statesByFrame = groupStatesByFrame(states);
-  return root.instances.map((instance) => {
-    const frame = traversalFrames(createRoot([instance]))[0];
-    if (!frame) {
-      throw new Error("Unable to realize empty client instance");
-    }
-    return realizeFrame(frame, statesByFrame, options.charter);
-  });
+  const frame = traversalFrames(root)[0];
+  if (!frame) {
+    throw new Error("Unable to realize empty client instance");
+  }
+  return realizeFrame(frame, statesByFrame, options.charter);
 }
 
 export function findClientCommand<TName extends string>(
@@ -484,11 +484,23 @@ function realizeState(state: ResolvedState): ClientStateView {
 function groupStatesByFrame(states: ResolvedState[]): Map<string, ResolvedState[]> {
   const grouped = new Map<string, ResolvedState[]>();
   for (const state of states) {
-    const list = grouped.get(state.sourceFrame.runtimeInstanceId) ?? [];
+    const frameKey = stateProjectionFrameKey(state);
+    const list = grouped.get(frameKey) ?? [];
     list.push(state);
-    grouped.set(state.sourceFrame.runtimeInstanceId, list);
+    grouped.set(frameKey, list);
   }
   return grouped;
+}
+
+function stateProjectionFrameKey(state: ResolvedState): string {
+  if (state.descriptor.scope === "top") {
+    return encodeRuntimeAddress({
+      type: "instance",
+      instanceId: state.targetInstance.id,
+    });
+  }
+
+  return state.sourceFrame.runtimeInstanceId;
 }
 
 function createOverlay<TInstances, TName extends string>(

@@ -108,23 +108,23 @@ describe("client instance realization", () => {
     });
 
     type AgentClientInstance = ClientInstanceOf<typeof agent>;
-    expectTypeOf<ClientCommandName<[AgentClientInstance]>>().toEqualTypeOf<"setLiveMode">();
+    expectTypeOf<ClientCommandName<AgentClientInstance>>().toEqualTypeOf<"setLiveMode">();
 
-    const [client] = realizeClientInstances({
+    const client = realizeClientInstances({
       id: "agent-1",
       node: agent,
       children: [{ id: "child-1", node: child }],
     });
 
-    expect(client?.runtime.runtimeInstanceId).toBe("instance:agent-1");
-    expect(client?.states[0]).toMatchObject({
+    expect(client.runtime.runtimeInstanceId).toBe("instance:agent-1");
+    expect(client.states[0]).toMatchObject({
       key: "agentState",
       address: { instanceId: "agent-1", stateKey: "agentState" },
       value: { liveMode: false },
     });
-    expect(client?.commands[0]?.target).toEqual({ type: "instance", instanceId: "agent-1" });
-    expect(client?.members[0]?.runtime.runtimeInstanceId).toBe("member:agent-1/critic");
-    expect(client?.members[0]?.commands[0]?.target).toEqual({
+    expect(client.commands[0]?.target).toEqual({ type: "instance", instanceId: "agent-1" });
+    expect(client.members[0]?.runtime.runtimeInstanceId).toBe("member:agent-1/critic");
+    expect(client.members[0]?.commands[0]?.target).toEqual({
       type: "member",
       ownerInstanceId: "agent-1",
       memberPath: ["critic"],
@@ -306,8 +306,8 @@ describe("command residue helpers", () => {
     const consumed = consumeCommandResidue(sync, ["a"]);
     expect(consumed.recentCommandResidue).toEqual(["b"]);
 
-    expect(createMachineClientSnapshot(["instances"], consumed)).toEqual({
-      instances: ["instances"],
+    expect(createMachineClientSnapshot("root", consumed)).toEqual({
+      root: "root",
       recentCommandResidue: ["b"],
     });
   });

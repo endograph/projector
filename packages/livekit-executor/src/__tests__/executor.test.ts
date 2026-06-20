@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGetStateAction, createTool, type CompiledInference } from "@projectors/core";
+import {
+  ROOT_RUNTIME_INSTANCE_ID,
+  createGetStateAction,
+  createNode,
+  createTool,
+  createUnboundActionContext,
+  textAssistantMessage,
+  textUserMessage,
+  type CompiledInference,
+  type ContentPart,
+} from "@projectors/core";
 import { z } from "zod";
 import {
   LiveKitExecutor,
-  SYNTHETIC_ROOT_GENERATOR_ID,
+  REALTIME_GENERATOR_ID,
   buildLiveKitInstructions,
   buildLiveKitToolDefinitions,
 } from "../executor.ts";
@@ -137,7 +147,7 @@ describe("LiveKitExecutor", () => {
     const compiled = inference({
       systemParts: ["You are concise."],
       dynamicParts: ["Current mode: voice."],
-      history: [{ type: "user", text: "hello" }],
+      history: [{ ...textUserMessage("hello") }],
     });
     const executor = new LiveKitExecutor({
       session,
@@ -146,7 +156,7 @@ describe("LiveKitExecutor", () => {
     });
     await executor.syncRuntime(syncContext({
       inference: compiled,
-      visibleFrames: [{ id: "user-1", messages: [{ type: "user", text: "hello" }] }],
+      visibleFrames: [{ id: "user-1", messages: [{ ...textUserMessage("hello") }] }],
     }, frames));
 
     const result = await executor.run(request({ inference: compiled }));
@@ -160,6 +170,61 @@ describe("LiveKitExecutor", () => {
     expect(agent._instructions).toContain("Current mode: voice.");
   });
 
+  it("does not update realtime session instructions while realtime is disabled", async () => {
+    const realtimeSession = {
+      updateInstructions: vi.fn(),
+      updateTools: vi.fn(),
+    };
+    const agent: LiveKitAgentLike = {
+      _agentActivity: { realtimeLLMSession: realtimeSession },
+    };
+    const executor = new LiveKitExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent,
+      realtime: { enabled: false },
+    });
+
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        systemParts: ["You are concise."],
+        dynamicParts: ["Camera data."],
+      }),
+    }));
+
+    expect(realtimeSession.updateInstructions).not.toHaveBeenCalled();
+    expect(realtimeSession.updateTools).not.toHaveBeenCalled();
+    expect(agent._instructions).toContain("Camera data.");
+  });
+
+  it("realizes active realtime root prompts as LiveKit instructions and tools", async () => {
+    const discrete = fakeDiscreteExecutor();
+    const executor = new LiveKitExecutor({
+      session: new FakeSession(),
+      discreteExecutor: discrete,
+      realtime: { enabled: true },
+    });
+
+    const prompt = await executor.realizePrompt(
+      request({
+        inference: inference({
+          systemParts: ["System A"],
+          dynamicParts: ["Dynamic B"],
+          history: [{ ...textUserMessage("Hi") }],
+          tools: [createTool({ state: null, name: "lookup", description: "Lookup things" })],
+        }),
+      }),
+    );
+
+    const input = prompt.input as { instructions: string; tools: Array<{ name: string }> };
+    expect(prompt.provider).toBe("livekit");
+    expect(input.instructions).toContain("## System\n\nSystem A");
+    expect(input.instructions).toContain("## Dynamic Context\n\nDynamic B");
+    expect(input.instructions).toContain("User: Hi");
+    expect(input.tools.map((tool) => tool.name)).toEqual(["lookup"]);
+    expect(discrete.realizePrompt).not.toHaveBeenCalled();
+  });
+
   it("does not forward the same visible user frame to realtime twice", async () => {
     const session = new FakeSession();
     const executor = new LiveKitExecutor({
@@ -167,7 +232,7 @@ describe("LiveKitExecutor", () => {
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
     });
-    const visibleFrames = [{ id: "user-1", messages: [{ type: "user", text: "hello" }] }] as Frame[];
+    const visibleFrames = [{ id: "user-1", messages: [{ ...textUserMessage("hello") }] }] as Frame[];
 
     await executor.syncRuntime(syncContext({ visibleFrames }));
     await executor.syncRuntime(syncContext({ visibleFrames }));
@@ -175,7 +240,7 @@ describe("LiveKitExecutor", () => {
     expect(session.replies).toEqual([{ userInput: "hello" }]);
   });
 
-  it("records LiveKit transcript events as inert synthetic root frames", async () => {
+  it("records LiveKit transcript events as inert realtime root frames", async () => {
     const session = new FakeSession();
     const frames: FrameDraft[] = [];
     const executor = new LiveKitExecutor({
@@ -203,11 +268,12 @@ describe("LiveKitExecutor", () => {
 
     expect(frames).toHaveLength(2);
     expect(frames[0]).toMatchObject({
-      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+      generatorId: REALTIME_GENERATOR_ID,
       inert: true,
       messages: [
         {
           type: "user",
+          content: textParts("what is the plan?"),
           text: "what is the plan?",
           audience: "broadcast",
           source: { external: true },
@@ -216,11 +282,12 @@ describe("LiveKitExecutor", () => {
       ],
     });
     expect(frames[1]).toMatchObject({
-      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+      generatorId: REALTIME_GENERATOR_ID,
       inert: true,
       messages: [
         {
           type: "assistant",
+          content: textParts("Here is the plan."),
           text: "Here is the plan.",
           audience: "self",
           source: { external: true },
@@ -275,6 +342,7 @@ describe("LiveKitExecutor", () => {
     ]);
     expect(message).toMatchObject({
       type: "user",
+      content: textParts("what is the plan?"),
       text: "what is the plan?",
       messageId,
       streamState: "complete",
@@ -314,6 +382,7 @@ describe("LiveKitExecutor", () => {
       messages: [
         {
           type: "user",
+          content: textParts("hello"),
           text: "hello",
           audience: "broadcast",
           source: { external: true, transport: "livekit" },
@@ -459,6 +528,7 @@ describe("LiveKitExecutor", () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]?.messages[0]).toMatchObject({
       type: "assistant",
+      content: textParts("Hello"),
       text: "Hello",
       streamState: "complete",
     });
@@ -516,7 +586,12 @@ describe("LiveKitExecutor", () => {
     expect(toolContext.getState.description).toContain("Retrieve");
 
     await expect(toolContext.lookup.execute({ query: "x" })).resolves.toBe("second-result");
-    expect(secondRun).toHaveBeenCalledWith({ query: "x" }, {});
+    expect(secondRun).toHaveBeenCalledWith(
+      { query: "x" },
+      expect.objectContaining({
+        instance: expect.objectContaining({ ownerInstanceId: "" }),
+      }),
+    );
     expect(frames.map((frame) => frame.messages[0]?.value)).toEqual([
       { phase: "call", input: { query: "x" } },
       { phase: "result", value: "second-result" },
@@ -531,7 +606,7 @@ describe("LiveKitExecutor", () => {
       }
       return `state:${address}`;
     });
-    const createActionContext = vi.fn(() => ({ getState }));
+    const createActionContext = vi.fn(() => createUnboundActionContext(getState));
     const realtimeSession = {
       updateInstructions: vi.fn(),
       updateTools: vi.fn(),
@@ -619,9 +694,17 @@ describe("LiveKit prompt and tool rendering", () => {
         systemParts: ["System A"],
         dynamicParts: ["Dynamic B"],
         history: [
-          { type: "user", text: "Hi" },
-          { type: "assistant", text: "Hello" },
+          { ...textUserMessage("Hi") },
+          {
+            type: "instance",
+            kind: "state.update",
+            instanceId: "root",
+            stateKey: "status",
+            update: { op: "patch", value: { ready: true } },
+          },
+          { ...textAssistantMessage("Hello") },
           { type: "tool", name: "lookup", value: { ok: true } },
+          { type: "work", kind: "completion", activationId: "a", reason: "done" },
         ],
       }),
     );
@@ -630,6 +713,29 @@ describe("LiveKit prompt and tool rendering", () => {
     expect(rendered).toContain("## Dynamic Context\n\nDynamic B");
     expect(rendered).toContain("User: Hi");
     expect(rendered).toContain('Tool lookup: {"ok":true}');
+    expect(rendered).not.toContain("state.update");
+    expect(rendered).not.toContain("activationId");
+  });
+
+  it("summarizes image parts without inlining base64 data", () => {
+    const rendered = buildLiveKitInstructions(
+      inference({
+        dynamicParts: [
+          { type: "text", text: "Latest camera snapshot:" },
+          {
+            type: "image",
+            data: "data:image/jpeg;base64,abc123",
+            mediaType: "image/jpeg",
+            label: "latest camera sensor snapshot",
+          },
+        ],
+      }),
+    );
+
+    expect(rendered).toContain("Latest camera snapshot:");
+    expect(rendered).toContain("mediaType=image/jpeg");
+    expect(rendered).toContain("data=data URL");
+    expect(rendered).not.toContain("abc123");
   });
 
   it("exports last-wins LiveKit tool definitions", () => {
@@ -660,29 +766,66 @@ function fakeDiscreteExecutor(): ProjectorExecutor & { run: ReturnType<typeof vi
       completionReason: "done",
       value: "discrete",
     })),
+    realizePrompt: vi.fn((request) => ({ provider: "test", input: request.inference })),
   };
 }
 
 function request(overrides: Partial<ExecutorRunRequest> = {}): ExecutorRunRequest {
   return {
-    generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
+    generatorId: REALTIME_GENERATOR_ID,
     activationId: "activation-1",
-    runtimeInstanceId: "synthetic-root",
+    runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
     inference: inference(),
     enqueueFrame: enqueueTo([]),
     ...overrides,
   };
 }
 
-function inference(overrides: Partial<CompiledInference> = {}): CompiledInference {
+function inference<TDataContent = never>(
+  overrides: Partial<Omit<CompiledInference<TDataContent>, "systemParts" | "dynamicParts" | "history">> & {
+    systemParts?: Array<string | ContentPart<any>>;
+    dynamicParts?: Array<string | ContentPart<any>>;
+    history?: CompiledInference<TDataContent>["history"];
+  } = {},
+): CompiledInference<TDataContent> {
   return {
-    systemParts: [],
-    history: [],
-    dynamicParts: [],
-    tools: [],
-    retrievableStates: [],
     ...overrides,
+    tools: overrides.tools ?? [],
+    retrievableStates: overrides.retrievableStates ?? [],
+    history: normalizeHistory(overrides.history ?? []),
+    systemParts: normalizeParts(overrides.systemParts ?? []),
+    dynamicParts: normalizeParts(overrides.dynamicParts ?? []),
   };
+}
+
+function normalizeParts(parts: Array<string | ContentPart<any>>): ContentPart<any>[] {
+  return parts.map((part) => typeof part === "string" ? { type: "text", text: part } : part);
+}
+
+function textParts(...texts: string[]): ContentPart<never>[] {
+  return normalizeParts(texts) as ContentPart<never>[];
+}
+
+function normalizeHistory<TDataContent>(
+  history: CompiledInference<TDataContent>["history"],
+): CompiledInference<TDataContent>["history"] {
+  return history.map(normalizeMessageContent) as CompiledInference<TDataContent>["history"];
+}
+
+function normalizeMessageContent<T>(message: T): T {
+  if (
+    message &&
+    typeof message === "object" &&
+    ((message as { type?: unknown }).type === "user" || (message as { type?: unknown }).type === "assistant") &&
+    typeof (message as { content?: unknown }).content === "string"
+  ) {
+    const text = (message as unknown as { content: string }).content;
+    return {
+      ...message,
+      content: [{ type: "text", text }],
+    };
+  }
+  return message;
 }
 
 function syncContext(
@@ -692,17 +835,20 @@ function syncContext(
   const machine = overrides.machine ?? fakeMachine(frames);
   return {
     machine,
-    runtimeInstanceId: "synthetic-root",
+    runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
     generator: {
-      id: SYNTHETIC_ROOT_GENERATOR_ID,
+      id: REALTIME_GENERATOR_ID,
       kind: "primary",
-      runtimeInstanceId: "synthetic-root",
+      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
     },
     inference: inference(),
-    visibleFrames: [],
-    createActionContext: () => ({}),
+    createActionContext: () => createUnboundActionContext(),
     enqueueFrame: (frame) => machine.enqueueFrame(frame),
     ...overrides,
+    visibleFrames: (overrides.visibleFrames ?? []).map((frame) => ({
+      ...frame,
+      messages: frame.messages.map(normalizeMessageContent),
+    })),
   };
 }
 
@@ -710,7 +856,7 @@ function fakeMachine(frames: FrameDraft[]): RuntimeSyncContext["machine"] {
   const storedFrames: Frame[] = [];
   return {
     id: "machine",
-    root: { type: "synthetic-root", instances: [] },
+    root: { id: "root", node: createNode({ key: "root" }) },
     charter: {} as RuntimeSyncContext["machine"]["charter"],
     frames: storedFrames,
     enqueueFrame(frame) {

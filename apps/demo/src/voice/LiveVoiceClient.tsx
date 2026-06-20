@@ -2,13 +2,17 @@
 
 import { useAction } from "convex/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
+import { ConnectionState, Room, RoomEvent, Track, type LocalVideoTrack } from "livekit-client";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 
 type VoiceStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 type SendLiveKitMessage = (content: string) => Promise<void>;
 const MESSAGE_TOPIC = "demo.message.v1";
+const CAMERA_CAPTURE_OPTIONS = {
+  resolution: { width: 1280, height: 720 },
+  frameRate: 30,
+} as const;
 
 type LiveVoiceClientProps = {
   sessionId: Id<"sessions"> | null;
@@ -18,6 +22,7 @@ type LiveVoiceClientProps = {
   cameraEnabled: boolean;
   onStatusChange?: (status: VoiceStatus, detail?: string) => void;
   onSendMessageChange?: (sendMessage: SendLiveKitMessage | null) => void;
+  onLocalCameraTrackChange?: (track: LocalVideoTrack | null) => void;
 };
 
 export function LiveVoiceClient({
@@ -28,9 +33,11 @@ export function LiveVoiceClient({
   cameraEnabled,
   onStatusChange,
   onSendMessageChange,
+  onLocalCameraTrackChange,
 }: LiveVoiceClientProps) {
   const getToken = useAction(api.livekitAgentActions.getToken);
   const roomRef = useRef<Room | null>(null);
+  const roomSessionIdRef = useRef<Id<"sessions"> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const connectingRef = useRef(false);
   const cameraEnabledRef = useRef(cameraEnabled);
@@ -50,12 +57,27 @@ export function LiveVoiceClient({
   }, [voiceEnabled]);
 
   const publishSender = useCallback((room: Room | null) => {
-    if (!liveKitWorkerReady || !room || room.state !== ConnectionState.Connected) {
+    const roomSessionId = roomSessionIdRef.current;
+    if (
+      !liveKitWorkerReady ||
+      !sessionId ||
+      roomSessionId !== sessionId ||
+      !room ||
+      room.state !== ConnectionState.Connected
+    ) {
       onSendMessageChange?.(null);
       return;
     }
 
     onSendMessageChange?.(async (content: string) => {
+      if (
+        roomRef.current !== room ||
+        roomSessionIdRef.current !== sessionId ||
+        room.state !== ConnectionState.Connected
+      ) {
+        onSendMessageChange?.(null);
+        throw new Error("LiveKit room changed before the message was sent");
+      }
       const payload = new TextEncoder().encode(JSON.stringify({ content, sentAt: Date.now() }));
       console.info("[demo/livekit] publish text message", {
         topic: MESSAGE_TOPIC,
@@ -67,7 +89,7 @@ export function LiveVoiceClient({
       });
       onStatusChange?.("connected", `sent ${payload.byteLength} bytes`);
     });
-  }, [liveKitWorkerReady, onSendMessageChange, onStatusChange]);
+  }, [liveKitWorkerReady, onSendMessageChange, onStatusChange, sessionId]);
 
   useEffect(() => {
     publishSender(roomRef.current);
@@ -76,8 +98,10 @@ export function LiveVoiceClient({
   const disconnect = useCallback(async () => {
     connectingRef.current = false;
     onSendMessageChange?.(null);
+    onLocalCameraTrackChange?.(null);
     const room = roomRef.current;
     roomRef.current = null;
+    roomSessionIdRef.current = null;
     if (room) {
       await room.disconnect();
     }
@@ -85,7 +109,14 @@ export function LiveVoiceClient({
       audioRef.current.srcObject = null;
     }
     onStatusChange?.("disconnected");
-  }, [onSendMessageChange, onStatusChange]);
+  }, [onLocalCameraTrackChange, onSendMessageChange, onStatusChange]);
+
+  useEffect(() => {
+    onSendMessageChange?.(null);
+    if (roomRef.current && roomSessionIdRef.current !== sessionId) {
+      void disconnect();
+    }
+  }, [disconnect, onSendMessageChange, sessionId]);
 
   useEffect(() => {
     if (!liveKitEnabled || !sessionId) {
@@ -109,6 +140,7 @@ export function LiveVoiceClient({
 
         const room = new Room({ adaptiveStream: true, dynacast: true });
         roomRef.current = room;
+        roomSessionIdRef.current = sessionId;
 
         room.on(RoomEvent.ConnectionStateChanged, (state) => {
           if (state === ConnectionState.Connected) {
@@ -140,9 +172,25 @@ export function LiveVoiceClient({
           track.detach();
         });
 
+        room.on(RoomEvent.LocalTrackPublished, (publication) => {
+          if (publication.source === Track.Source.Camera) {
+            onLocalCameraTrackChange?.(publication.videoTrack ?? null);
+          }
+        });
+
+        room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+          if (publication.source === Track.Source.Camera) {
+            onLocalCameraTrackChange?.(null);
+          }
+        });
+
         await room.connect(url, token);
         await room.localParticipant.setMicrophoneEnabled(voiceEnabledRef.current);
-        await room.localParticipant.setCameraEnabled(cameraEnabledRef.current && voiceEnabledRef.current);
+        const cameraPublication = await room.localParticipant.setCameraEnabled(
+          cameraEnabledRef.current,
+          CAMERA_CAPTURE_OPTIONS,
+        );
+        onLocalCameraTrackChange?.(cameraPublication?.videoTrack ?? null);
         publishSender(room);
       } catch (error) {
         if (cancelled) return;
@@ -157,7 +205,7 @@ export function LiveVoiceClient({
       cancelled = true;
       void disconnect();
     };
-  }, [disconnect, getToken, liveKitEnabled, onSendMessageChange, onStatusChange, publishSender, sessionId]);
+  }, [disconnect, getToken, liveKitEnabled, onLocalCameraTrackChange, onSendMessageChange, onStatusChange, publishSender, sessionId]);
 
   useEffect(() => {
     const room = roomRef.current;
@@ -165,10 +213,16 @@ export function LiveVoiceClient({
     void room.localParticipant.setMicrophoneEnabled(voiceEnabled).catch((error) => {
       onStatusChange?.("error", error instanceof Error ? error.message : "Unable to toggle microphone");
     });
-    void room.localParticipant.setCameraEnabled(cameraEnabled && voiceEnabled).catch((error) => {
-      onStatusChange?.("error", error instanceof Error ? error.message : "Unable to toggle camera");
-    });
-  }, [cameraEnabled, onStatusChange, voiceEnabled]);
+    void room.localParticipant
+      .setCameraEnabled(cameraEnabled, CAMERA_CAPTURE_OPTIONS)
+      .then((publication) => {
+        onLocalCameraTrackChange?.(cameraEnabled ? publication?.videoTrack ?? null : null);
+      })
+      .catch((error) => {
+        onLocalCameraTrackChange?.(null);
+        onStatusChange?.("error", error instanceof Error ? error.message : "Unable to toggle camera");
+      });
+  }, [cameraEnabled, onLocalCameraTrackChange, onStatusChange, voiceEnabled]);
 
   return <audio ref={setAudioElement} autoPlay playsInline className="hidden" />;
 }

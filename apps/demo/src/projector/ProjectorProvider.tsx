@@ -23,7 +23,7 @@ type SendClientMessageAction = (args: {
 }) => Promise<unknown>;
 
 const EMPTY_CLIENT_SNAPSHOT: DemoClientSnapshot = {
-  instances: [],
+  root: null,
   recentCommandResidue: [],
   projectionTree: { roots: [] },
 };
@@ -32,6 +32,7 @@ type ProjectorContextValue = {
   effigy: OptimisticEffigy<DemoClientInstance[]>;
   instances: DemoClientInstance[];
   snapshot: DemoClientSnapshot;
+  readOnly: boolean;
 };
 
 const ProjectorContext = createContext<ProjectorContextValue | null>(null);
@@ -41,14 +42,17 @@ export function ProjectorProvider({
   sessionId,
   sendClientMessage,
   snapshot,
+  readOnly = false,
 }: {
   children: ReactNode;
   sessionId: Id<"sessions"> | null;
   sendClientMessage: SendClientMessageAction;
   snapshot?: DemoClientSnapshot | null;
+  readOnly?: boolean;
 }) {
   const sessionIdRef = useRef<Id<"sessions"> | null>(null);
   const sendClientMessageRef = useRef<SendClientMessageAction | null>(null);
+  const readOnlyRef = useRef(readOnly);
   const effigyRef = useRef<OptimisticEffigy<DemoClientInstance[]> | null>(null);
 
   if (!effigyRef.current) {
@@ -56,6 +60,9 @@ export function ProjectorProvider({
       createMachineEffigy<DemoClientInstance[]>(async (message) => {
         const activeSessionId = sessionIdRef.current;
         const activeSendClientMessage = sendClientMessageRef.current;
+        if (readOnlyRef.current) {
+          throw new Error("Fork this historical frame before sending commands");
+        }
         if (!activeSessionId || !activeSendClientMessage) {
           throw new Error("No active session");
         }
@@ -74,6 +81,13 @@ export function ProjectorProvider({
   }, [sendClientMessage]);
 
   useEffect(() => {
+    readOnlyRef.current = readOnly;
+    if (readOnly) {
+      effigy.clearPending();
+    }
+  }, [effigy, readOnly]);
+
+  useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
       effigy.clearPending();
       sessionIdRef.current = sessionId;
@@ -82,8 +96,8 @@ export function ProjectorProvider({
 
   useEffect(() => {
     effigy.setRecentCommandResidue(residue);
-    effigy.setInstances(currentSnapshot.instances);
-  }, [effigy, residue, currentSnapshot.instances]);
+    effigy.setInstances(currentSnapshot.root ? [currentSnapshot.root] : []);
+  }, [effigy, residue, currentSnapshot.root]);
 
   useEffect(
     () => effigy.subscribe(() => rerenderOptimisticState((version) => version + 1)),
@@ -94,8 +108,9 @@ export function ProjectorProvider({
     <ProjectorContext.Provider
       value={{
         effigy,
-        instances: effigy.getInstances() ?? currentSnapshot.instances,
+        instances: effigy.getInstances() ?? (currentSnapshot.root ? [currentSnapshot.root] : []),
         snapshot: currentSnapshot,
+        readOnly,
       }}
     >
       {children}

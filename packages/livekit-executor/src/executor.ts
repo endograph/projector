@@ -1,6 +1,21 @@
 import { llm } from "@livekit/agents";
-import { GET_STATE_ACTION_NAME, SYNTHETIC_ROOT_RUNTIME_ID } from "@projectors/core";
-import type { ActionContext, ActorMessage, AnyAction, CompiledInference, RuntimeSyncContext } from "@projectors/core";
+import {
+  createUnboundActionContext,
+  GET_STATE_ACTION_NAME,
+  ROOT_RUNTIME_INSTANCE_ID,
+  isActorMessage,
+  textContent,
+} from "@projectors/core";
+import type {
+  ActionContext,
+  ActorMessage,
+  AnyAction,
+  CompiledInference,
+  ContentPart,
+  ExecutorRealizedPrompt,
+  ExecutorRealizePromptRequest,
+  RuntimeSyncContext,
+} from "@projectors/core";
 import { z } from "zod";
 import type {
   ExecutorRunRequest,
@@ -22,7 +37,7 @@ import type {
   RunActionInput,
 } from "./types.ts";
 
-export const SYNTHETIC_ROOT_GENERATOR_ID = SYNTHETIC_ROOT_RUNTIME_ID;
+export const REALTIME_GENERATOR_ID = ROOT_RUNTIME_INSTANCE_ID;
 
 const ASSISTANT_TRANSCRIPT_OUTPUT_OWNER = Symbol("livekitExecutorAssistantTranscriptOutputOwner");
 
@@ -33,14 +48,14 @@ const DEFAULT_EVENT_NAMES: LiveKitEventNames = {
   dataReceived: "data_received",
 };
 
-let frameIdCounter = 0;
-
-export class LiveKitExecutor implements ProjectorExecutor {
+export class LiveKitExecutor<
+  TDataContent = never,
+> implements ProjectorExecutor<TDataContent> {
   readonly type = "livekit";
 
-  readonly connection: LiveKitConnection;
+  readonly connection: LiveKitConnection<TDataContent>;
 
-  constructor(readonly config: LiveKitExecutorConfig) {
+  constructor(readonly config: LiveKitExecutorConfig<TDataContent>) {
     this.connection = new LiveKitConnection(this, config);
   }
 
@@ -48,8 +63,8 @@ export class LiveKitExecutor implements ProjectorExecutor {
     this.connection.disconnect();
   }
 
-  async run(request: ExecutorRunRequest): Promise<ExecutorRunResult> {
-    if (request.runtimeInstanceId !== SYNTHETIC_ROOT_RUNTIME_ID) {
+  async run(request: ExecutorRunRequest<TDataContent>): Promise<ExecutorRunResult<TDataContent>> {
+    if (request.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) {
       return this.config.discreteExecutor.run(request);
     }
 
@@ -60,9 +75,27 @@ export class LiveKitExecutor implements ProjectorExecutor {
     return { completionReason: "delegated" };
   }
 
-  async syncRuntime(context: RuntimeSyncContext): Promise<void> {
-    if (context.runtimeInstanceId !== SYNTHETIC_ROOT_RUNTIME_ID) return;
+  async realizePrompt(
+    request: ExecutorRealizePromptRequest<TDataContent>,
+  ): Promise<ExecutorRealizedPrompt> {
+    if (request.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) {
+      return await this.config.discreteExecutor.realizePrompt(request);
+    }
+
+    if (!this.connection.isRealtimeActive()) {
+      return await this.config.discreteExecutor.realizePrompt(request);
+    }
+
+    return realizeLiveKitPrompt(request.inference, this.config.messageToText);
+  }
+
+  async syncRuntime(context: RuntimeSyncContext<TDataContent>): Promise<void> {
+    if (context.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) return;
     await this.connection.syncRuntime(context);
+  }
+
+  realtimeRuntimeInstanceId(): string {
+    return this.config.realtimeRuntimeInstanceId ?? ROOT_RUNTIME_INSTANCE_ID;
   }
 
   getTool(name: string): AnyAction | undefined {
@@ -83,7 +116,7 @@ export class LiveKitExecutor implements ProjectorExecutor {
   }
 }
 
-export class LiveKitConnection {
+export class LiveKitConnection<TDataContent = never> {
   private readonly eventNames: LiveKitEventNames;
   private readonly handlers: Array<{
     target: "session" | "room";
@@ -92,18 +125,18 @@ export class LiveKitConnection {
   }> = [];
   private disconnected = false;
   private syncTail: Promise<void> = Promise.resolve();
-  private currentSyncContext?: RuntimeSyncContext;
-  private currentInference?: CompiledInference;
+  private currentSyncContext?: RuntimeSyncContext<TDataContent>;
+  private currentInference?: CompiledInference<TDataContent>;
   private currentInstructions = "";
   private currentTools: LiveKitToolContext = {};
   private toolRegistry = new Map<string, AnyAction>();
   private readonly forwardedInputFrameIds = new Set<string>();
-  private readonly assistantTranscripts = new AssistantTranscriptStream(this);
-  private readonly userTranscripts = new UserTranscriptEnvelope(this);
+  private readonly assistantTranscripts = new AssistantTranscriptStream<TDataContent>(this);
+  private readonly userTranscripts = new UserTranscriptEnvelope<TDataContent>(this);
 
   constructor(
-    private readonly executor: LiveKitExecutor,
-    readonly config: LiveKitExecutorConfig,
+    private readonly executor: LiveKitExecutor<TDataContent>,
+    readonly config: LiveKitExecutorConfig<TDataContent>,
   ) {
     this.eventNames = {
       ...DEFAULT_EVENT_NAMES,
@@ -112,7 +145,7 @@ export class LiveKitConnection {
     this.installEventHandlers();
   }
 
-  get inference(): CompiledInference | undefined {
+  get inference(): CompiledInference<TDataContent> | undefined {
     return this.currentInference;
   }
 
@@ -138,7 +171,7 @@ export class LiveKitConnection {
     }
   }
 
-  isRealtimeActive(context: RuntimeSyncContext | undefined = this.currentSyncContext): boolean {
+  isRealtimeActive(context: RuntimeSyncContext<TDataContent> | undefined = this.currentSyncContext): boolean {
     const enabled = this.executor.config.realtime?.enabled;
     if (typeof enabled === "function") {
       return context ? enabled(context) : false;
@@ -148,7 +181,7 @@ export class LiveKitConnection {
     return !!this.getRealtimeSession();
   }
 
-  syncRuntime(context: RuntimeSyncContext): Promise<void> {
+  syncRuntime(context: RuntimeSyncContext<TDataContent>): Promise<void> {
     const job = this.syncTail
       .catch(() => undefined)
       .then(async () => {
@@ -174,13 +207,14 @@ export class LiveKitConnection {
     }
 
     await this.enqueueToolFrame(name, { phase: "call", input });
-    const context: ActionContext<unknown> =
-      this.currentSyncContext?.createActionContext(action) ?? {};
+    const context: ActionContext<unknown, TDataContent> =
+      this.currentSyncContext?.createActionContext(action) ??
+      createUnboundActionContext() as ActionContext<unknown, TDataContent>;
     if (action.name === GET_STATE_ACTION_NAME) {
       context.getState ??= (address) => this.getRetrievableState(address);
     }
     const runAction = this.config.runAction;
-    const runInput: RunActionInput = { action, input, context, liveKitContext };
+    const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
     const value = runAction
       ? await runAction(runInput)
       : action.run
@@ -209,20 +243,21 @@ export class LiveKitConnection {
   async enqueueAssistantTranscript(
     text: string,
     metadata: Record<string, unknown> = {},
-  ): Promise<Frame> {
+  ): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
-      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      generatorId: this.executor.realtimeRuntimeInstanceId(),
+      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
       inert: true,
       metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
+          ...metadata,
           type: "assistant",
+          content: [textContent(text)],
           text,
           audience: "self",
           source: { external: true },
-          ...metadata,
-        } as FrameMessage,
+        } satisfies FrameMessage<TDataContent>,
       ],
     });
   }
@@ -230,28 +265,29 @@ export class LiveKitConnection {
   async enqueueUserTranscript(
     text: string,
     metadata: Record<string, unknown> = {},
-  ): Promise<Frame> {
+  ): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
-      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      generatorId: this.executor.realtimeRuntimeInstanceId(),
+      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
       inert: true,
       metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
+          ...metadata,
           type: "user",
+          content: [textContent(text)],
           text,
           audience: "broadcast",
           source: { external: true },
-          ...metadata,
-        } as FrameMessage,
+        } satisfies FrameMessage<TDataContent>,
       ],
     });
   }
 
-  private async syncNow(input: CompiledInference | RuntimeSyncContext): Promise<void> {
+  private async syncNow(input: CompiledInference<TDataContent> | RuntimeSyncContext<TDataContent>): Promise<void> {
     if (this.disconnected) return;
 
-    let nextInference: CompiledInference | undefined;
+    let nextInference: CompiledInference<TDataContent> | undefined;
     if (isRuntimeSyncContext(input)) {
       this.currentSyncContext = input;
       nextInference = input.inference;
@@ -261,16 +297,18 @@ export class LiveKitConnection {
     if (!nextInference) return;
 
     this.currentInference = nextInference;
-    this.currentInstructions = buildLiveKitInstructions(nextInference);
+    this.currentInstructions = buildLiveKitInstructions(nextInference, this.config.messageToText);
     this.toolRegistry = buildToolRegistry(nextInference.tools);
     this.currentTools = buildLiveKitToolContext(nextInference, this);
 
-    const realtimeSession = this.getRealtimeSession();
-    await realtimeSession?.updateInstructions?.(this.currentInstructions);
-    await realtimeSession?.updateTools?.(this.currentTools);
+    if (this.isRealtimeActive(isRuntimeSyncContext(input) ? input : undefined)) {
+      const realtimeSession = this.getRealtimeSession();
+      await realtimeSession?.updateInstructions?.(this.currentInstructions);
+      await realtimeSession?.updateTools?.(this.currentTools);
 
-    await this.config.session.updateInstructions?.(this.currentInstructions);
-    await this.config.session.updateTools?.(this.currentTools);
+      await this.config.session.updateInstructions?.(this.currentInstructions);
+      await this.config.session.updateTools?.(this.currentTools);
+    }
 
     this.updateAgentSnapshot(this.config.agent, this.currentInstructions, this.currentTools);
     // RoomIO can replace session.output.transcription after session.start(),
@@ -278,9 +316,9 @@ export class LiveKitConnection {
     this.assistantTranscripts.install();
   }
 
-  private async forwardVisibleInput(context: RuntimeSyncContext): Promise<void> {
+  private async forwardVisibleInput(context: RuntimeSyncContext<TDataContent>): Promise<void> {
     if (!this.isRealtimeActive(context)) return;
-    for (const { frameId, text } of userTextsFromFrames(context.visibleFrames)) {
+    for (const { frameId, text } of userTextsFromFrames(context.visibleFrames, this.config.messageToText)) {
       if (this.forwardedInputFrameIds.has(frameId)) continue;
       this.forwardedInputFrameIds.add(frameId);
       await this.sendTextToRealtimeSession(text);
@@ -432,24 +470,25 @@ export class LiveKitConnection {
     this.handlers.push({ target: "room", event, handler });
   }
 
-  private async enqueueExternalUserMessage(text: string): Promise<Frame> {
+  private async enqueueExternalUserMessage(text: string): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
       metadata: { mode: "text", transport: "livekit" },
       messages: [
         {
           type: "user",
+          content: [textContent(text)],
           text,
           audience: "broadcast",
           source: { external: true, transport: "livekit" },
-        } as FrameMessage,
+        } satisfies FrameMessage<TDataContent>,
       ],
     });
   }
 
-  private async enqueueToolFrame(name: string, value: unknown): Promise<Frame> {
+  private async enqueueToolFrame(name: string, value: unknown): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      generatorId: SYNTHETIC_ROOT_GENERATOR_ID,
-      runtimeInstanceId: SYNTHETIC_ROOT_RUNTIME_ID,
+      generatorId: this.executor.realtimeRuntimeInstanceId(),
+      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
       inert: true,
       messages: [
         {
@@ -458,26 +497,26 @@ export class LiveKitConnection {
           value,
           audience: "self",
           source: { external: true },
-        } as FrameMessage,
+        } as FrameMessage<TDataContent>,
       ],
     });
   }
 
-  private async enqueueFrame(frame: FrameDraft): Promise<Frame> {
+  private async enqueueFrame(frame: FrameDraft<TDataContent>): Promise<Frame<TDataContent>> {
     const result = this.currentSyncContext?.machine.enqueueFrame(frame);
     if (!result) {
       throw new Error("LiveKitConnection cannot enqueue a frame before runtime sync");
     }
-    return result.id ? result : { ...result, id: nextFrameId() };
+    return result;
   }
 }
 
-class AssistantTranscriptStream {
+class AssistantTranscriptStream<TDataContent> {
   private messageId?: string;
   private text = "";
   private seq = 0;
 
-  constructor(private readonly connection: LiveKitConnection) {}
+  constructor(private readonly connection: LiveKitConnection<TDataContent>) {}
 
   install(): void {
     const output = this.connection.config.session.output;
@@ -552,11 +591,11 @@ class AssistantTranscriptStream {
   }
 }
 
-class UserTranscriptEnvelope {
+class UserTranscriptEnvelope<TDataContent> {
   private messageId?: string;
   private seq = 0;
 
-  constructor(private readonly connection: LiveKitConnection) {}
+  constructor(private readonly connection: LiveKitConnection<TDataContent>) {}
 
   begin(): void {
     if (this.messageId) return;
@@ -595,10 +634,10 @@ class UserTranscriptEnvelope {
 }
 
 class AssistantTranscriptOutputWrapper implements LiveKitTextOutputLike {
-  readonly [ASSISTANT_TRANSCRIPT_OUTPUT_OWNER]: AssistantTranscriptStream;
+  readonly [ASSISTANT_TRANSCRIPT_OUTPUT_OWNER]: AssistantTranscriptStream<any>;
 
   constructor(
-    owner: AssistantTranscriptStream,
+    owner: AssistantTranscriptStream<any>,
     readonly inner: LiveKitTextOutputLike,
   ) {
     this[ASSISTANT_TRANSCRIPT_OUTPUT_OWNER] = owner;
@@ -631,26 +670,42 @@ class AssistantTranscriptOutputWrapper implements LiveKitTextOutputLike {
 
 function isAssistantTranscriptOutputWrapper(
   output: LiveKitTextOutputLike,
-  owner: AssistantTranscriptStream,
+  owner: AssistantTranscriptStream<any>,
 ): output is AssistantTranscriptOutputWrapper {
-  return (output as Partial<Record<typeof ASSISTANT_TRANSCRIPT_OUTPUT_OWNER, AssistantTranscriptStream>>)[
+  return (output as Partial<Record<typeof ASSISTANT_TRANSCRIPT_OUTPUT_OWNER, AssistantTranscriptStream<any>>>)[
     ASSISTANT_TRANSCRIPT_OUTPUT_OWNER
   ] === owner;
 }
 
-export function buildLiveKitInstructions(inference: CompiledInference): string {
+export function buildLiveKitInstructions<TDataContent = never>(
+  inference: CompiledInference<TDataContent>,
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): string {
   return [
     renderSection("System", inference.systemParts),
     renderSection("Dynamic Context", inference.dynamicParts),
-    renderHistory(inference.history),
+    renderHistory(inference.history, messageToText),
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-function isRuntimeSyncContext(
-  input: CompiledInference | RuntimeSyncContext,
-): input is RuntimeSyncContext {
+export function realizeLiveKitPrompt<TDataContent = never>(
+  inference: CompiledInference<TDataContent>,
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): ExecutorRealizedPrompt {
+  return {
+    provider: "livekit",
+    input: {
+      instructions: buildLiveKitInstructions(inference, messageToText),
+      tools: buildLiveKitToolDefinitions(inference),
+    },
+  };
+}
+
+function isRuntimeSyncContext<TDataContent>(
+  input: CompiledInference<TDataContent> | RuntimeSyncContext<TDataContent>,
+): input is RuntimeSyncContext<TDataContent> {
   return Boolean(
     input &&
       typeof input === "object" &&
@@ -660,7 +715,7 @@ function isRuntimeSyncContext(
 }
 
 export function buildLiveKitToolDefinitions(
-  inference: CompiledInference,
+  inference: CompiledInference<any>,
 ): LiveKitToolDefinition[] {
   const definitions = new Map<string, LiveKitToolDefinition>();
 
@@ -678,9 +733,9 @@ export function buildLiveKitToolDefinitions(
   return [...definitions.values()];
 }
 
-export function buildLiveKitToolContext(
-  inference: CompiledInference,
-  connection: LiveKitConnection,
+export function buildLiveKitToolContext<TDataContent = never>(
+  inference: CompiledInference<TDataContent>,
+  connection: LiveKitConnection<TDataContent>,
 ): LiveKitToolContext {
   const tools: LiveKitToolContext = {};
 
@@ -719,33 +774,98 @@ function buildToolRegistry(actions: AnyAction[]): Map<string, AnyAction> {
   return registry;
 }
 
-function renderSection(title: string, parts: string[]): string {
-  const body = parts.map((part) => part.trim()).filter(Boolean).join("\n\n");
+function renderSection(title: string, parts: readonly ContentPart<any>[]): string {
+  const body = renderContentPartsForText(parts);
   return body ? `## ${title}\n\n${body}` : "";
 }
 
-function renderHistory(history: ActorMessage[]): string {
-  const lines = history.map(renderHistoryMessage).filter(Boolean);
+function renderHistory<TDataContent>(
+  history: FrameMessage<TDataContent>[],
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): string {
+  const lines = history
+    .filter(isActorMessage<TDataContent>)
+    .map((message) => renderHistoryMessage(message, messageToText))
+    .filter(Boolean);
   return lines.length > 0 ? `## Conversation\n\n${lines.join("\n")}` : "";
 }
 
-function renderHistoryMessage(message: ActorMessage): string {
-  if (message.type === "user") return `User: ${message.text}`;
-  if (message.type === "assistant") return `Assistant: ${message.text}`;
+function renderHistoryMessage<TDataContent>(
+  message: ActorMessage<TDataContent>,
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): string {
+  if (message.type === "user") return `User: ${renderActorText(message, messageToText)}`;
+  if (message.type === "assistant") return `Assistant: ${renderActorText(message, messageToText)}`;
   const value = message.text ?? stringifyValue(message.value);
   return value ? `Tool ${message.name}: ${value}` : "";
 }
 
-function userTextsFromFrames(frames: readonly Frame[]): Array<{ frameId: string; text: string }> {
+function userTextsFromFrames<TDataContent>(
+  frames: readonly Frame<TDataContent>[],
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): Array<{ frameId: string; text: string }> {
   const texts: Array<{ frameId: string; text: string }> = [];
   for (const frame of frames) {
     for (const message of frame.messages) {
-      if (message.type !== "user") continue;
-      if (!message.text.trim()) continue;
-      texts.push({ frameId: frame.id, text: message.text });
+      if (!isActorMessage<TDataContent>(message) || message.type !== "user") continue;
+      const text = renderActorText(message, messageToText);
+      if (!text.trim()) continue;
+      texts.push({ frameId: frame.id, text });
     }
   }
   return texts;
+}
+
+function renderActorText<TDataContent>(
+  message: ActorMessage<TDataContent>,
+  messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): string {
+  const rendered = messageToText?.(message);
+  if (rendered !== undefined) return rendered;
+  if (message.type === "tool") {
+    const renderedContent = message.content?.length
+      ? renderContentPartsForText(message.content)
+      : "";
+    const value = message.text ?? (renderedContent || stringifyValue(message.value));
+    return value ? `Tool ${message.name}: ${value}` : `Tool ${message.name}`;
+  }
+  if (message.content?.length) {
+    return renderContentPartsForText(message.content);
+  }
+  if (message.text !== undefined) {
+    return message.text;
+  }
+  throw new Error(
+    `Cannot render ${message.type} message with non-string content. Provide messageToText or text.`,
+  );
+}
+
+function renderContentPartsForText(parts: readonly ContentPart<any>[]): string {
+  return parts
+    .map(renderContentPartForText)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function renderContentPartForText(part: ContentPart<any>): string {
+  if (part.type === "text") return part.text;
+  if (part.type === "data") {
+    const label = part.label ? `${part.label}: ` : "";
+    return `${label}${stringifyValue(part.data)}`;
+  }
+  const label = part.label ? `${part.label}; ` : "";
+  return `[Image content unavailable in LiveKit text prompt: ${label}mediaType=${part.mediaType}; data=${describeImageData(part.data)}]`;
+}
+
+function describeImageData(data: Extract<ContentPart<any>, { type: "image" }>["data"]): string {
+  if (data instanceof URL) return data.toString();
+  if (typeof data === "string") {
+    if (data.startsWith("data:")) return "data URL";
+    return data.length > 120 ? `${data.slice(0, 120)}...` : data;
+  }
+  if (data instanceof Uint8Array) return `${data.byteLength} bytes`;
+  return `${data.byteLength} bytes`;
 }
 
 function extractConversationItemText(item: Record<string, unknown>): string | undefined {
@@ -810,9 +930,4 @@ function stringifyValue(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function nextFrameId(): string {
-  frameIdCounter += 1;
-  return `frame_${Date.now()}_${frameIdCounter}`;
 }
