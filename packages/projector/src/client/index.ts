@@ -1,11 +1,18 @@
 import * as z from "zod";
-import { createRoot, directProjectionChildren, type ProjectionFrame, traversalFrames } from "../frames.ts";
+import {
+  collectProjectionNodes,
+  createRoot,
+  directProjectionNodeChildren,
+  type ProjectionNode,
+} from "../projection-nodes.ts";
 import { encodeRuntimeAddress } from "../runtime-address.ts";
 import { resolveFrameCommands } from "../scoped-actions.ts";
 import { resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
   Charter,
+  CommandMessage,
+  ExecuteCommandResult,
   Instance,
   NormalizedRuntime,
   RuntimeAddress,
@@ -15,19 +22,8 @@ import type {
 
 export type JSONSchema = unknown;
 
-export type CommandMessage = {
-  type: "command";
-  name: string;
-  input: unknown;
-  target?: RuntimeAddress;
-  clientId?: string;
-};
-
 export type ClientMachineMessage = CommandMessage;
-
-export type ExecuteCommandResult<T = unknown> =
-  | { success: true; value?: T; clientId?: string }
-  | { success: false; error: string; clientId?: string };
+export type { CommandMessage, ExecuteCommandResult };
 
 export type MachineClientSnapshot<TRoot = unknown> = {
   root: TRoot;
@@ -399,12 +395,12 @@ export function realizeClientInstances(
     ? createRoot([...instances])
     : instances as Instance;
   const states = resolveStates(root);
-  const statesByFrame = groupStatesByFrame(states);
-  const frame = traversalFrames(root)[0];
-  if (!frame) {
+  const statesByProjectionNode = groupStatesByProjectionNode(states);
+  const rootProjectionNode = collectProjectionNodes(root)[0];
+  if (!rootProjectionNode) {
     throw new Error("Unable to realize empty client instance");
   }
-  return realizeFrame(frame, statesByFrame, options.charter);
+  return realizeProjectionNode(rootProjectionNode, statesByProjectionNode, options.charter);
 }
 
 export function findClientCommand<TName extends string>(
@@ -428,37 +424,41 @@ export function findClientCommand<TName extends string>(
   return match;
 }
 
-function realizeFrame(
-  frame: ProjectionFrame,
-  statesByFrame: Map<string, ResolvedState[]>,
+function realizeProjectionNode(
+  projectionNode: ProjectionNode,
+  statesByProjectionNode: Map<string, ResolvedState[]>,
   charter: Charter | undefined,
 ): ClientInstance {
-  const memberFrames: ProjectionFrame[] = [];
-  const childFrames: ProjectionFrame[] = [];
-  for (const child of directProjectionChildren(frame)) {
+  const memberNodes: ProjectionNode[] = [];
+  const childNodes: ProjectionNode[] = [];
+  for (const child of directProjectionNodeChildren(projectionNode)) {
     if (child.isMember) {
-      memberFrames.push(child);
+      memberNodes.push(child);
     } else {
-      childFrames.push(child);
+      childNodes.push(child);
     }
   }
 
   return {
-    kind: frame.isMember ? "member" : "instance",
-    id: frame.isMember ? undefined : frame.concreteInstance.id,
-    nodeKey: frame.node.key,
-    name: frame.node.name,
+    kind: projectionNode.isMember ? "member" : "instance",
+    id: projectionNode.isMember ? undefined : projectionNode.concreteInstance.id,
+    nodeKey: projectionNode.node.key,
+    name: projectionNode.node.name,
     runtime: {
-      type: frame.node.runtime.type,
-      runtimeAddress: frame.address,
-      runtimeInstanceId: frame.runtimeInstanceId,
+      type: projectionNode.node.runtime.type,
+      runtimeAddress: projectionNode.address,
+      runtimeInstanceId: projectionNode.runtimeInstanceId,
     },
-    states: (statesByFrame.get(frame.runtimeInstanceId) ?? []).map(realizeState),
-    commands: resolveFrameCommands(frame, charter).map((command) =>
-      realizeCommand(command, frame.address)
+    states: (statesByProjectionNode.get(projectionNode.runtimeInstanceId) ?? []).map(realizeState),
+    commands: resolveFrameCommands(projectionNode, charter).map((command) =>
+      realizeCommand(command, projectionNode.address)
     ),
-    members: memberFrames.map((member) => realizeFrame(member, statesByFrame, charter)),
-    children: childFrames.map((child) => realizeFrame(child, statesByFrame, charter)),
+    members: memberNodes.map((member) =>
+      realizeProjectionNode(member, statesByProjectionNode, charter)
+    ),
+    children: childNodes.map((child) =>
+      realizeProjectionNode(child, statesByProjectionNode, charter)
+    ),
   };
 }
 
@@ -481,26 +481,26 @@ function realizeState(state: ResolvedState): ClientStateView {
   };
 }
 
-function groupStatesByFrame(states: ResolvedState[]): Map<string, ResolvedState[]> {
+function groupStatesByProjectionNode(states: ResolvedState[]): Map<string, ResolvedState[]> {
   const grouped = new Map<string, ResolvedState[]>();
   for (const state of states) {
-    const frameKey = stateProjectionFrameKey(state);
-    const list = grouped.get(frameKey) ?? [];
+    const projectionNodeKey = stateProjectionNodeKey(state);
+    const list = grouped.get(projectionNodeKey) ?? [];
     list.push(state);
-    grouped.set(frameKey, list);
+    grouped.set(projectionNodeKey, list);
   }
   return grouped;
 }
 
-function stateProjectionFrameKey(state: ResolvedState): string {
-  if (state.descriptor.scope === "top") {
+function stateProjectionNodeKey(state: ResolvedState): string {
+  if (state.descriptor.scope === "hoist") {
     return encodeRuntimeAddress({
       type: "instance",
       instanceId: state.targetInstance.id,
     });
   }
 
-  return state.sourceFrame.runtimeInstanceId;
+  return state.sourceProjectionNode.runtimeInstanceId;
 }
 
 function createOverlay<TInstances, TName extends string>(

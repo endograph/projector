@@ -4,7 +4,7 @@ import {
   createMachine,
   createNode,
   createRoot,
-  createTool,
+  createAction,
   createUnboundActionContext,
   runMachine,
   textUserMessage,
@@ -24,15 +24,15 @@ describe("conformance: state access", () => {
         init: { owner: "child" },
         projection: "retrieval",
       },
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const root = createNode({
       key: "root",
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
       id: "local-state-demo",
-      root: { id: "root", node: root, children: [{ id: "child", node: child }] },
+      root: { id: "root", isSource: true, node: root, children: [{ id: "child", isSource: true, node: child }] },
       charter: charter({ executor }),
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
@@ -55,13 +55,13 @@ describe("conformance: state access", () => {
     )).toEqual({ owner: "child" });
   });
 
-  it("resolves top state to the real root instance for tools below that root", async () => {
+  it("resolves hoist state to the real root instance for tools below that root", async () => {
     const { executor, requests } = createRecordingExecutor();
-    const readA = createTool({ state: null, name: "readA" });
-    const readB = createTool({ state: null, name: "readB" });
+    const readA = createAction({ state: null, name: "readA" });
+    const readB = createAction({ state: null, name: "readB" });
     const state = {
       key: "session",
-      scope: "top" as const,
+      scope: "hoist" as const,
       schema: z.object({ owner: z.string() }),
       init: { owner: "root" },
     };
@@ -70,11 +70,11 @@ describe("conformance: state access", () => {
     const root = createNode({
       key: "root",
       members: [memberA, memberB],
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
-    const rootInstance: Instance = { id: "root", node: root };
+    const rootInstance: Instance = { id: "root", isSource: true, node: root };
     const machine = createMachine({
-      id: "top-state-demo",
+      id: "hoist-state-demo",
       root: rootInstance,
       charter: charter({ executor }),
     });
@@ -91,27 +91,27 @@ describe("conformance: state access", () => {
     expect(rootInstance.states?.session?.value).toEqual({ owner: "root" });
   });
 
-  it("keeps top state isolated between direct root machines", async () => {
+  it("keeps hoist state isolated between direct root machines", async () => {
     const first = createRecordingExecutor();
     const second = createRecordingExecutor();
     const node = createNode({
       key: "root",
       state: {
         key: "session",
-        scope: "top",
+        scope: "hoist",
         schema: z.object({ owner: z.string() }),
         projection: "retrieval",
       },
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machineA = createMachine({
       id: "root-a-demo",
-      root: { id: "a", node, states: { session: { value: { owner: "a" } } } },
+      root: { id: "a", isSource: true, node, states: { session: { value: { owner: "a" } } } },
       charter: charter({ executor: first.executor }),
     });
     const machineB = createMachine({
       id: "root-b-demo",
-      root: { id: "b", node, states: { session: { value: { owner: "b" } } } },
+      root: { id: "b", isSource: true, node, states: { session: { value: { owner: "b" } } } },
       charter: charter({ executor: second.executor }),
     });
     machineA.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });

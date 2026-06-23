@@ -168,7 +168,7 @@ Run:
 ```sh
 bun run --filter @projectors/demo-agent typecheck
 bun run --filter @projectors/demo typecheck
-bun run --filter @projectors/livekit-executor typecheck
+bun run --filter @projectors/livekit-realtime-executor typecheck
 ```
 
 Manual verification:

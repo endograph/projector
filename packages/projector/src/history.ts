@@ -29,6 +29,14 @@ export type RuntimeCompletionFrameMetadata = {
   completionReason: CompletionReason;
 };
 
+export type RuntimeTurnFrameMetadata = {
+  type: "projector.runtime-turn";
+  runtimeInstanceId: RuntimeInstanceId;
+  activationId: string;
+  sourceFrameId: string;
+  completionReason: WorkCompletionReason;
+};
+
 export function createRuntimeCompletionFrame<
   TDataContent = never,
 >({
@@ -56,6 +64,61 @@ export function createRuntimeCompletionFrame<
       activationId,
       completionReason,
     } satisfies RuntimeCompletionFrameMetadata & Record<string, unknown>,
+  };
+}
+
+export function createRuntimeTurnFrame<
+  TDataContent = never,
+>({
+  generatorId,
+  runtimeInstanceId,
+  activationId,
+  sourceFrameId,
+  reason = "end-turn",
+  concurrencyKey = runtimeInstanceId,
+  concurrency = "serial",
+  metadata,
+}: {
+  generatorId: GeneratorId;
+  runtimeInstanceId: RuntimeInstanceId;
+  activationId: string;
+  sourceFrameId: string;
+  reason?: WorkCompletionReason;
+  concurrencyKey?: string;
+  concurrency?: RuntimeConcurrency;
+  metadata?: Record<string, unknown>;
+}): FrameDraft<TDataContent> {
+  return {
+    generatorId,
+    runtimeInstanceId,
+    activationId,
+    messages: [
+      ({
+        type: "work",
+        kind: "activation",
+        activationId,
+        runtimeInstanceId,
+        generatorId,
+        sourceFrameId,
+        concurrencyKey,
+        concurrency,
+      } satisfies WorkActivationMessage) as FrameMessage<TDataContent>,
+      ({
+        type: "work",
+        kind: "completion",
+        activationId,
+        sourceFrameId,
+        reason,
+      } satisfies WorkCompletionMessage) as FrameMessage<TDataContent>,
+    ],
+    metadata: {
+      ...metadata,
+      type: "projector.runtime-turn",
+      runtimeInstanceId,
+      activationId,
+      sourceFrameId,
+      completionReason: reason,
+    } satisfies RuntimeTurnFrameMetadata & Record<string, unknown>,
   };
 }
 

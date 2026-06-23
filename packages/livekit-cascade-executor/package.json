@@ -1,5 +1,5 @@
 {
-  "name": "@projectors/livekit-executor",
+  "name": "@projectors/livekit-cascade-executor",
   "version": "0.0.1",
   "module": "index.ts",
   "type": "module",

@@ -7,7 +7,7 @@ compatibility requirement.
 - Replace contexts with states.
 - Rewrite public API and internal types as needed.
 - Delete old tests.
-- Add only focused tests for algorithmic behavior, especially projection frame
+- Add only focused tests for algorithmic behavior, especially projection node
   ordering, `augment`, `replace`, required children ordering, and state
   initialization/validation.
 
@@ -95,8 +95,8 @@ Projection defaults:
 
 - `node.projection` defaults to
   `{ mode: "augment", instructions: "system", tools: "provider-static" }`.
-- `runtime.boundaryProjection` defaults to `{ mode: "hidden" }` for primary and
-  worker runtimes.
+- `runtime.boundaryProjection` defaults to `{ mode: "hidden" }` for generator
+  runtimes.
 - `StateDescriptor.projection` defaults to `"hidden"`.
 
 Static node projection controls node-local instructions, projected state, and
@@ -230,17 +230,14 @@ type TriggeredRuntimeOptions<TActorMessage extends AnyActorMessage = DefaultActo
   concurrency?: RuntimeConcurrency; // default "serial"
   activationHistory?: ActivationHistory; // default "live"
   historyProjection?: HistoryProjection<TActorMessage>; // default { type: "messages" }
+  boundaryProjection?: BoundaryProjection<TActorMessage>; // default { mode: "hidden" }
+  outputAudienceDefault?: "self" | "broadcast";
 };
 
 type Runtime<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
   | { type?: "component" } // default
   | ({
-      type: "primary";
-      boundaryProjection?: BoundaryProjection; // default { mode: "hidden" }
-    } & TriggeredRuntimeOptions<TActorMessage>)
-  | ({
-      type: "worker";
-      boundaryProjection?: BoundaryProjection; // default { mode: "hidden" }
+      type?: "generator";
     } & TriggeredRuntimeOptions<TActorMessage>);
 ```
 
@@ -258,6 +255,11 @@ no mapper is provided, returned text becomes the assistant content. The framewor
 then wraps the content in an `AssistantMessage` with `content` set and `text`
 preserved as the raw LLM text. `output.audience` is applied when the implicit
 assistant message does not already carry an explicit audience.
+
+`runtime.outputAudienceDefault` optionally supplies the audience for implicit
+assistant messages produced from executor text output when `node.output.audience`
+is not set. Explicit `node.output.audience` wins.
+
 Fully formed frames or messages emitted by tools, actions, or executors keep
 their own audience or use their message-type default.
 
@@ -266,7 +268,7 @@ visible actor messages while it is still running. `"live"` activations compile
 history from the current frame log before each inference frame. `"snapshot"`
 activations compile from the history visible when the activation opened, plus
 messages produced by that same activation. This is especially useful for
-parallel workers whose mid-loop context should not be steered by unrelated
+parallel generators whose mid-loop context should not be steered by unrelated
 frames arriving after the activation starts.
 
 `runtime.historyProjection` controls how a runtime converts its visible frame
@@ -293,7 +295,7 @@ type StateDescriptor<S = unknown> = {
   key: string;
   schema: Schema<S>;
   init?: S | (() => S);
-  scope?: "top" | "local"; // default "top"
+  scope?: "hoist" | "local"; // default "hoist"
   onInitConflict?: "error" | "replace"; // default "replace"
   projection?: "system" | "dynamic" | "retrieval" | "hidden"; // default "hidden"
 };
@@ -305,6 +307,7 @@ type StateContainer<S = unknown> = {
 type Instance<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   id: string;
   node: Node<TActorMessage>;
+  isSource?: boolean;
   states?: Record<string, StateContainer>;
   children?: Instance<TActorMessage>[]; // removable runtime children
 };
@@ -313,12 +316,13 @@ type Instance<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
 State rules:
 
 - `scope: "local"` stores on the current concrete instance.
-- `scope: "top"` walks parentage upward from the current concrete instance
-  until the next parent would be stateless, or until the machine tree root is
-  reached.
-- Stateless nodes cannot declare state and are skipped as top-state ownership
-  anchors. They may still participate in projection, runtime scheduling, and
-  traversal.
+- `scope: "hoist"` stores on the nearest source instance in the current
+  projection-node ancestry.
+- Source instances are durable state ownership anchors marked with
+  `isSource: true`.
+- A machine tree must contain at least one source instance.
+- Hoisted state resolution throws when no source instance exists for the current
+  projection node.
 - Each node may attach at most one state descriptor through `node.state`.
 - The same `StateDescriptor.key` may still appear on multiple nodes. It means
   shared access to the same resolved state container.
@@ -336,10 +340,10 @@ State rules:
 - If multiple compatible descriptors are visible, `onInitConflict` merges by
   strictest policy: `"error"` takes precedence over `"replace"`.
 - If multiple compatible descriptors are visible, `projection` is view-level
-  policy and uses latest-wins in `ProjectionFrame` traversal order.
-- Top-scoped state projects from its resolved target instance's projection frame,
-  even when the latest descriptor contribution came from a member or worker
-  boundary. Local state projects from the descriptor's source frame.
+  policy and uses latest-wins in `ProjectionNode` traversal order.
+- Hoisted state projects from its resolved target instance's projection node,
+  even when the latest descriptor contribution came from a member or generator
+  boundary. Local state projects from the descriptor's source projection node.
 - Existing state validation and invalid-state conflict handling use the effective
   descriptor after compatibility has been checked.
 - If an existing value validates against the descriptor schema, reuse it.
@@ -368,7 +372,6 @@ type NodeConfig<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless?: boolean;
   tools?: ActionConfigEntry[];
   commands?: ActionConfigEntry[];
   state?: StateDescriptor;
@@ -383,7 +386,6 @@ type Node<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless: boolean;
   toolBindings: ActionBindings;
   toolRefs: ActionRef[];
   commandBindings: ActionBindings;
@@ -486,12 +488,12 @@ For the first implementation pass, an action ref is also the action name:
 to an action with a different `name`. Aliasing refs to differently named actions
 is future work.
 
-## Projection Frames And Runtime Frames
+## Projection Nodes And Runtime Frames
 
 `createRoot(instances: Instance[])` is a helper API for idiomatic application
-composition. It returns a stateless root `Instance` with id `"root"` and a
-hidden primary runtime. The id `"root"` is not globally reserved; it is only the
-id this helper chooses for the root instance it creates.
+composition. It returns a helper root `Instance` with id `"root"` and a hidden
+generator runtime. The id `"root"` is not globally reserved; it is only the id
+this helper chooses for the root instance it creates.
 
 The helper is especially useful when an app wants to merge multiple independent
 durable instances into one machine tree. A common split is an `agentInstance`
@@ -502,17 +504,18 @@ conversation/thread state:
 const root = createRoot([agentInstance, threadInstance]);
 ```
 
-After this normalization there is still no separate wrapper type, but the
-helper root's node is marked `stateless`. Traversal, runtime ancestry,
-projection, and scheduling see the returned root as an ordinary instance.
-State ownership skips it: `scope: "top"` state beneath `agentInstance` targets
-`agentInstance`, and `scope: "top"` state beneath `threadInstance` targets
-`threadInstance`, unless a descriptor uses `scope: "local"`.
+After this normalization there is still no separate wrapper type. Traversal,
+runtime ancestry, projection, and scheduling see the returned root as an
+ordinary instance. State ownership is controlled by source instances:
+`scope: "hoist"` state beneath `agentInstance` targets `agentInstance` when that
+instance is marked `isSource: true`, and `scope: "hoist"` state beneath
+`threadInstance` targets `threadInstance` when it is marked `isSource: true`.
+`scope: "local"` state still stores on the current concrete instance.
 
-`ProjectionFrame` is the traversal unit used by the projection compiler. It is
+`ProjectionNode` is the traversal unit used by the projection compiler. It is
 distinct from durable runtime `Frame` entries in the message/work log.
 
-ProjectionFrame order is pre-order, left-to-right:
+ProjectionNode order is pre-order, left-to-right:
 
 ```txt
 current instance
@@ -529,7 +532,7 @@ createRoot([instanceA, instanceB]);
 // instanceA.children = [instanceFoo, instanceBar]
 ```
 
-ProjectionFrame order:
+ProjectionNode order:
 
 ```ts
 [
@@ -559,8 +562,8 @@ instances are reloaded against the updated charter. Runtime `children` represent
 durable conversation state and should preserve the exact children that were
 spawned or attached during execution.
 
-Members can still have `primary` or `worker` runtimes. The runtime gives each
-member projection frame a virtual runtime address derived from the nearest
+Members can still have generator runtimes. The runtime gives each
+member projection node a virtual runtime address derived from the nearest
 concrete owner instance and the stable member node key path:
 
 ```ts
@@ -631,69 +634,73 @@ Compilation rule for projection-owned sections:
 
 ```ts
 const history = compileVisibleHistory(frames, targetGenerator);
+const rootProjectionNode = collectProjectionNodes(root)[0];
 const sectionRoot =
   targetGenerator
-    ? findRuntimeFrame(root, targetGenerator.runtimeInstanceId) ?? root
-    : root;
+    ? findProjectionNodeByRuntimeId(root, targetGenerator.runtimeInstanceId) ?? rootProjectionNode
+    : rootProjectionNode;
 const draft =
-  targetGenerator && isPrimaryOrWorkerBoundary(sectionRoot)
+  targetGenerator && isGeneratorBoundary(sectionRoot)
     ? compileTargetGeneratorProjection(sectionRoot, targetGenerator)
     : compileProjectionSubtree(sectionRoot, targetGenerator);
 
 return finalizeProjectionDraft(draft, history);
 
-function compileTargetGeneratorProjection(frame, targetGenerator) {
-  return compileOwnedGeneratorProjection(frame, targetGenerator);
+function compileTargetGeneratorProjection(projectionNode, targetGenerator) {
+  return compileOwnedGeneratorProjection(projectionNode, targetGenerator);
 }
 
-function compileBoundaryGeneratorProjection(frame) {
-  return compileOwnedGeneratorProjection(frame, generatorForFrame(frame));
+function compileBoundaryGeneratorProjection(projectionNode) {
+  return compileOwnedGeneratorProjection(
+    projectionNode,
+    generatorForProjectionNode(projectionNode),
+  );
 }
 
-function compileOwnedGeneratorProjection(frame, targetGenerator) {
+function compileOwnedGeneratorProjection(projectionNode, targetGenerator) {
   const draft = emptyProjectionDraft();
   applyProjection(
     draft,
-    compileNodeProjectionSource(frame),
-    frame.node.projection,
-    projectionContext(frame, "node", targetGenerator),
+    compileNodeProjectionSource(projectionNode),
+    projectionNode.node.projection,
+    projectionContext(projectionNode, "node", targetGenerator),
   );
-  for (const child of collectDirectProjectionChildren(frame)) {
-    visitProjectionFrame(draft, child, targetGenerator);
+  for (const child of directProjectionNodeChildren(projectionNode)) {
+    visitProjectionNode(draft, child, targetGenerator);
   }
   return draft;
 }
 
-function compileProjectionSubtree(frame, targetGenerator) {
+function compileProjectionSubtree(projectionNode, targetGenerator) {
   const draft = emptyProjectionDraft();
-  visitProjectionFrame(draft, frame, targetGenerator);
+  visitProjectionNode(draft, projectionNode, targetGenerator);
   return draft;
 }
 
-function visitProjectionFrame(draft, frame, targetGenerator) {
+function visitProjectionNode(draft, projectionNode, targetGenerator) {
   if (
-    isPrimaryOrWorkerBoundary(frame) &&
-    !belongsToGenerator(frame, targetGenerator)
+    isGeneratorBoundary(projectionNode) &&
+    !belongsToGenerator(projectionNode, targetGenerator)
   ) {
-    const exported = compileBoundaryGeneratorProjection(frame);
+    const exported = compileBoundaryGeneratorProjection(projectionNode);
     applyBoundaryProjection(
       draft,
       readonlyProjectionSource(exported),
-      frame.runtime.boundaryProjection ?? { mode: "hidden" },
-      projectionContext(frame, "boundary"),
+      projectionNode.node.runtime.boundaryProjection ?? { mode: "hidden" },
+      projectionContext(projectionNode, "boundary"),
     );
     return; // do not directly traverse descendants across a runtime boundary
   }
 
   applyProjection(
     draft,
-    compileNodeProjectionSource(frame),
-    frame.node.projection,
-    projectionContext(frame, "node"),
+    compileNodeProjectionSource(projectionNode),
+    projectionNode.node.projection,
+    projectionContext(projectionNode, "node"),
   );
 
-  for (const child of collectDirectProjectionChildren(frame)) {
-    visitProjectionFrame(draft, child, targetGenerator);
+  for (const child of directProjectionNodeChildren(projectionNode)) {
+    visitProjectionNode(draft, child, targetGenerator);
   }
 }
 ```
@@ -701,39 +708,40 @@ function visitProjectionFrame(draft, frame, targetGenerator) {
 `compileTargetGeneratorProjection` preserves the scheduler-supplied
 `Generator.id`, which may be activation-specific for parallel runtimes.
 `compileBoundaryGeneratorProjection` deliberately synthesizes a generator from
-the runtime frame because boundary aggregate compilation is an internal
+the runtime projection node because boundary aggregate compilation is an internal
 ownership pass, not a real activation target.
 
-`sectionRoot` is the target runtime frame when compiling a primary or worker
-generator. For a `createRoot(...)` tree, the root primary is just the projection
-frame for the returned root instance.
+`sectionRoot` is the target runtime projection node when compiling a generator.
+For a `createRoot(...)` tree, the root generator is the projection node for the
+returned root instance.
 
-Primary and worker runtimes are projection boundaries. When compiling a
-generator outside that runtime boundary, the compiler must not traverse the
-boundary's descendants directly. It first compiles the boundary's owned
-projection using that runtime's own `node.projection`, then applies
+Generator runtimes are projection boundaries. When compiling a generator outside
+that runtime boundary, the compiler must not traverse the boundary's descendants
+directly. It first compiles the boundary's owned projection using that runtime's
+own `node.projection`, then applies
 `runtime.boundaryProjection ?? { mode: "hidden" }` to the resulting aggregate
 before adding it to the parent compilation.
 
-When compiling a specific primary or worker target generator, that runtime's
-projection frame is the root of the projection section pass. Ancestor runtime
+When compiling a specific target generator, that runtime's projection node is
+the root of the projection section pass. Ancestor runtime
 boundaries are not traversed through to reach the target, and ancestor
 instructions/tools do not implicitly project downward into the child generator.
 A child generator's fully compiled projection projects upward to its nearest
 owning generator only through that child's `boundaryProjection` policy.
 
-A runtime's owned projection includes that runtime's own projection frame plus
-its member and child descendants until another primary or worker runtime
-boundary is reached. Nested runtime boundaries are exported to the owning runtime
-through their own `boundaryProjection` policy using the same rule.
+A runtime's owned projection includes that runtime's own projection node plus
+its member and child descendants until another generator runtime boundary is
+reached. Nested runtime boundaries are exported to the owning runtime through
+their own `boundaryProjection` policy using the same rule.
 
 State projection follows state ownership before runtime boundary traversal:
-top-scoped state is grouped under the resolved target instance frame, while
-local state is grouped under the descriptor's source frame. A member inside a
-worker runtime can contribute a descriptor for top-scoped state owned by the
-app-level top instance; that state may project from that owner without exporting
-the worker runtime's aggregate. Hidden boundaries still hide the worker's own
-instructions, tools, local state, and descendant aggregate.
+hoisted state is grouped under the resolved source instance projection node,
+while local state is grouped under the descriptor's source projection node. A
+member inside a generator runtime can contribute a descriptor for hoisted state
+owned by the nearest source instance; that state may project from that owner
+without exporting the generator runtime's aggregate. Hidden boundaries still
+hide the generator's own instructions, tools, local state, and descendant
+aggregate.
 
 Static node projection applies to a node source: node instructions, projected
 state parts, and node tools. Static boundary projection applies to a child
@@ -792,19 +800,18 @@ the last tool with a given name wins.
 Runtime projection resolution:
 
 - `component`: use `node.projection`.
-- `primary`/`worker` when compiling parent inference: compile the runtime's owned
+- `generator` when compiling parent inference: compile the runtime's owned
   projection aggregate, then export it through
   `runtime.boundaryProjection ?? { mode: "hidden" }`.
-- `primary`/`worker` when compiling its own inference: use `node.projection`.
+- `generator` when compiling its own inference: use `node.projection`.
 
-All primary inference points are equal and can receive user input when their
-configured trigger matches the user frame. Typical agents only have the de-facto
-root primary; multiple primary nodes run as multiple user-addressable inference
-points. Multiple primaries are in scope for the first pass because generator
-identity, audience filtering, activation routing, and history compilation need
-to be designed around independent inference points from the start. The first-pass
-routing policy may be broad, but the abstraction must not assume a single
-primary generator.
+All generator inference points are equal and can receive input when their
+configured trigger matches the source frame. Typical agents only have the
+de-facto root generator from `createRoot(...)`, but multiple generator nodes are
+in scope because generator identity, audience filtering, activation routing, and
+history compilation need to be designed around independent inference points from
+the start. The first-pass routing policy may be broad, but the abstraction must
+not assume a single generator.
 
 ## Executor Contract
 
@@ -1008,7 +1015,7 @@ should not persist command-produced frames through a separate per-command
 result path in the normal case.
 
 If `target` is omitted, command resolution scans visible commands in
-`ProjectionFrame` traversal order and picks the last command with the requested
+`ProjectionNode` traversal order and picks the last command with the requested
 name. This gives duplicate command names the same override shape as projection
 sections and provider tool definitions: later/rightmost/deeper entries win. If
 `target` is provided, resolution is restricted to that runtime address and the
@@ -1033,16 +1040,14 @@ inference point a generator.
 
 Generators are created by:
 
-- Serial primary activations created from runtime addresses whose node runtime is
-  `{ type: "primary" }`.
-- Parallel primary activations created from runtime addresses whose node runtime
-  is `{ type: "primary" }`.
-- Worker activations created from runtime addresses whose node runtime is
-  `{ type: "worker" }`.
+- Serial activations created from runtime addresses whose node runtime is
+  `{ type: "generator" }`.
+- Parallel activations created from runtime addresses whose node runtime is
+  `{ type: "generator" }`.
 
-Primary and worker runtime addresses define work that can be triggered by
-frames. The address may point to a concrete durable instance or to a virtual
-member runtime address. The trigger creates an activation. A runtime's
+Generator runtime addresses define work that can be triggered by frames. The
+address may point to a concrete durable instance or to a virtual member runtime
+address. The trigger creates an activation. A runtime's
 `concurrency` policy controls whether activations for that runtime are processed
 serially or in parallel:
 
@@ -1053,26 +1058,21 @@ serially or in parallel:
 For serial runtimes, `concurrencyKey` defaults to the encoded runtime address.
 For parallel runtimes, `concurrencyKey` defaults to the activation ID.
 
-Primary generator IDs are stable and tied to their primary runtime address when
-the primary runs serially. The root primary created by `createRoot(...)` uses the
-same normal address encoding as every other instance runtime: `instance:root`.
-Parallel primary activations should use activation-specific generator IDs
-derived from the primary runtime address and activation ID.
-
-Worker generator IDs are deterministic runner identities. Serial workers may use
-the encoded worker runtime address as their generator ID. Parallel workers should
-use activation-specific generator IDs derived from the worker runtime address and
+Serial generator IDs are stable and tied to their runtime address. The root
+generator created by `createRoot(...)` uses the same normal address encoding as
+every other instance runtime: `instance:root`. Parallel activations should use
+activation-specific generator IDs derived from the runtime address and
 activation ID.
 
-Activation IDs distinguish individual durable units of work for both primary and
-worker runtimes.
+Activation IDs distinguish individual durable units of work for generator
+runtimes.
 
 Generators do not synchronize at the old step/turn boundary. Each generator
 advances independently and emits durable frames. A frame is the unit of runtime
 work that is enqueued back onto the machine.
 
 ```ts
-type GeneratorKind = "primary" | "worker";
+type GeneratorKind = "generator";
 
 type Generator = {
   id: GeneratorId;
@@ -1169,6 +1169,7 @@ type SpawnChild<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
 type SerializedInstance<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   id: InstanceId;
   node: SerializedNodeRef<TActorMessage>;
+  isSource?: boolean;
   states?: Record<StateKey, StateContainer>;
   children?: SerializedInstance<TActorMessage>[];
 };
@@ -1292,7 +1293,7 @@ A generator's audience can see a message when:
 `"self"` resolves to the `generatorId` on the frame containing the message. A
 message with audience `"self"` in a frame without a `generatorId` has no
 generator-visible audience. User messages avoid this by defaulting to
-`"broadcast"`. For parallel primary or worker activations, `"self"` resolves to
+`"broadcast"`. For parallel generator activations, `"self"` resolves to
 the activation-specific generator ID that produced the frame.
 
 Audience does not imply activation. It only controls which messages are visible
@@ -1396,13 +1397,13 @@ work frames. The runtime reconstructs pending work by folding the frame log.
 - `activation` opens a durable unit of work.
 - `completion` closes a durable unit of work.
 
-`completion.reason` records why the activation closed. Primary `end_turn`,
-worker completion, cancellation, and delegation all mean the current activation
-is closed and should not run again. `delegated` means framework-owned execution
-for the activation was handed to an external runtime or provider, and the
-framework should not expect the executor to emit ordinary completion output for
-that activation. If future blocked/retry behavior is needed, it should be added
-as a separate non-terminal work message with deterministic wake conditions.
+`completion.reason` records why the activation closed. End-turn, normal
+completion, cancellation, and delegation all mean the current activation is
+closed and should not run again. `delegated` means framework-owned execution for
+the activation was handed to an external runtime or provider, and the framework
+should not expect the executor to emit ordinary completion output for that
+activation. If future blocked/retry behavior is needed, it should be added as a
+separate non-terminal work message with deterministic wake conditions.
 
 Activation IDs must be deterministic. Activation messages are emitted in their
 own frames, but each activation records the source frame that triggered it. A
@@ -1415,14 +1416,16 @@ activationId = hash(machineId, runtimeInstanceId, triggerKey, sourceFrameId)
 
 Work frames are appended by framework reconciliation, not by mutating the frame
 that caused the work. Enqueueing a frame assigns its identity and appends it to
-the log. Reconciliation folds the log, evaluates frames against runtime
-triggers, and appends any missing deterministic activation or completion work
-frames after their source frame has been persisted.
+the log. Reconciliation folds the full work log, then evaluates trigger source
+frames from a scheduling suffix. The suffix starts at the latest durable work
+frame, inclusive; if no work frame exists, it starts at the beginning of the
+frame log. Reconciliation appends any missing deterministic activation or
+completion work frames after their source frame has been persisted.
 
-A non-inert frame matching primary or worker runtime triggers will be followed
-by separate activation work frames for those runtimes. Work frames may themselves
-be trigger sources for `parent-activation` and `parent-completion`;
-`actor-frame` triggers ignore inert frames and work-only frames.
+A non-inert frame matching generator runtime triggers will be followed by
+separate activation work frames for those runtimes. Work frames may themselves be
+trigger sources for `parent-activation` and `parent-completion`; `actor-frame`
+triggers ignore inert frames and work-only frames.
 
 Reconciliation must be idempotent. Replaying the same frame log should never
 append duplicate work frames because activation IDs are derived from durable
@@ -1430,10 +1433,19 @@ inputs and there is at most one terminal completion for a given activation ID.
 The exact frame IDs may come from storage, but the semantic work identity must be
 stable.
 
+The latest work frame acts as a durable scheduling cursor, but is included in
+the next reconciliation pass so `parent-activation` and `parent-completion`
+follow-up work can be recovered after a crash. Frames before that cursor are not
+searched for additional activation work. Cancellation is separate: open
+activations whose runtime no longer exists may be completed with
+`reason: "cancelled"` regardless of where their activation frame appears in
+history.
+
 Reconciliation must also be deterministic:
 
-- Process source frames in stable durable append order.
-- For each source frame, derive candidate work frames in `ProjectionFrame`
+- Process source frames from the scheduling suffix in stable durable append
+  order.
+- For each source frame, derive candidate work frames in `ProjectionNode`
   traversal order.
 - Append newly derived activation work frames and schedule runnable executor work
   immediately when `scheduleWork` is enabled.
@@ -1461,24 +1473,23 @@ not an inference pass.
 
 ```ts
 syncGenerators(machine):
-  for each ProjectionFrame in traversal order:
-    if frame.node.runtime.type === "primary" and concurrency is serial:
-      ensure primary generator exists
+  for each ProjectionNode in traversal order:
+    if projectionNode.node.runtime.type === "generator" and concurrency is serial:
+      ensure generator exists
 
-  fold work messages to discover open parallel primary activations
-  fold work messages to discover open worker activations
+  fold work messages to discover open parallel generator activations
 ```
 
 Projection compilation is separate from generator discovery. A generator can
 exist while idle and uncompiled. `runMachine` should compile only activations
 that are runnable.
 
-Compiling the root primary does not require compiling child primary or worker
-generators first. For any primary or worker target, the projection section pass
-starts at that target runtime frame. Within any section pass, if a
-`ProjectionFrame` belongs to the target generator, the compiler uses that
-frame's `node.projection`; if a non-target projection frame is a primary or
-worker runtime, the compiler compiles that runtime's generator projection and
+Compiling the root generator does not require compiling child generators first.
+For any generator target, the projection section pass starts at that target
+runtime projection node. Within any section pass, if a
+`ProjectionNode` belongs to the target generator, the compiler uses that
+projection node's `node.projection`; if a non-target projection node is a
+generator runtime, the compiler compiles that runtime's generator projection and
 exports it through `runtime.boundaryProjection ?? { mode: "hidden" }`.
 
 For the first pass, every generator receives the frame log filtered by message
@@ -1486,17 +1497,17 @@ audience, message delivery, runtime activation history, and runtime metadata
 visibility. The target runtime's `historyProjection` then converts that filtered
 frame history into the executor-visible `CompiledInference.history`.
 
-For the first pass, user input creates deterministic activations for all primary
-runtimes whose configured trigger matches the user frame. The root primary
-created by `createRoot(...)` uses `{ type: "actor-frame" }` and `serial`
-concurrency through its normal node runtime. More precise routing and explicit
-broadcast behavior are future work.
+For the first pass, user input creates deterministic activations for all
+generator runtimes whose configured trigger matches the user frame. The root
+generator created by `createRoot(...)` uses `{ type: "actor-frame" }` and
+`serial` concurrency through its normal node runtime. More precise routing and
+explicit broadcast behavior are future work.
 
-Authored primary runtimes must explicitly configure `trigger`. There is no
-authored-primary trigger default. `createRoot(...)` supplies a concrete root node
-with an explicit actor-frame trigger.
+Authored generator runtimes must explicitly configure `trigger`. There is no
+authored-generator trigger default. `createRoot(...)` supplies a concrete root
+node with an explicit actor-frame trigger.
 
-Primary and worker runtimes are triggered only by scoped runtime events:
+Generator runtimes are triggered only by scoped runtime events:
 
 - `spawn`: activates once when an `InstanceMessage` frame creates or attaches
   the runtime address through `kind: "spawn"` or `kind: "attach"`. Static
@@ -1513,9 +1524,8 @@ Primary and worker runtimes are triggered only by scoped runtime events:
   for the runtime's nearest ancestor generator, regardless of completion reason.
 
 For `parent-activation` and `parent-completion`, the nearest ancestor generator
-is the closest primary or worker generator above the runtime address in the
-ProjectionFrame tree. Those triggers do not observe unrelated generators by
-default.
+is the closest generator above the runtime address in the ProjectionNode tree.
+Those triggers do not observe unrelated generators by default.
 
 ### Self-Trigger Exclusion
 
@@ -1555,7 +1565,7 @@ Activation messages are emitted in separate work frames and carry
 `sourceFrameId`, so the source frame identifies the durable event during replay
 or resume.
 
-Runtime triggers are independent from message audience. A primary or worker does
+Runtime triggers are independent from message audience. A generator does
 not become runnable merely because a message is addressed to it; its configured
 trigger must match. Audience alone is not a runtime wake-up rule.
 
@@ -1598,7 +1608,7 @@ The high-level run algorithm is:
 runMachine(machine, options) creates a MachineRun whose drain loop:
   syncGenerators(machine)
   yield any previously pending frames before using them as trigger sources
-  reconcile deterministic work frames from yielded source frames
+  reconcile deterministic work frames from the scheduling suffix
   fold work messages to derive open and completed activations
   identify runnable activations
 
@@ -1825,16 +1835,15 @@ activations.
 
 ### End-Turn Semantics
 
-End-turn semantics are per-activation, not global. When a primary generator
+End-turn semantics are per-activation, not global. When a generator
 declares end turn, the framework appends a completion work frame for the current
-activation with `reason: "end-turn"`. The primary is not runnable again until a
-future user frame creates a new activation.
+activation with `reason: "end-turn"`. The generator is not runnable again until
+a future matching frame creates a new activation.
 
-Workers follow the same rule: when a worker finishes its triggered work, the
-framework appends a completion work frame for that activation with
-`reason: "done"`. For serial workers, the next incomplete activation with the
-same concurrency key becomes runnable. For parallel workers, other incomplete
-activations can already be runnable.
+When a generator finishes its triggered work, the framework appends a completion
+work frame for that activation with `reason: "done"`. For serial generators, the
+next incomplete activation with the same concurrency key becomes runnable. For
+parallel generators, other incomplete activations can already be runnable.
 
 The machine-level concept is quiescence: no activations are runnable under the
 current work log and host policy. Quiescence can be used by applications as the
@@ -1880,7 +1889,7 @@ A client instance should include, where applicable:
 
 The exact client instance shape may evolve, but it must preserve stable runtime
 addresses for optional command targeting and stable `StateAddress` values for
-state operations. Member projection frames should be addressable through
+state operations. Member projection nodes should be addressable through
 `RuntimeAddress` without being serialized as durable child instances.
 
 The server remains authoritative. Client-side validation and optimistic updates
@@ -2256,12 +2265,9 @@ type DryBoundaryProjection = StaticBoundaryProjection | Ref;
 type DryRuntime =
   | { type?: "component" }
   | ({
-      type: "primary";
+      type: "generator";
       boundaryProjection?: DryBoundaryProjection;
-    } & DryTriggeredRuntimeOptions)
-  | ({
-      type: "worker";
-      boundaryProjection?: DryBoundaryProjection;
+      outputAudienceDefault?: "self" | "broadcast";
     } & DryTriggeredRuntimeOptions);
 
 type DryNode<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
@@ -2269,7 +2275,6 @@ type DryNode<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless?: boolean;
   tools?: Ref[];
   commands?: Ref[];
   state?: DryStateDescriptor | Ref;
@@ -2374,21 +2379,23 @@ default, or one field assignment unless that detail changes runtime behavior.
 
 Add focused tests for:
 
-- Projection compiler behavior: `ProjectionFrame` traversal is pre-order and
+- Projection compiler behavior: `ProjectionNode` traversal is pre-order and
   left-to-right, members project before runtime children, `augment` accumulates
   sections, `replace` clears previously accumulated projection sections, and
   `replace` does not affect compiled history. A node `replace` still allows that
   node's children to project afterward.
-- Runtime projection boundaries: primary and worker runtimes default
+- Runtime projection boundaries: generator runtimes default
   `boundaryProjection` to hidden, hidden boundaries prevent descendant leakage,
   static boundary projection only supports `mode`, and an explicit static
   boundary projection exports the runtime's whole owned aggregate as compiled.
-- State projection ownership: top-scoped state contributed behind a runtime
-  boundary projects from the owner instance without exporting the hidden runtime
-  aggregate, while local state remains behind that boundary.
-- Stateless top ownership: `createRoot(...)` creates a stateless helper root,
-  top-scoped state below each direct app instance is owned by that app instance,
-  and stateless nodes cannot declare state.
+- State projection ownership: hoisted state contributed behind a runtime
+  boundary projects from the nearest source instance without exporting the hidden
+  runtime aggregate, while local state remains behind that boundary.
+- Source instance hoist ownership: machine trees require at least one
+  `isSource: true` instance, `createRoot(...)` does not itself become a state
+  ownership anchor, hoisted state below each direct source instance is owned by
+  that source instance, and hoisted state resolution throws when no source
+  instance is available.
 - Projection functions: node and boundary projection functions receive
   `(ctx, draft, source)`, can mutate the IR draft directly, can append dynamic
   text parts from closure state, and can selectively export child runtime prompt
@@ -2398,8 +2405,8 @@ Add focused tests for:
   virtual runtime addresses, duplicate sibling member node keys throw, member
   runtimes create work identities from those addresses, and member state or spawn
   operations resolve to the nearest concrete owner instance.
-- State descriptor resolution and conflicts: `top` state hoists to the machine's
-  real root instance, duplicate state keys reuse valid existing
+- State descriptor resolution and conflicts: `hoist` state resolves to the
+  nearest source instance, duplicate state keys reuse valid existing
   values, incompatible `scope`, schema, or non-equivalent `init` values throw,
   `onInitConflict` merges with `"error"` taking precedence, projection policy is
   latest-wins in traversal order, and `"replace"` resets invalid existing state.
@@ -2444,17 +2451,17 @@ Add focused tests for:
   keeping them visible to later activations, `activationHistory: "snapshot"`
   excludes later external actor messages during the activation, and snapshot
   activations still see actor messages produced by the same activation.
-- Work reconciliation: primary and worker triggers append deterministic
+- Work reconciliation: generator triggers append deterministic
   activation work frames separate from the source frame, activation messages
-  record `sourceFrameId`, reconciliation processes source frames in durable
-  append order and derives work in projection traversal order, work-only and
-  instance-only frames do not trigger `actor-frame`, nearest-ancestor rules apply
-  to parent activation/completion triggers, a serial runtime's own assistant and
-  tool frames derive no new activations for that runtime, a parallel
-  activation's output derives no new activations for the same runtime address,
-  the first durable terminal completion wins, and removed instances cancel open
-  activations.
-- Concurrency and dispatch: serial primary and worker runtimes expose only the
+  record `sourceFrameId`, reconciliation processes source frames from the latest
+  durable work frame inclusively and derives work in projection traversal order,
+  work-only and instance-only frames do not trigger `actor-frame`,
+  nearest-ancestor rules apply to parent activation/completion triggers, a serial
+  runtime's own assistant and tool frames derive no new activations for that
+  runtime, a parallel activation's output derives no new activations for the
+  same runtime address, the first durable terminal completion wins, and removed
+  instances cancel open activations.
+- Concurrency and dispatch: serial generator runtimes expose only the
   earliest incomplete activation per concurrency key, parallel runtimes expose
   all incomplete activations as runnable, `runMachine(..., { scheduleWork: false })`
   yields reconciliation work frames without scheduling executors, and
@@ -2471,7 +2478,7 @@ Add focused tests for:
 - Client integration smoke coverage, if included in the first implementation
   pass: client snapshots expose realized instances plus command residue without
   public frame-log synchronization, command and state addresses are stable for
-  concrete instances and member projection frames, recent command residue remains
+  concrete instances and member projection nodes, recent command residue remains
   machine-level sync metadata, optimistic overlays retire and rebase by residue,
   and typed command helpers are covered by compile-time type tests rather than
   runtime shape assertions.
@@ -2489,7 +2496,7 @@ Add focused tests for:
 - Additional generator history policies beyond runtime `historyProjection` if
   generators need declarative scoped or summarized history instead of custom
   projection functions.
-- User-input routing for multiple primary generators, including explicit
+- User-input routing for multiple generators, including explicit
   broadcast.
 - Opt-in state conflict handling beyond last-write-wins shallow merge patching.
 - Non-terminal blocked/retry work messages with deterministic wake conditions.

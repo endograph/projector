@@ -3,7 +3,6 @@ import { v } from "convex/values";
 
 export default defineSchema({
   sessions: defineTable({
-    headFrameId: v.optional(v.id("frames")),
     contextEpoch: v.number(),
     familyRootSessionId: v.optional(v.id("sessions")),
     forkedFromSessionId: v.optional(v.id("sessions")),
@@ -14,8 +13,7 @@ export default defineSchema({
     .index("by_fork_source", ["forkedFromSessionId"]),
 
   frames: defineTable({
-    parentFrameId: v.optional(v.id("frames")),
-    instanceId: v.string(),
+    referenceFrameId: v.optional(v.id("frames")),
     generatorId: v.optional(v.string()),
     runtimeInstanceId: v.optional(v.string()),
     activationId: v.optional(v.string()),
@@ -23,7 +21,7 @@ export default defineSchema({
     metadata: v.optional(v.any()),
     messages: v.array(v.any()),
     createdAt: v.number(),
-  }).index("by_parent", ["parentFrameId"]),
+  }).index("by_reference", ["referenceFrameId"]),
 
   frameIndex: defineTable({
     sessionId: v.id("sessions"),
@@ -36,12 +34,14 @@ export default defineSchema({
 
   projectorInstanceLog: defineTable({
     sessionId: v.id("sessions"),
+    instanceId: v.string(),
     frameId: v.optional(v.id("frames")),
     message: v.any(),
     instance: v.any(),
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])
+    .index("by_session_instance", ["sessionId", "instanceId"])
     .index("by_frame", ["frameId"]),
 
   messages: defineTable({

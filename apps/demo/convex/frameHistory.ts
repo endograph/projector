@@ -17,6 +17,14 @@ export async function listSessionFrameDocs(
   return await framesForIndexRows(ctx, rows);
 }
 
+export async function getLatestSessionFrameDoc(
+  ctx: DbCtx,
+  sessionId: Id<"sessions">,
+): Promise<FrameDoc | null> {
+  const frames = await listSessionFrameDocs(ctx, sessionId);
+  return frames.at(-1) ?? null;
+}
+
 export async function listSessionContextFrameDocs(
   ctx: DbCtx,
   session: SessionDoc,

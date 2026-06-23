@@ -192,9 +192,9 @@ Use that hook for rich content. Add tests showing image content can be mapped by
 
 No mandatory default image rendering is needed in the first framework patch.
 
-### `LiveKitExecutor`
+### `LiveKitRealtimeExecutor`
 
-`LiveKitExecutor` currently supports:
+`LiveKitRealtimeExecutor` currently supports:
 
 ```ts
 messageToText?: (message: TActorMessage) => string | undefined;
@@ -344,4 +344,4 @@ Do not support old `role: "ephemeral"` messages. This repo is pre-production and
 
 ## Open Follow-Up
 
-After this lands, refactor the demo camera sampler to stop writing directly into LiveKit realtime `chatCtx` and instead use `machine.setTransientFrame("camera", ...)` plus `LiveKitExecutor.messageToChatMessage`.
+After this lands, refactor the demo camera sampler to stop writing directly into LiveKit realtime `chatCtx` and instead use `machine.setTransientFrame("camera", ...)` plus `LiveKitRealtimeExecutor.messageToChatMessage`.

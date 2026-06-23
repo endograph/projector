@@ -8,9 +8,8 @@ import type {
   Frame,
   Generator,
   GeneratorId,
-  PrimaryRuntime,
+  GeneratorRuntime,
   RuntimeInstanceId,
-  WorkerRuntime,
 } from "./types.ts";
 
 export type ResolveGeneratorRuntimeId = (
@@ -116,7 +115,7 @@ export function actorMessageVisibleByActivationHistory(
   frame: Frame<any>,
   frameIndex: number,
   activationFrameIndex: number,
-  runtime: PrimaryRuntime<any> | WorkerRuntime<any>,
+  runtime: GeneratorRuntime<any>,
   activationId: string | undefined,
 ): boolean {
   return frameVisibleByActivationHistory(
@@ -132,7 +131,7 @@ export function frameVisibleByActivationHistory(
   frame: Frame<any>,
   frameIndex: number,
   activationFrameIndex: number,
-  runtime: PrimaryRuntime<any> | WorkerRuntime<any>,
+  runtime: GeneratorRuntime<any>,
   activationId: string | undefined,
 ): boolean {
   if (runtime.activationHistory !== "snapshot" || activationId === undefined) {

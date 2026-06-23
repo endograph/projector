@@ -34,7 +34,6 @@ come from the Convex frame/session log.
 
 The current durable model is frame-based:
 
-- `sessions.headFrameId`
 - `sessions.contextEpoch`
 - `sessions.familyRootSessionId`
 - `sessions.forkedFromSessionId`
@@ -51,11 +50,11 @@ machine-visible history is bounded by `contextEpoch`.
 
 Important implementation split:
 
-- `frames` records canonical actor/executor frames and advances `session.headFrameId`.
+- `frames` records canonical actor/executor frames with a best-effort `referenceFrameId`.
 - `frameIndex` records which frames are visible in each session and context epoch.
 - `messageIndex` records which messages are visible in each session.
-- `projectorInstanceLog` records the latest projector instance after a message or client command.
-- `sessions.get` reconstructs the current instance by selecting the latest instance log on the current frame path.
+- `projectorInstanceLog` records durable source instance snapshots after frame-contained instance messages.
+- `sessions.get` reconstructs the current instance by selecting the latest persisted source instance snapshot.
 
 This matters because not every UI-visible message or stream patch should become
 a projector frame. Durable projector frames should represent meaningful machine
@@ -159,7 +158,7 @@ Important behavior:
 - LiveKit data-channel text can be used while `liveMode` is false.
 - If `liveMode` is false, the agent should not create/use realtime voice behavior for the reply.
 - Text should run through the discrete AI SDK executor.
-- `LiveKitExecutor` realtime delegation is gated by both `ENABLE_REALTIME_MODEL` and projected `agentControls.liveMode`.
+- `LiveKitRealtimeExecutor` realtime delegation is gated by both `ENABLE_REALTIME_MODEL` and projected `agentControls.liveMode`.
 
 The current `handleLiveKitTextMessage` path sends text through:
 
@@ -430,8 +429,8 @@ bun run --filter @projectors/demo typecheck
 bun run --filter @projectors/demo-agent build
 bun run --filter @projectors/aisdk-executor typecheck
 bun run --filter @projectors/aisdk-executor test
-bun run --filter @projectors/livekit-executor typecheck
-bun run --filter @projectors/livekit-executor test
+bun run --filter @projectors/livekit-realtime-executor typecheck
+bun run --filter @projectors/livekit-realtime-executor test
 ```
 
 ESLint note: at one point `apps/demo` had ESLint 9 but no flat

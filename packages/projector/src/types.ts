@@ -202,33 +202,25 @@ export type TriggeredRuntimeOptions<TDataContent = never> = {
   concurrency?: RuntimeConcurrency;
   activationHistory?: ActivationHistory;
   historyProjection?: HistoryProjection<TDataContent>;
+  boundaryProjection?: BoundaryProjection<TDataContent>;
+  outputAudienceDefault?: "self" | "broadcast";
 };
 
 export type ComponentRuntime = { type: "component" };
-export type PrimaryRuntime<TDataContent = never> = {
-  type: "primary";
-  boundaryProjection: BoundaryProjection<TDataContent>;
-} & TriggeredRuntimeOptions<TDataContent>;
-export type WorkerRuntime<TDataContent = never> = {
-  type: "worker";
+export type GeneratorRuntime<TDataContent = never> = {
+  type: "generator";
   boundaryProjection: BoundaryProjection<TDataContent>;
 } & TriggeredRuntimeOptions<TDataContent>;
 
 export type Runtime<TDataContent = never> =
   | { type?: "component" }
   | ({
-      type: "primary";
-      boundaryProjection?: BoundaryProjection<TDataContent>;
-    } & TriggeredRuntimeOptions<TDataContent>)
-  | ({
-      type: "worker";
-      boundaryProjection?: BoundaryProjection<TDataContent>;
+      type?: "generator";
     } & TriggeredRuntimeOptions<TDataContent>);
 
 export type NormalizedRuntime<TDataContent = never> =
   | ComponentRuntime
-  | PrimaryRuntime<TDataContent>
-  | WorkerRuntime<TDataContent>;
+  | GeneratorRuntime<TDataContent>;
 
 type DryTriggeredRuntimeOptions = Omit<
   TriggeredRuntimeOptions,
@@ -245,12 +237,9 @@ export type DryHistoryProjection = ActorHistoryProjection | MessageHistoryProjec
 export type DryRuntime =
   | { type?: "component" }
   | ({
-      type: "primary";
+      type: "generator";
       boundaryProjection?: DryBoundaryProjection;
-    } & DryTriggeredRuntimeOptions)
-  | ({
-      type: "worker";
-      boundaryProjection?: DryBoundaryProjection;
+      outputAudienceDefault?: "self" | "broadcast";
     } & DryTriggeredRuntimeOptions);
 
 export type StateProjection = "system" | "dynamic" | "retrieval" | "hidden";
@@ -259,13 +248,13 @@ export type StateDescriptor<S = unknown> = {
   key: string;
   schema: z.ZodType<S>;
   init?: S | (() => S);
-  scope?: "top" | "local";
+  scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
   projection?: StateProjection;
 };
 
 export type NormalizedStateDescriptor<S = unknown> = StateDescriptor<S> & {
-  scope: "top" | "local";
+  scope: "hoist" | "local";
   onInitConflict: "error" | "replace";
   projection: StateProjection;
 };
@@ -374,7 +363,6 @@ export type NodeConfig<TDataContent = never> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless?: boolean;
   tools?: ActionConfigEntry[];
   commands?: ActionConfigEntry[];
   state?: StateDescriptor;
@@ -389,7 +377,6 @@ export type Node<TDataContent = never> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless: boolean;
   toolBindings: ActionBindings;
   toolRefs: ActionRef[];
   commandBindings: ActionBindings;
@@ -402,8 +389,9 @@ export type Node<TDataContent = never> = {
 };
 
 export type Instance<TDataContent = never> = {
-  id: string;
+  id: InstanceId;
   node: Node<TDataContent>;
+  isSource?: boolean;
   states?: Record<string, StateContainer>;
   children?: Instance<TDataContent>[];
 };
@@ -489,6 +477,10 @@ export type CommandMessage = {
   target?: RuntimeAddress;
   clientId?: string;
 };
+
+export type ExecuteCommandResult<T = unknown> =
+  | { success: true; value?: T; clientId?: string }
+  | { success: false; error: string; clientId?: string };
 
 export type FrameMessage<TDataContent = never> = (
   | ActorMessage<TDataContent>
@@ -602,7 +594,7 @@ export type RuntimeAddress =
   | { type: "instance"; instanceId: string }
   | { type: "member"; ownerInstanceId: string; memberPath: string[] };
 
-export type GeneratorKind = "primary" | "worker";
+export type GeneratorKind = "generator";
 
 export type Generator = {
   id: GeneratorId;
@@ -612,7 +604,7 @@ export type Generator = {
 
 export type SerializedStateDescriptor = {
   key: string;
-  scope?: "top" | "local";
+  scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
   projection?: StateProjection;
   init?: unknown;
@@ -626,7 +618,6 @@ export type DryNode<TDataContent = never> = {
   sourceNodeKey?: string;
   name?: string;
   instructions?: string;
-  stateless?: boolean;
   tools?: DryAction[];
   commands?: DryAction[];
   state?: SerializedStateDescriptor | Ref;
@@ -639,6 +630,7 @@ export type DryNode<TDataContent = never> = {
 export type SerializedInstance<TDataContent = never> = {
   id: InstanceId;
   node: DryNode<TDataContent> | Ref;
+  isSource?: boolean;
   states?: Record<StateKey, StateContainer>;
   children?: SerializedInstance<TDataContent>[];
 };

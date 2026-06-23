@@ -5,11 +5,11 @@ import {
   applyStaticProjection,
   createAction,
   createCharter,
-  createCommand,
   createHistoryProjectionFunction,
   createNode,
   createProjectionFunction,
   createRoot,
+  createSourceInstance,
   hydrateInstance,
   inspectCompiledProjectionTree,
   imageContent,
@@ -17,8 +17,8 @@ import {
   messagesSinceLastCompletion,
   patchState,
   resolveStates,
-  replaceState,
   serializeInstance,
+  textAssistantMessage,
   textContent,
   type CompiledProjectionTree,
   type Charter,
@@ -35,9 +35,7 @@ import {
 } from "@projectors/core/client";
 
 const demoStateSchema = z.object({
-  name: z.string().optional(),
   themeHue: z.number(),
-  favorites: z.array(z.string()),
   turns: z.number(),
 });
 
@@ -97,7 +95,6 @@ const demoState = {
   schema: demoStateSchema,
   init: {
     themeHue: 126,
-    favorites: [],
     turns: 0,
   } satisfies DemoState,
   projection: "dynamic" as const,
@@ -123,7 +120,7 @@ const memoriesState = {
   projection: "dynamic" as const,
 };
 
-export const setVoiceEnabled = createCommand({
+export const setVoiceEnabled = createAction({
   state: agentControlsState,
   name: "setVoiceEnabled",
   description: "Toggle voice mode for the demo session.",
@@ -161,20 +158,22 @@ export const cameraSensorNode = createNode({
   key: "cameraSensor",
   name: "CameraSensorNode",
   instructions:
-    "The user's camera is enabled. Use the latest camera snapshot only when relevant.",
+    "The user's camera is enabled. Use the latest camera snapshot only when relevant. When asked about the camera, answer directly from the currently available snapshot. Do not say you will check or look later; if no usable snapshot is available, say you cannot see the current camera view.",
   projection: projectCameraSensorData,
 });
 
-export const setCameraEnabled = createCommand({
+export const setCameraEnabled = createAction({
   state: agentControlsState,
   name: "setCameraEnabled",
   description: "Toggle camera sampling in live mode.",
   inputSchema: z.object({ enabled: z.boolean() }),
   run: ({ enabled }, ctx) => {
     const state = agentControlsStateSchema.parse(ctx.state);
-    ctx.updateState?.(patchState({ cameraEnabled: enabled }));
-    if (state.cameraEnabled === enabled) return;
+    if (state.cameraEnabled !== enabled) {
+      ctx.updateState?.(patchState({ cameraEnabled: enabled }));
+    }
     if (enabled) {
+      ctx.instance.cede(cameraSensorNode);
       ctx.instance.spawn(cameraSensorNode);
     } else {
       ctx.instance.cede(cameraSensorNode);
@@ -182,16 +181,18 @@ export const setCameraEnabled = createCommand({
   },
 });
 
-export const setMemoryEnabled = createCommand({
+export const setMemoryEnabled = createAction({
   state: agentControlsState,
   name: "setMemoryEnabled",
   description: "Toggle durable memory extraction for the demo session.",
   inputSchema: z.object({ enabled: z.boolean() }),
   run: ({ enabled }, ctx) => {
     const state = agentControlsStateSchema.parse(ctx.state);
-    ctx.updateState?.(patchState({ memoryEnabled: enabled }));
-    if (state.memoryEnabled === enabled) return;
+    if (state.memoryEnabled !== enabled) {
+      ctx.updateState?.(patchState({ memoryEnabled: enabled }));
+    }
     if (enabled) {
+      ctx.instance.cede(memoryMemberNode);
       ctx.instance.spawn(memoryMemberNode);
     } else {
       ctx.instance.cede(memoryMemberNode);
@@ -199,7 +200,7 @@ export const setMemoryEnabled = createCommand({
   },
 });
 
-export const setStreamingEnabled = createCommand({
+export const setStreamingEnabled = createAction({
   state: agentControlsState,
   name: "setStreamingEnabled",
   description: "Toggle streaming-style assistant output.",
@@ -209,7 +210,7 @@ export const setStreamingEnabled = createCommand({
   },
 });
 
-export const incrementTestCounter = createCommand({
+export const incrementTestCounter = createAction({
   state: agentControlsState,
   name: "incrementTestCounter",
   description: "Increment the agent controls test counter.",
@@ -220,7 +221,7 @@ export const incrementTestCounter = createCommand({
   },
 });
 
-export const setThemeHue = createCommand({
+export const setThemeHue = createAction({
   state: demoState,
   name: "setThemeHue",
   description: "Change the terminal accent hue.",
@@ -233,41 +234,17 @@ export const setThemeHue = createCommand({
 export const pingTool = createAction({
   state: null,
   name: "ping",
-  description: "A projected provider tool placeholder.",
-  inputSchema: z.object({ text: z.string().optional() }),
+  description: "Respond with pong.",
+  inputSchema: z.object({}),
+  run: () => pongAssistantMessage(),
 });
 
-export const updateDemoState = createAction({
-  state: demoState,
-  name: "updateDemoState",
-  description:
-    "Update durable demo state when the user shares a name or favorite.",
-  inputSchema: z.object({
-    name: z.string().min(1).optional(),
-    favorite: z
-      .object({
-        kind: z.string().min(1),
-        value: z.string().min(1),
-      })
-      .optional(),
-  }),
-  run: ({ name, favorite }, ctx) => {
-    const state = demoStateSchema.parse(ctx.state);
-    const next: DemoState = { ...state };
-
-    if (name) {
-      next.name = capitalize(name.trim());
-    }
-    if (favorite) {
-      next.favorites = [
-        ...next.favorites,
-        `${favorite.kind.trim().toLowerCase()}: ${favorite.value.trim().replace(/[.!?]+$/, "")}`,
-      ].slice(-6);
-    }
-
-    ctx.updateState?.(replaceState(next));
-    return "Demo state updated.";
-  },
+export const pingCommand = createAction({
+  state: null,
+  name: "ping",
+  description: "Respond with pong.",
+  inputSchema: z.object({}),
+  run: () => pongAssistantMessage(),
 });
 
 export const saveMemories = createAction({
@@ -339,11 +316,12 @@ export const memoryMemberNode = createNode({
   tools: [saveMemories],
   projection: { mode: "replace" },
   runtime: {
-    type: "worker",
+    type: "generator",
     trigger: { type: "parent-completion" },
     concurrency: "serial",
     activationHistory: "snapshot",
     historyProjection: "memory",
+    outputAudienceDefault: "self",
   },
 });
 
@@ -351,7 +329,7 @@ export const agentControlsMemberNode = createNode({
   key: "agentControls",
   name: "Agent Controls",
   instructions:
-    "Expose client commands for voice, camera, streaming, and theme controls.",
+    "Expose client commands for voice, camera, streaming, memory, and test controls.",
   state: agentControlsState,
   commands: [
     setVoiceEnabled,
@@ -367,10 +345,10 @@ export const demoBaseNode = createNode({
   key: "demoBase",
   name: "Projector Demo Agent",
   instructions:
-    "You are a compact demo assistant. Be direct, remember small facts, and explain what changed in state. Call updateDemoState when the user shares their name or a favorite.",
+    "You are a compact demo assistant. Be direct, remember small facts, and explain what changed in state.",
   state: demoState,
-  tools: [pingTool, updateDemoState],
-  commands: [setThemeHue],
+  tools: [pingTool],
+  commands: [pingCommand, setThemeHue],
   members: [agentControlsMemberNode],
   projection: {
     mode: "augment",
@@ -400,8 +378,9 @@ export function createDemoCharter(
       agentControlsMemberNode,
       cameraSensorNode,
     ],
-    tools: [pingTool, updateDemoState, saveMemories],
+    tools: [pingTool, saveMemories],
     commands: [
+      pingCommand,
       setVoiceEnabled,
       setCameraEnabled,
       setMemoryEnabled,
@@ -419,36 +398,62 @@ export function createDemoCharter(
   });
 }
 
-export function createInitialDemoInstance(): Instance {
-  const demoBase: Instance = {
+export function createInitialDemoSourceInstance(): Instance {
+  const demoBase = createSourceInstance({
     id: `demo-${crypto.randomUUID()}`,
     node: demoBaseNode,
-  };
-  const root = createRoot([demoBase]);
+  });
+  resolveStates(demoBase);
+  return demoBase;
+}
+
+export function createDemoMachineRoot(source: Instance): Instance {
+  reconcileAgentControlMembers(source);
+  const root = createRoot([source]);
   resolveStates(root);
   return root;
 }
 
-export function createInitialSerializedInstance(): SerializedInstance {
-  return serializeDemoInstance(createInitialDemoInstance());
+export function createInitialDemoMachineRoot(): Instance {
+  return createDemoMachineRoot(createInitialDemoSourceInstance());
 }
 
-export function hydrateDemoInstance(serialized: SerializedInstance): Instance {
+export function createInitialDemoInstance(): Instance {
+  return createInitialDemoMachineRoot();
+}
+
+export function createInitialSerializedInstance(): SerializedInstance {
+  return serializeDemoSourceInstance(createInitialDemoSourceInstance());
+}
+
+export function hydrateDemoSourceInstance(serialized: SerializedInstance): Instance {
   const instance = hydrateInstance(serialized, createDemoCharter());
   resolveStates(instance);
   return instance;
 }
 
-export function serializeDemoInstance(instance: Instance): SerializedInstance {
+export function serializeDemoSourceInstance(instance: Instance): SerializedInstance {
   resolveStates(instance);
   return serializeInstance(instance, createDemoCharter());
+}
+
+export function hydrateDemoInstance(serialized: SerializedInstance): Instance {
+  return createDemoMachineRoot(hydrateDemoSourceInstance(serialized));
+}
+
+export function serializeDemoInstance(instance: Instance): SerializedInstance {
+  const source = findDemoSourceInstance(instance);
+  if (!source) {
+    throw new Error("Demo instance tree has no source instance");
+  }
+  return serializeDemoSourceInstance(source);
 }
 
 export function getDemoRootGenerator(_instance: Instance): Generator {
   const runtimeInstanceId = ROOT_RUNTIME_INSTANCE_ID;
   return {
     id: runtimeInstanceId,
-    kind: "primary",
+    kind: "generator",
     runtimeInstanceId,
   };
 }
@@ -464,6 +469,44 @@ export function createDemoClientSnapshot(
       charter: createDemoCharter(),
     }),
   };
+}
+
+function findDemoSourceInstance(instance: Instance): Instance | undefined {
+  if (instance.isSource) {
+    return instance;
+  }
+  for (const child of instance.children ?? []) {
+    const source = findDemoSourceInstance(child);
+    if (source) {
+      return source;
+    }
+  }
+  return undefined;
+}
+
+function reconcileAgentControlMembers(instance: Instance): void {
+  const controls = agentControlsStateSchema.safeParse(
+    readResolvedState(instance, "agentControls"),
+  );
+  if (!controls.success) return;
+
+  reconcileOptionalMember(instance, cameraSensorNode, controls.data.cameraEnabled);
+  reconcileOptionalMember(instance, memoryMemberNode, controls.data.memoryEnabled);
+  resolveStates(instance);
+}
+
+function reconcileOptionalMember(
+  instance: Instance,
+  node: typeof cameraSensorNode | typeof memoryMemberNode,
+  enabled: boolean,
+): void {
+  const existingChildren = instance.children ?? [];
+  const matchingChild = existingChildren.find((child) => child.node.key === node.key);
+  const children = existingChildren.filter((child) => child.node.key !== node.key);
+  if (enabled) {
+    children.push(matchingChild ?? { id: `${node.key}-${crypto.randomUUID()}`, node });
+  }
+  instance.children = children.length > 0 ? children : undefined;
 }
 
 export function getDemoState(instance: Instance): DemoState {
@@ -523,6 +566,10 @@ function writeResolvedState(
     throw new Error(`Unknown demo state "${key}"`);
   }
   state.container.value = value;
+}
+
+function pongAssistantMessage() {
+  return textAssistantMessage("pong");
 }
 
 function newMemories(
@@ -605,8 +652,4 @@ function stringifyValue(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function capitalize(value: string): string {
-  return value.slice(0, 1).toUpperCase() + value.slice(1).toLowerCase();
 }

@@ -8,24 +8,25 @@ import {
 import { ParticipantKind, RoomEvent, type RemoteParticipant } from "@livekit/rtc-node";
 import { openai as aiSdkOpenAI } from "@ai-sdk/openai";
 import * as openai from "@livekit/agents-plugin-openai";
-import { LiveKitExecutor } from "@projectors/livekit-executor";
-import type { LiveKitAgentLike, LiveKitRoomLike, LiveKitSessionLike } from "@projectors/livekit-executor";
+import { LiveKitRealtimeExecutor } from "@projectors/livekit-realtime-executor";
+import type { LiveKitAgentLike, LiveKitRoomLike, LiveKitSessionLike } from "@projectors/livekit-realtime-executor";
 import { AiSdkExecutor } from "@projectors/aisdk-executor";
 import { ConvexClient } from "convex/browser";
 import { fileURLToPath } from "node:url";
 import {
   ROOT_RUNTIME_INSTANCE_ID,
   createMachine,
+  executeCommand,
   runMachine,
   type Executor,
   type Frame,
   syncMachineRuntime,
 } from "@projectors/core";
+import type { ClientMachineMessage } from "@projectors/core/client";
 import {
   createDemoCharter,
   getAgentControlsState,
   hydrateDemoInstance,
-  serializeDemoInstance,
   type CameraSensorImage,
   type DemoMessage,
 } from "./projector-demo.js";
@@ -51,6 +52,7 @@ const REALTIME_INPUT_NOISE_REDUCTION = readRealtimeNoiseReductionEnv(
   "near_field",
 );
 const MESSAGE_TOPIC = "demo.message.v1";
+const COMMAND_RPC_METHOD = "demo.command.v1";
 const WORKER_LEASE_TTL_MS = 15_000;
 const WORKER_LEASE_HEARTBEAT_MS = 5_000;
 const DEBUG_REALTIME_EVENTS = process.env.DEBUG_REALTIME_EVENTS === "true";
@@ -60,9 +62,8 @@ type Id<TableName extends string> = string & { __tableName: TableName };
 
 type AgentInit = {
   sessionId: Id<"sessions">;
-  headFrameId: Id<"frames">;
+  frameId: Id<"frames">;
   instance: SerializedInstance;
-  instanceFrameId?: Id<"frames">;
   messages: DemoMessage[];
 } | null;
 
@@ -70,12 +71,6 @@ type AgentWorkerRoomLeaseSnapshot = {
   roomName: string;
   agentWorkerLeaseToken?: string;
 } | null;
-
-type StaleHeadErrorData = {
-  code: "stale_head";
-  expectedHeadFrameId?: Id<"frames">;
-  headFrameId?: Id<"frames">;
-};
 
 type RealtimeModelOptions = ConstructorParameters<typeof openai.realtime.RealtimeModel>[0] & {
   maxResponseOutputTokens?: number | "inf";
@@ -106,8 +101,10 @@ export default defineAgent({
     const workerId = `demo-agent:${process.pid}:${crypto.randomUUID()}`;
     const leaseToken = crypto.randomUUID();
     let leaseActive = false;
+    let stoppingForLostLease = false;
     let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
     let leaseSubscription: { unsubscribe: () => void } | undefined;
+    let activeSession: voice.AgentSession | undefined;
     let latestCameraImage: CameraSensorImage | undefined;
     let cameraSampler: CameraSamplerHandle | undefined;
     const cameraSensor = {
@@ -142,10 +139,16 @@ export default defineAgent({
     };
 
     const stopForLostLease = async () => {
-      if (!leaseActive) return;
+      if (stoppingForLostLease) return;
+      stoppingForLostLease = true;
       console.warn(`[demo-agent] worker lease lost for room ${roomName}; disconnecting`);
       releaseLease();
-      await ctx.room.disconnect();
+      await Promise.allSettled([
+        activeSession?.close(),
+        stopCameraSampler(),
+        ctx.room.disconnect(),
+      ]);
+      setTimeout(() => process.exit(0), 250).unref();
     };
 
     const renewLease = async (): Promise<boolean> => {
@@ -212,8 +215,7 @@ export default defineAgent({
       console.log(`[demo-agent] loaded session ${init.sessionId} with ${init.messages.length} messages`);
 
       let root = hydrateDemoInstance(init.instance);
-      let rootInstanceFrameId = init.instanceFrameId;
-      let durableHeadFrameId = init.headFrameId;
+      let referenceFrameId = init.frameId;
       const contextFrames = (await convex.query(api.sessions.listMachineContextFrames, {
         sessionId: init.sessionId,
       })) as Frame[];
@@ -239,13 +241,19 @@ export default defineAgent({
         role: "user" | "assistant",
         mode: "text" | "voice",
         update: {
+          request?: {
+            runtimeInstanceId?: string;
+            output?: { audience?: unknown };
+          };
           messageId: string;
           text: string;
           streamState: "streaming" | "complete" | "error";
           streamSeq: number;
         },
       ) => {
+        if (!leaseActive) return;
         if (!shouldStreamText()) return;
+        if (role === "assistant" && !shouldPersistAssistantStreamingUpdate(update)) return;
         return addDemoMessage({
           role,
           content: update.text,
@@ -281,8 +289,9 @@ export default defineAgent({
             : agentDiscreteExecutor.realizePrompt(request),
       };
       const session = createVoiceSession();
+      activeSession = session;
       const agent = new DemoVoiceAgent();
-      const liveKitExecutor = new LiveKitExecutor({
+      const liveKitExecutor = new LiveKitRealtimeExecutor({
         session: session as unknown as LiveKitSessionLike,
         agent: agent as unknown as LiveKitAgentLike,
         room: ctx.room as unknown as LiveKitRoomLike,
@@ -336,7 +345,11 @@ export default defineAgent({
             });
           }
 
-          if (message.type === "assistant" && (text.trim() || hasMessageId(message))) {
+          if (
+            message.type === "assistant" &&
+            shouldPersistAssistantMessage(frame, message) &&
+            (text.trim() || hasMessageId(message))
+          ) {
             const streamState = normalizeStreamState(message.streamState);
             await addDemoMessage({
               role: "assistant",
@@ -358,8 +371,7 @@ export default defineAgent({
         }
 
         root = hydrateDemoInstance(refreshed.instance);
-        rootInstanceFrameId = refreshed.instanceFrameId;
-        durableHeadFrameId = refreshed.headFrameId;
+        referenceFrameId = refreshed.frameId;
         const refreshedFrames = (await convex.query(api.sessions.listMachineContextFrames, {
           sessionId: init.sessionId,
         })) as Frame[];
@@ -380,62 +392,28 @@ export default defineAgent({
         try {
           frameId = await convex.mutation(api.sessions.appendMachineFrame, {
             sessionId: init.sessionId,
-            expectedHeadFrameId: durableHeadFrameId,
+            referenceFrameId,
             frame,
           });
         } catch (error) {
-          if (!isStaleHeadError(error)) {
-            throw error;
-          }
-          await refreshDurableMachineState("stale head");
+          await refreshDurableMachineState("append failure");
           return undefined;
         }
-        durableHeadFrameId = frameId;
+        referenceFrameId = frameId;
         await persistFrameMessages(frame, frameId);
         return frameId;
-      };
-
-      const commitMachineInstance = async (frameId: Id<"frames"> | undefined) => {
-        await assertLease();
-        const result = await convex.mutation(api.sessions.commitMachineInstance, {
-          sessionId: init.sessionId,
-          frameId,
-          ...(rootInstanceFrameId ? { expectedInstanceFrameId: rootInstanceFrameId } : {}),
-          message: { type: "machine.run", trigger: "livekit-host" },
-          instance: serializeDemoInstance(root),
-        }) as {
-          committed?: boolean;
-          headFrameId?: Id<"frames">;
-          instance?: SerializedInstance;
-          instanceFrameId?: Id<"frames">;
-        };
-
-        if (result.committed === false && result.instance) {
-          root = hydrateDemoInstance(result.instance);
-          machine.root = root;
-          durableHeadFrameId = result.headFrameId ?? durableHeadFrameId;
-          rootInstanceFrameId = result.instanceFrameId;
-          machine.frames = (await convex.query(api.sessions.listMachineContextFrames, {
-            sessionId: init.sessionId,
-          })) as Frame[];
-          console.warn("[demo-agent] skipped stale instance commit and refreshed durable session state");
-          return;
-        }
-
-        durableHeadFrameId = result.headFrameId ?? durableHeadFrameId;
-        rootInstanceFrameId = result.instanceFrameId ?? frameId ?? rootInstanceFrameId;
       };
 
       const runMachineHost = async () => {
         for await (const frame of runMachine(machine)) {
           const frameId = await persistMachineFrame(frame);
           if (!frameId) return;
-          await commitMachineInstance(frameId);
           if (!frame.inert) {
             await syncMachineRuntime(machine, {
               runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
               visibleFrames: [frame],
             });
+            applyRoomIoParticipant();
           }
         }
       };
@@ -457,10 +435,39 @@ export default defineAgent({
       };
       unsubscribeMachine = machine.subscribe(scheduleMachineHost);
 
-      let selectedVoiceParticipantIdentity = selectVoiceParticipantIdentity(ctx.room.remoteParticipants.values());
+      let commandTail: Promise<void> = Promise.resolve();
+      ctx.room.localParticipant?.registerRpcMethod(COMMAND_RPC_METHOD, async (data) => {
+        const runCommand = commandTail
+          .catch(() => undefined)
+          .then(async () => {
+            await assertLease();
+            const payload = parseCommandRpcPayload(data.payload);
+            if (payload.sessionId !== init.sessionId) {
+              return {
+                success: false,
+                error: "Command session does not match LiveKit worker session",
+                clientId: payload.message.clientId,
+              };
+            }
+
+            const result = await executeCommand(machine, payload.message);
+            await hostTail;
+            return result;
+          });
+        commandTail = runCommand.then(() => undefined, () => undefined);
+        return JSON.stringify(await runCommand);
+      });
+      ctx.room.once(RoomEvent.Disconnected, () => {
+        ctx.room.localParticipant?.unregisterRpcMethod(COMMAND_RPC_METHOD);
+      });
+
+      let selectedVoiceParticipantIdentity = selectVoiceParticipantIdentity(
+        ctx.room.remoteParticipants.values(),
+        init.sessionId,
+      );
       let appliedRoomIoParticipantIdentity: string | null | undefined;
-      const setRoomIoParticipant = (identity: string | null) => {
-        selectedVoiceParticipantIdentity = identity;
+      const applyRoomIoParticipant = () => {
+        const identity = selectedVoiceParticipantIdentity;
         const roomIO = (session as unknown as { roomIO?: { setParticipant?: (participantIdentity: string | null) => void } }).roomIO;
         if (!roomIO?.setParticipant) return;
         if (appliedRoomIoParticipantIdentity === identity) return;
@@ -469,17 +476,24 @@ export default defineAgent({
         roomIO.setParticipant(identity);
         console.log(`[demo-agent] voice participant ${identity ?? "<auto>"}`);
       };
+      const setSelectedVoiceParticipant = (identity: string | null) => {
+        selectedVoiceParticipantIdentity = identity;
+        applyRoomIoParticipant();
+      };
 
       // RoomIO must observe participant events before we call its private setParticipant;
       // otherwise its init task can wait forever and never publish the output audio track.
       const deferRoomIoParticipantSync = () => {
         queueMicrotask(() => {
-          setRoomIoParticipant(selectVoiceParticipantIdentity(ctx.room.remoteParticipants.values()));
+          setSelectedVoiceParticipant(selectVoiceParticipantIdentity(
+            ctx.room.remoteParticipants.values(),
+            init.sessionId,
+          ));
         });
       };
 
       const handleParticipantConnected = (participant: RemoteParticipant) => {
-        if (!isVoiceParticipant(participant)) return;
+        if (!isVoiceParticipant(participant, init.sessionId)) return;
         deferRoomIoParticipantSync();
       };
       const handleParticipantDisconnected = (participant: RemoteParticipant) => {
@@ -498,10 +512,12 @@ export default defineAgent({
       ctx.room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
       ctx.room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
 
-      await syncMachineRuntime(machine, {
-        runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
-        visibleFrames: [],
-      });
+      if (!shouldUseRealtime()) {
+        await syncMachineRuntime(machine, {
+          runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+          visibleFrames: [],
+        });
+      }
 
       session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
         console.log(`[demo-agent] state ${event.oldState} -> ${event.newState}`);
@@ -509,6 +525,9 @@ export default defineAgent({
       session.on(voice.AgentSessionEventTypes.SpeechCreated, (event) => {
         const speechId = readSpeechHandleId(event);
         console.log(`[demo-agent] speech created ${speechId ?? "<unknown>"} source=${event.source}`);
+      });
+      session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (event) => {
+        console.log(`[demo-agent] function tools executed ${summarizeLiveKitFunctionToolsExecuted(event)}`);
       });
       session.on(voice.AgentSessionEventTypes.Error, (event) => {
         console.error("[demo-agent] LiveKit session error", event.error);
@@ -523,7 +542,7 @@ export default defineAgent({
           ...(selectedVoiceParticipantIdentity ? { participantIdentity: selectedVoiceParticipantIdentity } : {}),
         },
       });
-      setRoomIoParticipant(selectedVoiceParticipantIdentity);
+      applyRoomIoParticipant();
       if (DEBUG_REALTIME_EVENTS) {
         attachRealtimeDebugLogging(agent);
       }
@@ -594,26 +613,6 @@ function createVoiceSession(): voice.AgentSession {
   });
 }
 
-function isStaleHeadError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const data = (error as { data?: unknown }).data;
-  if (isStaleHeadErrorData(data)) {
-    return true;
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("stale_head");
-}
-
-function isStaleHeadErrorData(data: unknown): data is StaleHeadErrorData {
-  return (
-    !!data &&
-    typeof data === "object" &&
-    (data as { code?: unknown }).code === "stale_head"
-  );
-}
-
 function readNumberEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined || value.trim() === "") {
@@ -678,22 +677,55 @@ function readRealtimeNoiseReductionEnv(
   throw new Error(`${name} must be near_field, far_field, off, none, or false`);
 }
 
-function selectVoiceParticipantIdentity(participants: Iterable<RemoteParticipant>): string | null {
-  let selected: string | null = null;
+function selectVoiceParticipantIdentity(participants: Iterable<RemoteParticipant>, sessionId: string): string | null {
+  let selected: { identity: string; joinedAtMs: bigint; priority: number } | undefined;
   for (const participant of participants) {
-    if (isVoiceParticipant(participant)) {
-      selected = participant.identity;
+    const priority = voiceParticipantPriority(participant, sessionId);
+    if (priority === 0) continue;
+    const joinedAtMs = participantJoinedAtMs(participant);
+    if (!selected || priority > selected.priority || (priority === selected.priority && joinedAtMs >= selected.joinedAtMs)) {
+      selected = { identity: participant.identity, joinedAtMs, priority };
     }
   }
-  return selected;
+  return selected?.identity ?? null;
 }
 
-function isVoiceParticipant(participant: RemoteParticipant): boolean {
-  return participant.kind === ParticipantKind.STANDARD;
+function isVoiceParticipant(participant: RemoteParticipant, sessionId: string): boolean {
+  return voiceParticipantPriority(participant, sessionId) > 0;
+}
+
+function voiceParticipantPriority(participant: RemoteParticipant, sessionId: string): number {
+  if (participant.kind !== ParticipantKind.STANDARD) return 0;
+  const stableIdentity = `user-${sessionId}`;
+  if (participant.identity === stableIdentity) return 3;
+  if (participant.identity.startsWith(`${stableIdentity}-`)) return 2;
+  return 0;
+}
+
+function participantJoinedAtMs(participant: RemoteParticipant): bigint {
+  const info = (participant as RemoteParticipant & { info?: { joinedAtMs?: bigint; joinedAt?: bigint } }).info;
+  if (info?.joinedAtMs && info.joinedAtMs > 0n) return info.joinedAtMs;
+  if (info?.joinedAt && info.joinedAt > 0n) return info.joinedAt * 1000n;
+  return 0n;
 }
 
 function frameMessageMode(frame: Frame): "text" | "voice" {
   return frame.metadata?.mode === "voice" ? "voice" : "text";
+}
+
+function shouldPersistAssistantMessage(frame: Frame, message: Frame["messages"][number]): boolean {
+  if (message.audience === "self") return false;
+  return frame.runtimeInstanceId === ROOT_RUNTIME_INSTANCE_ID;
+}
+
+function shouldPersistAssistantStreamingUpdate(update: {
+  request?: {
+    runtimeInstanceId?: string;
+    output?: { audience?: unknown };
+  };
+}): boolean {
+  if (update.request?.output?.audience === "self") return false;
+  return !update.request?.runtimeInstanceId || update.request.runtimeInstanceId === ROOT_RUNTIME_INSTANCE_ID;
 }
 
 function idempotencyKey(prefix: string, source: unknown): string {
@@ -776,6 +808,26 @@ function attachRealtimeDebugLogging(agent: DemoVoiceAgent): void {
   });
 }
 
+function summarizeLiveKitFunctionToolsExecuted(event: unknown): string {
+  const record = asRecord(event);
+  const calls = Array.isArray(record.functionCalls) ? record.functionCalls : [];
+  const outputs = Array.isArray(record.functionCallOutputs) ? record.functionCallOutputs : [];
+  const callSummary = calls
+    .map((call) => {
+      const item = asRecord(call);
+      return `${String(item.name ?? "<name>")}:${String(item.callId ?? "<call>")}`;
+    })
+    .join(",");
+  const outputSummary = outputs
+    .map((output) => {
+      const item = asRecord(output);
+      const text = typeof item.output === "string" ? item.output : "";
+      return `${String(item.callId ?? "<call>")}:error=${String(item.isError ?? false)}:chars=${text.length}`;
+    })
+    .join(",");
+  return `calls=${calls.length}${callSummary ? `[${callSummary}]` : ""} outputs=${outputs.length}${outputSummary ? `[${outputSummary}]` : ""}`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
@@ -786,7 +838,8 @@ function summarizeRealtimeClientEvent(event: unknown): string | undefined {
   if (!type) return undefined;
   if (type === "session.update") {
     const session = asRecord(record.session);
-    return `${type} max_output_tokens=${String(session.max_output_tokens ?? session.max_response_output_tokens ?? "<unset>")} interrupt_response=${readNestedValue(session, ["audio", "input", "turn_detection", "interrupt_response"])}`;
+    const createResponse = readNestedValue(session, ["audio", "input", "turn_detection", "create_response"]);
+    return `${type} max_output_tokens=${String(session.max_output_tokens ?? session.max_response_output_tokens ?? "<unset>")} create_response=${createResponse === "<unset>" ? "default_true" : createResponse} interrupt_response=${readNestedValue(session, ["audio", "input", "turn_detection", "interrupt_response"])}`;
   }
   if (
     type === "response.cancel" ||
@@ -816,10 +869,21 @@ function summarizeRealtimeServerEvent(event: unknown): string | undefined {
     type === "response.output_audio_transcript.done" ||
     type === "response.audio.done" ||
     type === "response.output_audio.done" ||
-    type === "response.output_item.done" ||
     type === "error"
   ) {
     return `${type} ${formatRecordSummary(record, ["item_id", "response_id", "audio_end_ms", "error"])}`;
+  }
+
+  if (type === "conversation.item.added" || type === "conversation.item.created") {
+    return `${type} item=${summarizeRealtimeItem(record.item)}`;
+  }
+
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    return `${type} response_id=${String(record.response_id ?? "<none>")} item=${summarizeRealtimeItem(record.item)}`;
+  }
+
+  if (type === "response.function_call_arguments.done") {
+    return `${type} response_id=${String(record.response_id ?? "<none>")} item_id=${String(record.item_id ?? "<none>")} call_id=${String(record.call_id ?? "<none>")} name=${String(record.name ?? "<none>")} args_chars=${typeof record.arguments === "string" ? record.arguments.length : 0}`;
   }
 
   if (
@@ -854,6 +918,32 @@ function summarizeRealtimeOutput(output: unknown): string {
       return `${String(record.type ?? "<type>")}:${String(record.role ?? record.name ?? "<role>")}:chars=${chars}`;
     })
     .join(",");
+}
+
+function summarizeRealtimeItem(item: unknown): string {
+  const record = asRecord(item);
+  const type = typeof record.type === "string" ? record.type : "<type>";
+  if (type === "function_call") {
+    return `${type}:${String(record.name ?? "<name>")}:call_id=${String(record.call_id ?? "<none>")}:args_chars=${typeof record.arguments === "string" ? record.arguments.length : 0}`;
+  }
+  if (type === "function_call_output") {
+    return `${type}:call_id=${String(record.call_id ?? "<none>")}:output_chars=${typeof record.output === "string" ? record.output.length : 0}`;
+  }
+  if (type === "message") {
+    const content = Array.isArray(record.content) ? record.content : [];
+    const chars = content.reduce((sum, part) => {
+      const partRecord = asRecord(part);
+      const text =
+        typeof partRecord.text === "string"
+          ? partRecord.text
+          : typeof partRecord.transcript === "string"
+            ? partRecord.transcript
+            : "";
+      return sum + text.length;
+    }, 0);
+    return `${type}:${String(record.role ?? "<role>")}:chars=${chars}`;
+  }
+  return type;
 }
 
 function formatRecordSummary(record: Record<string, unknown>, keys: string[]): string {
@@ -893,6 +983,30 @@ function parseLiveKitTextMessage(payload: Uint8Array): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseCommandRpcPayload(payload: string): {
+  sessionId: string;
+  message: ClientMachineMessage;
+} {
+  const parsed = JSON.parse(payload) as {
+    sessionId?: unknown;
+    message?: unknown;
+  };
+  if (typeof parsed.sessionId !== "string") {
+    throw new Error("Command RPC payload is missing sessionId");
+  }
+  if (!parsed.message || typeof parsed.message !== "object") {
+    throw new Error("Command RPC payload is missing message");
+  }
+  const message = parsed.message as Partial<ClientMachineMessage>;
+  if (message.type !== "command" || typeof message.name !== "string") {
+    throw new Error("Command RPC message must be a command");
+  }
+  return {
+    sessionId: parsed.sessionId,
+    message: parsed.message as ClientMachineMessage,
+  };
 }
 
 if (import.meta.main) {

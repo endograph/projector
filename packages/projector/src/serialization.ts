@@ -46,6 +46,7 @@ export function serializeInstance<TDataContent>(
   return {
     id: instance.id,
     node: serializeNode(instance.node, charter),
+    ...(instance.isSource ? { isSource: true } : {}),
     states: cloneStates(instance.states),
     children: instance.children?.map((child) => serializeInstance(child, charter)),
   };
@@ -58,6 +59,7 @@ export function hydrateInstance<TDataContent = never>(
   return {
     id: serialized.id,
     node: hydrateNode(serialized.node, charter),
+    ...(serialized.isSource ? { isSource: true } : {}),
     states: cloneStates(serialized.states),
     children: serialized.children?.map((child) => hydrateInstance(child, charter)),
   };
@@ -78,7 +80,6 @@ export function serializeNode<TDataContent>(
     sourceNodeKey,
     name: node.name,
     instructions: node.instructions,
-    stateless: node.stateless ? true : undefined,
     tools: serializeActionRefs(node.toolRefs, node.toolBindings, charter, "tool", sourceNodeKey),
     commands: serializeActionRefs(
       node.commandRefs,
@@ -108,7 +109,6 @@ export function hydrateNode<TDataContent = never>(
     sourceNodeKey: serialized.sourceNodeKey,
     name: serialized.name,
     instructions: serialized.instructions,
-    stateless: serialized.stateless,
     tools: hydrateActionRefs(serialized.tools, charter, "tool", serialized.sourceNodeKey),
     commands: hydrateActionRefs(
       serialized.commands,
@@ -286,23 +286,7 @@ function serializeRuntime<TDataContent>(
   runtime: Node<TDataContent>["runtime"],
   charter: Charter<TDataContent>,
 ): DryRuntime {
-  if (runtime.type === "primary") {
-    const { boundaryProjection, historyProjection, ...rest } = runtime;
-    const serializedHistoryProjection = historyProjection
-      ? serializeRuntimeHistoryProjection(historyProjection, charter)
-      : undefined;
-    return {
-      ...rest,
-      boundaryProjection: boundaryProjection
-        ? serializeBoundaryProjection(boundaryProjection, charter)
-        : undefined,
-      ...(serializedHistoryProjection
-        ? { historyProjection: serializedHistoryProjection }
-        : {}),
-    };
-  }
-
-  if (runtime.type === "worker") {
+  if (runtime.type === "generator") {
     const { boundaryProjection, historyProjection, ...rest } = runtime;
     const serializedHistoryProjection = historyProjection
       ? serializeRuntimeHistoryProjection(historyProjection, charter)
@@ -325,19 +309,7 @@ function hydrateRuntime<TDataContent>(
   runtime: DryRuntime,
   charter: Charter<TDataContent>,
 ): Runtime<TDataContent> {
-  if (runtime.type === "primary") {
-    return {
-      ...runtime,
-      boundaryProjection: runtime.boundaryProjection
-        ? hydrateBoundaryProjection(runtime.boundaryProjection, charter)
-        : undefined,
-      historyProjection: runtime.historyProjection
-        ? hydrateHistoryProjection(runtime.historyProjection, charter)
-        : undefined,
-    };
-  }
-
-  if (runtime.type === "worker") {
+  if (runtime.type === "generator") {
     return {
       ...runtime,
       boundaryProjection: runtime.boundaryProjection

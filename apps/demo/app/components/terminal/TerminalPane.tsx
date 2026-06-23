@@ -3,6 +3,7 @@
 import { forwardRef, useEffect, useRef } from "react";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { DemoClientInstance, DemoMessage } from "@/src/types/display";
+import type { OptimisticContext } from "@projectors/core/client";
 import type { LocalVideoTrack } from "livekit-client";
 import { scanlinesEnabledAtom } from "@/src/atoms";
 import { useAtom } from "jotai";
@@ -14,7 +15,7 @@ type TerminalPaneProps = {
   onInputChange: (value: string) => void;
   onSend: () => void;
   onForkSession: () => void;
-  onReturnToHead: () => void;
+  onReturnToLatest: () => void;
   isLoading: boolean;
   isTimeTraveling: boolean;
   timeTravelFrameId: Id<"frames"> | null;
@@ -31,7 +32,7 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
       onInputChange,
       onSend,
       onForkSession,
-      onReturnToHead,
+      onReturnToLatest,
       isLoading,
       isTimeTraveling,
       timeTravelFrameId,
@@ -60,7 +61,7 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
       const commandMeta = findCommand(instances, name);
       const command = effigy.getCommand(name as never, {
         target: commandMeta?.target,
-        optimistic: (ctx) => {
+        optimistic: (ctx: OptimisticContext<DemoClientInstance[]>) => {
           const address = findState(instances, "agentControls")?.address;
           if (!address) return;
           const field =
@@ -129,7 +130,7 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
             {messages.length === 0 ? (
               <div className="max-w-xl space-y-3 text-sm leading-6 text-terminal-green-dim">
                 <p>
-                  Start with a message like <span className="text-terminal-green">my name is Ada</span> or{" "}
+                  Start with a message like{" "}
                   <span className="text-terminal-green">remember this demo uses projector</span>.
                 </p>
                 {connectionError && (
@@ -176,10 +177,10 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
-                  onClick={onReturnToHead}
+                  onClick={onReturnToLatest}
                   className="rounded border border-terminal-green-dimmer px-3 py-2 text-sm text-terminal-green-dim hover:border-terminal-green hover:text-terminal-green"
                 >
-                  live head
+                  live latest
                 </button>
                 <button
                   type="button"
@@ -336,7 +337,9 @@ function findCommand(instances: DemoClientInstance[], name: string) {
 }
 
 function findCommandInInstance(instance: DemoClientInstance, name: string): DemoClientInstance["commands"][number] | undefined {
-  const command = instance.commands.find((item) => item.name === name);
+  const command = instance.commands.find(
+    (item: DemoClientInstance["commands"][number]) => item.name === name,
+  );
   if (command) return command;
   for (const member of instance.members) {
     const found = findCommandInInstance(member, name);
@@ -350,7 +353,9 @@ function findCommandInInstance(instance: DemoClientInstance, name: string): Demo
 }
 
 function findStateInInstance(instance: DemoClientInstance, key: string): DemoClientInstance["states"][number] | undefined {
-  const state = instance.states.find((item) => item.key === key);
+  const state = instance.states.find(
+    (item: DemoClientInstance["states"][number]) => item.key === key,
+  );
   if (state) return state;
   for (const member of instance.members) {
     const found = findStateInInstance(member, key);

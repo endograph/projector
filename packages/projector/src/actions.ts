@@ -80,48 +80,6 @@ export function createAction(action: AnyAction): AnyAction {
   return action;
 }
 
-export function createTool<
-  const TName extends string,
-  const TState extends ActionStateRequirement,
-  const TSchema extends z.ZodType,
-  O = unknown,
-  TDataContent = never,
->(
-  action: ActionConfig<TState, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
-): ActionWithSchema<TState, TSchema, O, TName, TDataContent>;
-export function createTool<
-  const TName extends string,
-  const TState extends ActionStateRequirement,
-  O = unknown,
-  TDataContent = never,
->(
-  action: ActionConfig<TState, unknown, O, TName, TDataContent>,
-): CreatedAction<TState, unknown, O, TName, TDataContent>;
-export function createTool(action: AnyAction): AnyAction {
-  return action;
-}
-
-export function createCommand<
-  const TName extends string,
-  const TState extends ActionStateRequirement,
-  const TSchema extends z.ZodType,
-  O = unknown,
-  TDataContent = never,
->(
-  action: ActionConfig<TState, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
-): ActionWithSchema<TState, TSchema, O, TName, TDataContent>;
-export function createCommand<
-  const TName extends string,
-  const TState extends ActionStateRequirement,
-  O = unknown,
-  TDataContent = never,
->(
-  action: ActionConfig<TState, unknown, O, TName, TDataContent>,
-): CreatedAction<TState, unknown, O, TName, TDataContent>;
-export function createCommand(action: AnyAction): AnyAction {
-  return action;
-}
-
 export function bindAction<TAction extends AnyAction>(
   action: TAction,
   binding: ActionBinding,
@@ -237,7 +195,7 @@ export function assertNodeActionStateCompatibility(
     );
   }
 
-  const actionScope = action.state.scope ?? "top";
+  const actionScope = action.state.scope ?? "hoist";
   if (actionScope !== node.state.scope) {
     throw new Error(
       `Node "${node.key}" ${kind} "${action.name}" requires ${actionScope} state "${action.state.key}" but the node owns ${node.state.scope} state`,

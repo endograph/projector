@@ -28,12 +28,12 @@ describe("conformance: projection IR", () => {
         draft.tools.push(...source.tools);
       },
     });
-    const worker = createNode({
+    const generator = createNode({
       key: "summarizer",
-      instructions: "worker",
+      instructions: "generator",
       members: [memory],
       runtime: {
-        type: "worker",
+        type: "generator",
         trigger: { type: "parent-completion" },
         boundaryProjection: exportRuntimeBoundary,
       },
@@ -42,12 +42,12 @@ describe("conformance: projection IR", () => {
     const root = createNode({
       key: "root",
       instructions: "root",
-      members: [policy, worker],
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      members: [policy, generator],
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
       id: "projection-demo",
-      root: { id: "r", node: root },
+      root: { id: "r", isSource: true, node: root },
       charter: charter({ executor }),
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("summarize") }] });
@@ -56,7 +56,7 @@ describe("conformance: projection IR", () => {
 
     const parent = requestForRuntime(requests, "instance:r");
     expect(parent.inference.systemParts).toEqual(textParts("root", "policy"));
-    expect(parent.inference.dynamicParts).toEqual(textParts("worker", "memory"));
+    expect(parent.inference.dynamicParts).toEqual(textParts("generator", "memory"));
     expect(parent.inference.history).toMatchObject([
       { ...textUserMessage("summarize") },
       {
@@ -77,21 +77,21 @@ describe("conformance: projection IR", () => {
       instructions: "hidden-state",
       tools: [hiddenTool],
     });
-    const worker = createNode({
+    const generator = createNode({
       key: "hiddenWorker",
-      instructions: "worker",
+      instructions: "generator",
       members: [hiddenState],
-      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+      runtime: { type: "generator", trigger: { type: "parent-completion" } },
     });
     const root = createNode({
       key: "root",
       instructions: "root",
-      members: [worker],
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      members: [generator],
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
       id: "hidden-boundary-demo",
-      root: { id: "r", node: root },
+      root: { id: "r", isSource: true, node: root },
       charter: charter({ executor }),
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
@@ -108,57 +108,57 @@ describe("conformance: projection IR", () => {
   it("compiles a child runtime from its own boundary without ancestor leakage", async () => {
     const { executor, requests } = createRecordingExecutor();
     const memory = createNode({ key: "memory", instructions: "memory" });
-    const worker = createNode({
-      key: "worker",
-      instructions: "worker",
+    const generator = createNode({
+      key: "generator",
+      instructions: "generator",
       members: [memory],
-      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+      runtime: { type: "generator", trigger: { type: "parent-completion" } },
     });
     const policy = createNode({ key: "policy", instructions: "policy" });
     const root = createNode({
       key: "root",
       instructions: "root",
-      members: [policy, worker],
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      members: [policy, generator],
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
       id: "child-runtime-demo",
-      root: { id: "r", node: root },
+      root: { id: "r", isSource: true, node: root },
       charter: charter({ executor }),
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 
     await drain(runMachine(machine));
 
-    const child = requestForRuntime(requests, "member:r/worker");
-    expect(child.inference.systemParts).toEqual(textParts("worker", "memory"));
+    const child = requestForRuntime(requests, "member:r/generator");
+    expect(child.inference.systemParts).toEqual(textParts("generator", "memory"));
     expect(child.inference.dynamicParts).toEqual([]);
     expect(child.inference.systemParts).not.toContainEqual({ type: "text", text: "root" });
     expect(child.inference.systemParts).not.toContainEqual({ type: "text", text: "policy" });
   });
 
   it("filters actor history by default, self, and explicit audiences", () => {
-    const worker = createNode({
-      key: "worker",
-      runtime: { type: "worker", trigger: { type: "parent-completion" } },
+    const generator = createNode({
+      key: "generator",
+      runtime: { type: "generator", trigger: { type: "parent-completion" } },
     });
-    const root = createNode({ key: "root", members: [worker] });
-    const runtimeInstanceId = "member:r/worker";
-    const workerAddress = {
+    const root = createNode({ key: "root", members: [generator] });
+    const runtimeInstanceId = "member:r/generator";
+    const generatorAddress = {
       type: "member" as const,
       ownerInstanceId: "r",
-      memberPath: ["worker"],
+      memberPath: ["generator"],
     };
 
     const compiled = compileProjection(
-      { id: "r", node: root },
+      { id: "r", isSource: true, node: root },
       {
-        targetGenerator: generator(runtimeInstanceId, "worker"),
+        targetGenerator: makeGenerator(runtimeInstanceId, "generator"),
         frameHistory: [
           frame("user", [{ ...textUserMessage("default broadcast") }]),
           frame("other-self", [{ ...textAssistantMessage("hidden self") }]),
           frame(
-            "worker-self",
+            "generator-self",
             [{ ...textAssistantMessage("visible self") }],
             { generatorId: runtimeInstanceId },
           ),
@@ -166,13 +166,13 @@ describe("conformance: projection IR", () => {
             {
               type: "tool",
               name: "trace",
-              audience: workerAddress,
+              audience: generatorAddress,
             },
           ]),
           frame("address-list-target", [
             {
               ...textAssistantMessage("visible address list target"),
-              audience: [workerAddress],
+              audience: [generatorAddress],
             },
           ]),
           frame("other-runtime", [
@@ -191,11 +191,11 @@ describe("conformance: projection IR", () => {
       {
         type: "tool",
         name: "trace",
-        audience: workerAddress,
+        audience: generatorAddress,
       },
       {
         ...textAssistantMessage("visible address list target"),
-        audience: [workerAddress],
+        audience: [generatorAddress],
       },
     ]);
   });
@@ -204,7 +204,7 @@ describe("conformance: projection IR", () => {
     const root = createNode({
       key: "root",
       runtime: {
-        type: "primary",
+        type: "generator",
         trigger: { type: "actor-frame" },
         activationHistory: "live",
       },
@@ -212,9 +212,9 @@ describe("conformance: projection IR", () => {
     const activationId = "activation-live";
 
     const compiled = compileProjection(
-      { id: "r", node: root },
+      { id: "r", isSource: true, node: root },
       {
-        targetGenerator: generator("instance:r", "primary"),
+        targetGenerator: makeGenerator("instance:r", "generator"),
         activationId,
         frameHistory: [
           frame("before", [{ ...textUserMessage("queued before"), delivery: "queued" }]),
@@ -245,7 +245,7 @@ describe("conformance: projection IR", () => {
     const root = createNode({
       key: "root",
       runtime: {
-        type: "primary",
+        type: "generator",
         trigger: { type: "actor-frame" },
         activationHistory: "snapshot",
       },
@@ -253,9 +253,9 @@ describe("conformance: projection IR", () => {
     const activationId = "activation-snapshot";
 
     const compiled = compileProjection(
-      { id: "r", node: root },
+      { id: "r", isSource: true, node: root },
       {
-        targetGenerator: generator("instance:r", "primary"),
+        targetGenerator: makeGenerator("instance:r", "generator"),
         activationId,
         frameHistory: [
           frame("before", [{ ...textUserMessage("before") }]),
@@ -293,14 +293,14 @@ describe("conformance: projection IR", () => {
   it("requires durable activation work when compiling activation history", () => {
     const root = createNode({
       key: "root",
-      runtime: { type: "primary", trigger: { type: "actor-frame" } },
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
 
     expect(() =>
       compileProjection(
-        { id: "r", node: root },
+        { id: "r", isSource: true, node: root },
         {
-          targetGenerator: generator("instance:r", "primary"),
+          targetGenerator: makeGenerator("instance:r", "generator"),
           activationId: "activation-missing",
         },
       ),
@@ -308,9 +308,9 @@ describe("conformance: projection IR", () => {
 
     expect(() =>
       compileProjection(
-        { id: "r", node: root },
+        { id: "r", isSource: true, node: root },
         {
-          targetGenerator: generator("instance:r", "primary"),
+          targetGenerator: makeGenerator("instance:r", "generator"),
           activationId: "activation-missing",
           frameHistory: [frame("user", [{ ...textUserMessage("hi") }])],
         },
@@ -319,7 +319,7 @@ describe("conformance: projection IR", () => {
   });
 });
 
-function generator(runtimeInstanceId: string, kind: "primary" | "worker") {
+function makeGenerator(runtimeInstanceId: string, kind: "generator") {
   return { id: runtimeInstanceId, kind, runtimeInstanceId };
 }
 

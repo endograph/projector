@@ -101,7 +101,7 @@ export function normalizeBoundaryProjection<
 export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
 ): NormalizedStateDescriptor<S> {
-  const scope = descriptor.scope ?? "top";
+  const scope = descriptor.scope ?? "hoist";
   const onInitConflict = descriptor.onInitConflict ?? "replace";
   const projection = descriptor.projection ?? "hidden";
   if (
@@ -123,26 +123,13 @@ export function normalizeStateDescriptor<S>(
 export function normalizeRuntime<TDataContent = never>(
   runtime: Runtime<TDataContent> | undefined,
 ): NormalizedRuntime<TDataContent> {
-  if (!runtime || !runtime.type || runtime.type === "component") {
-    return { type: "component" };
-  }
-
-  if (runtime.type === "primary") {
-    return {
-      ...runtime,
-      concurrency: runtime.concurrency ?? "serial",
-      activationHistory: runtime.activationHistory ?? "live",
-      historyProjection: runtime.historyProjection ?? { type: "messages" },
-      boundaryProjection: normalizeBoundaryProjection(runtime.boundaryProjection),
-    };
-  }
-
-  if (runtime.type !== "worker") {
+  if (!runtime || runtime.type === "component" || !("trigger" in runtime)) {
     return { type: "component" };
   }
 
   return {
     ...runtime,
+    type: "generator",
     concurrency: runtime.concurrency ?? "serial",
     activationHistory: runtime.activationHistory ?? "live",
     historyProjection: runtime.historyProjection ?? { type: "messages" },
@@ -158,9 +145,6 @@ export function createNode<
   if (!key) {
     throw new Error("Node requires key or name");
   }
-  if (config.stateless && config.state) {
-    throw new Error(`Stateless node "${key}" cannot declare state`);
-  }
   const tools = normalizeActionEntries(config.tools ?? []);
   const commands = normalizeActionEntries(config.commands ?? []);
 
@@ -169,7 +153,6 @@ export function createNode<
     sourceNodeKey: config.sourceNodeKey,
     name: config.name,
     instructions: config.instructions,
-    stateless: config.stateless ?? false,
     toolBindings: tools.bindings,
     toolRefs: tools.refs,
     commandBindings: commands.bindings,

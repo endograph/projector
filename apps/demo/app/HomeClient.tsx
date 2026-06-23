@@ -6,6 +6,7 @@ import { useAtom, useAtomValue } from "jotai";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { LocalVideoTrack } from "livekit-client";
+import type { ClientMachineMessage } from "@projectors/core/client";
 import {
   activeAgentTabAtom,
   inputAtom,
@@ -27,17 +28,33 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const createSession = useAction(api.sessionActions.createSession);
   const sendMessage = useAction(api.sessionActions.sendMessage);
-  const sendClientMessage = useAction(api.sessionActions.sendClientMessage);
+  const sendClientMessageToConvex = useAction(api.sessionActions.sendClientMessage);
   const ensureAgentDispatched = useAction(api.livekitAgentActions.ensureAgentDispatched);
   const cloneFromFrame = useMutation(api.sessions.cloneFromFrame);
   const [timeTravelFrameId, setTimeTravelFrameId] = useAtom(timeTravelFrameIdAtom);
+  const [sendLiveKitCommand, setSendLiveKitCommand] = useState<((message: ClientMachineMessage) => Promise<unknown>) | null>(null);
+  const handleLiveKitCommandSenderChange = useCallback(
+    (sender: ((message: ClientMachineMessage) => Promise<unknown>) | null) => {
+      setSendLiveKitCommand(sender ? () => sender : null);
+    },
+    [],
+  );
+  const sendClientMessage = useCallback(
+    async (args: { sessionId: Id<"sessions">; message: ClientMachineMessage }) => {
+      if (sendLiveKitCommand) {
+        return await sendLiveKitCommand(args.message);
+      }
+      return await sendClientMessageToConvex(args);
+    },
+    [sendClientMessageToConvex, sendLiveKitCommand],
+  );
 
   const session = useQuery(
     api.sessions.get,
     sessionId
       ? {
           id: sessionId,
-          ...(timeTravelFrameId ? { headFrameId: timeTravelFrameId } : {}),
+          ...(timeTravelFrameId ? { timetravelFrameId: timeTravelFrameId } : {}),
         }
       : "skip",
   );
@@ -82,25 +99,14 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
     }
   }, [sessionId, setTimeTravelFrameId]);
 
-  useEffect(() => {
-    if (!timeTravelFrameId || !session?.frameId) return;
-    if (session.frameId !== timeTravelFrameId) {
-      setTimeTravelFrameId(session.frameId === session.headFrameId ? null : session.frameId);
-    }
-  }, [session?.frameId, session?.headFrameId, setTimeTravelFrameId, timeTravelFrameId]);
-
-  useEffect(() => {
-    if (session?.headFrameId && timeTravelFrameId === session.headFrameId) {
-      setTimeTravelFrameId(null);
-    }
-  }, [session?.headFrameId, setTimeTravelFrameId, timeTravelFrameId]);
+  const latestFrameId = timeTravelFrameId ? null : (session?.frameId ?? null);
 
   return (
     <ProjectorProvider
       sessionId={sessionId}
       sendClientMessage={sendClientMessage}
       snapshot={session?.clientSnapshot as DemoClientSnapshot | undefined}
-      readOnly={Boolean(timeTravelFrameId && session?.headFrameId && timeTravelFrameId !== session.headFrameId)}
+      readOnly={Boolean(timeTravelFrameId)}
     >
       <HomeClientContent
         sessionId={sessionId}
@@ -111,9 +117,10 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
         ensureAgentDispatched={ensureAgentDispatched}
         serverMessages={serverMessages}
         liveKitWorkerStatus={liveKitWorkerStatus}
+        onLiveKitCommandSenderChange={handleLiveKitCommandSenderChange}
         connectionError={connectionError}
         onConnectionErrorChange={setConnectionError}
-        headFrameId={session?.headFrameId ?? null}
+        latestFrameId={latestFrameId}
         timeTravelFrameId={timeTravelFrameId}
         onTimeTravelFrameChange={setTimeTravelFrameId}
       />
@@ -130,9 +137,10 @@ function HomeClientContent({
   ensureAgentDispatched,
   serverMessages,
   liveKitWorkerStatus,
+  onLiveKitCommandSenderChange,
   connectionError,
   onConnectionErrorChange,
-  headFrameId,
+  latestFrameId,
   timeTravelFrameId,
   onTimeTravelFrameChange,
 }: {
@@ -159,9 +167,10 @@ function HomeClientContent({
       }
     | null
     | undefined;
+  onLiveKitCommandSenderChange: (sender: ((message: ClientMachineMessage) => Promise<unknown>) | null) => void;
   connectionError: string | null;
   onConnectionErrorChange: (error: string | null) => void;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrameChange: (frameId: Id<"frames"> | null) => void;
 }) {
@@ -177,7 +186,7 @@ function HomeClientContent({
   const scanlinesEnabled = useAtomValue(scanlinesEnabledAtom);
   const activeTab = useAtomValue(activeAgentTabAtom);
   const { instances: clientInstances, snapshot } = useProjector();
-  const isTimeTraveling = Boolean(timeTravelFrameId && headFrameId && timeTravelFrameId !== headFrameId);
+  const isTimeTraveling = Boolean(timeTravelFrameId);
 
   const terminalRef = useRef<HTMLTextAreaElement>(null);
   const agentRef = useRef<HTMLDivElement>(null);
@@ -230,12 +239,12 @@ function HomeClientContent({
 
   const handleTimeTravelFrame = useCallback(
     (frameId: Id<"frames">) => {
-      onTimeTravelFrameChange(frameId === headFrameId ? null : frameId);
+      onTimeTravelFrameChange(frameId === latestFrameId ? null : frameId);
     },
-    [headFrameId, onTimeTravelFrameChange],
+    [latestFrameId, onTimeTravelFrameChange],
   );
 
-  const handleReturnToHead = useCallback(() => {
+  const handleReturnToLatest = useCallback(() => {
     onTimeTravelFrameChange(null);
   }, [onTimeTravelFrameChange]);
 
@@ -289,6 +298,13 @@ function HomeClientContent({
     }
   }, [onConnectionErrorChange]);
 
+  const handleLiveKitCommandSenderChange = useCallback((sender: ((message: ClientMachineMessage) => Promise<unknown>) | null) => {
+    onLiveKitCommandSenderChange(sender);
+    if (sender) {
+      onConnectionErrorChange(null);
+    }
+  }, [onConnectionErrorChange, onLiveKitCommandSenderChange]);
+
   const themeHue = getThemeHue(clientInstances);
   const persistedAgentControls = getAgentControlsState(snapshot.root ? [snapshot.root] : []);
   const persistedVoiceEnabled = Boolean(persistedAgentControls?.liveMode);
@@ -339,10 +355,10 @@ function HomeClientContent({
       docked={agentDocked}
       onToggleDock={toggleAgentDock}
       onResetSession={handleReset}
-      headFrameId={headFrameId}
+      latestFrameId={latestFrameId}
       timeTravelFrameId={timeTravelFrameId}
       onTimeTravelFrame={handleTimeTravelFrame}
-      onReturnToHead={handleReturnToHead}
+      onReturnToLatest={handleReturnToLatest}
       onSwitchSession={setSessionId}
       messageTransport={messageTransport}
       onMessageTransportChange={setMessageTransport}
@@ -364,7 +380,7 @@ function HomeClientContent({
           onInputChange={setInput}
           onSend={handleSend}
           onForkSession={handleForkSession}
-          onReturnToHead={handleReturnToHead}
+          onReturnToLatest={handleReturnToLatest}
           isLoading={isLoading}
           isTimeTraveling={isTimeTraveling}
           timeTravelFrameId={timeTravelFrameId}
@@ -393,6 +409,7 @@ function HomeClientContent({
           cameraEnabled={persistedCameraEnabled}
           onStatusChange={handleVoiceStatus}
           onSendMessageChange={handleLiveKitSenderChange}
+          onSendCommandChange={handleLiveKitCommandSenderChange}
           onLocalCameraTrackChange={setLocalCameraTrack}
         />
       </div>
@@ -464,7 +481,9 @@ function findState(instances: DemoClientInstance[], key: string) {
 }
 
 function findStateInInstance(instance: DemoClientInstance, key: string): DemoClientInstance["states"][number] | undefined {
-  const state = instance.states.find((item) => item.key === key);
+  const state = instance.states.find(
+    (item: DemoClientInstance["states"][number]) => item.key === key,
+  );
   if (state) return state;
   for (const member of instance.members) {
     const found = findStateInInstance(member, key);

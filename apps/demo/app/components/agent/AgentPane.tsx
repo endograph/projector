@@ -1,10 +1,17 @@
 "use client";
 
-import { forwardRef, useState, type ReactNode } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery } from "convex/react";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import type {
-  CompiledProjectionFrameView,
+  CompiledProjectionNodeView,
   CompiledProjectionNode,
   CompiledProjectionTree,
 } from "@projectors/core";
@@ -21,7 +28,11 @@ import {
   type TreeSubtab,
 } from "@/src/atoms";
 import { useProjector } from "@/src/projector/ProjectorProvider";
-import type { DemoClientInstance, DemoClientSnapshot, DemoMessage } from "@/src/types/display";
+import type {
+  DemoClientInstance,
+  DemoClientSnapshot,
+  DemoMessage,
+} from "@/src/types/display";
 
 type AgentPaneProps = {
   sessionId: Id<"sessions"> | null;
@@ -29,10 +40,10 @@ type AgentPaneProps = {
   docked: boolean;
   onToggleDock: () => void;
   onResetSession: () => void;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
-  onReturnToHead: () => void;
+  onReturnToLatest: () => void;
   onSwitchSession: (sessionId: Id<"sessions">) => void;
   messageTransport: MessageTransport;
   onMessageTransportChange: (transport: MessageTransport) => void;
@@ -48,10 +59,10 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
       docked,
       onToggleDock,
       onResetSession,
-      headFrameId,
+      latestFrameId,
       timeTravelFrameId,
       onTimeTravelFrame,
-      onReturnToHead,
+      onReturnToLatest,
       onSwitchSession,
       messageTransport,
       onMessageTransportChange,
@@ -61,11 +72,33 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
     ref,
   ) {
     const [, setActiveTab] = useAtom(activeAgentTabAtom);
+    const activeTreeSubtab = useAtomValue(activeTreeSubtabAtom);
+    const activeHistorySubtab = useAtomValue(activeHistorySubtabAtom);
     const { effigy, instances, snapshot, readOnly } = useProjector();
+    const contentScrollRef = useRef<HTMLDivElement>(null);
+    const activeSubtab =
+      activeTab === "tree"
+        ? activeTreeSubtab
+        : activeTab === "history"
+          ? activeHistorySubtab
+          : null;
+
+    useLayoutEffect(() => {
+      if (!contentScrollRef.current) return;
+      contentScrollRef.current.scrollTop = 0;
+      contentScrollRef.current.scrollLeft = 0;
+    }, [activeTab, activeSubtab]);
+
     return (
-      <aside ref={ref} tabIndex={0} className="pane-focus flex h-full min-h-0 flex-col bg-terminal-bg">
+      <aside
+        ref={ref}
+        tabIndex={0}
+        className="pane-focus flex h-full min-h-0 flex-col bg-terminal-bg"
+      >
         <header className="flex items-center justify-between gap-3 border-b border-terminal-green-dimmer px-4 py-2">
-          <h2 className="terminal-glow text-sm font-bold tracking-[0.08em]">AGENT</h2>
+          <h2 className="terminal-glow text-sm font-bold tracking-[0.08em]">
+            AGENT
+          </h2>
           <button
             type="button"
             onClick={onToggleDock}
@@ -75,7 +108,16 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
           </button>
         </header>
         <nav className="flex border-b border-terminal-green-dimmer px-2 text-xs">
-          {(["tree", "state", "history", "commands", "playground", "dev"] as AgentTab[]).map((tab) => (
+          {(
+            [
+              "tree",
+              "state",
+              "history",
+              "commands",
+              "playground",
+              "dev",
+            ] as AgentTab[]
+          ).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -85,22 +127,36 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
             </button>
           ))}
         </nav>
-        <div className="terminal-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
+        <div
+          ref={contentScrollRef}
+          className="terminal-scrollbar min-h-0 flex-1 overflow-y-auto p-4"
+        >
           {activeTab === "tree" && (
-            <TreeTab sessionId={sessionId} instances={instances} projectionTree={snapshot.projectionTree} />
+            <TreeTab
+              sessionId={sessionId}
+              instances={instances}
+              projectionTree={snapshot.projectionTree}
+            />
           )}
           {activeTab === "state" && <StateTab instances={instances} />}
           {activeTab === "history" && (
             <HistoryTab
               sessionId={sessionId}
-              headFrameId={headFrameId}
+              projectionTree={snapshot.projectionTree}
+              latestFrameId={latestFrameId}
               timeTravelFrameId={timeTravelFrameId}
               onTimeTravelFrame={onTimeTravelFrame}
-              onReturnToHead={onReturnToHead}
+              onReturnToLatest={onReturnToLatest}
               onSwitchSession={onSwitchSession}
             />
           )}
-          {activeTab === "commands" && <CommandsTab instances={instances} effigy={effigy} readOnly={readOnly} />}
+          {activeTab === "commands" && (
+            <CommandsTab
+              instances={instances}
+              effigy={effigy}
+              readOnly={readOnly}
+            />
+          )}
           {activeTab === "playground" && (
             <PlaygroundTab
               instances={instances}
@@ -135,29 +191,39 @@ function TreeTab({
   projectionTree?: CompiledProjectionTree;
 }) {
   const [activeSubtab, setActiveSubtab] = useAtom(activeTreeSubtabAtom);
+  const switchSubtab = (tab: TreeSubtab) => {
+    if (tab === activeSubtab) return;
+    setActiveSubtab(tab);
+  };
 
   return (
     <div className="flex min-h-0 flex-col">
-      <div className="mb-4 flex border-b border-terminal-green-dimmer text-xs">
-        {(["instance", "projection", "ir", "realized"] as TreeSubtab[]).map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            onClick={() => setActiveSubtab(tab)}
-            className={`px-3 py-2 ${
-              activeSubtab === tab
-                ? "border-b border-terminal-green text-terminal-green"
-                : "text-terminal-green-dim hover:text-terminal-green"
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
+      <div className="sticky -top-4 z-20 -mx-4 -mt-4 mb-4 flex border-b border-terminal-green-dimmer bg-terminal-bg px-4 pt-4 text-xs">
+        {(["instance", "projection", "ir", "realized"] as TreeSubtab[]).map(
+          (tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => switchSubtab(tab)}
+              className={`px-3 py-2 ${
+                activeSubtab === tab
+                  ? "border-b border-terminal-green text-terminal-green"
+                  : "text-terminal-green-dim hover:text-terminal-green"
+              }`}
+            >
+              {tab}
+            </button>
+          ),
+        )}
       </div>
       {activeSubtab === "instance" && <InstanceTree instances={instances} />}
-      {activeSubtab === "projection" && <ProjectionTree tree={projectionTree} />}
+      {activeSubtab === "projection" && (
+        <ProjectionTree tree={projectionTree} />
+      )}
       {activeSubtab === "ir" && <CompiledIrTree sessionId={sessionId} />}
-      {activeSubtab === "realized" && <RealizedPromptTree sessionId={sessionId} />}
+      {activeSubtab === "realized" && (
+        <RealizedPromptTree sessionId={sessionId} />
+      )}
     </div>
   );
 }
@@ -200,7 +266,7 @@ function ProjectionTree({ tree }: { tree?: CompiledProjectionTree }) {
 type RuntimeInspectionBase = {
   generatorId: string;
   runtimeInstanceId: string;
-  kind: "primary" | "worker";
+  kind: "generator";
   nodeKey: string;
   name?: string;
 };
@@ -230,14 +296,15 @@ type RealizedPromptsResult = {
 };
 
 function CompiledIrTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
-  const result = useQuery(api.sessions.getCompiledIr, sessionId ? { sessionId } : "skip") as
-    | CompiledIrResult
-    | null
-    | undefined;
+  const result = useQuery(
+    api.sessions.getCompiledIr,
+    sessionId ? { sessionId } : "skip",
+  ) as CompiledIrResult | null | undefined;
 
   if (!sessionId) return <EmptyTree>No session</EmptyTree>;
   if (result === undefined) return <EmptyTree>Loading IR...</EmptyTree>;
-  if (!result || result.runtimes.length === 0) return <EmptyTree>No generator runtimes</EmptyTree>;
+  if (!result || result.runtimes.length === 0)
+    return <EmptyTree>No generator runtimes</EmptyTree>;
 
   return (
     <div className="space-y-2 text-sm">
@@ -249,9 +316,18 @@ function CompiledIrTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
           summary={`system ${runtime.inference.systemParts.length} / dynamic ${runtime.inference.dynamicParts.length} / tools ${runtime.inference.tools.length}`}
         >
           <TreeSection title="compiled inference">
-            <JsonDisclosure title={`system ${runtime.inference.systemParts.length}`} value={runtime.inference.systemParts} />
-            <JsonDisclosure title={`dynamic ${runtime.inference.dynamicParts.length}`} value={runtime.inference.dynamicParts} />
-            <NameList title={`tools ${runtime.inference.tools.length}`} names={runtime.inference.tools} />
+            <JsonDisclosure
+              title={`system ${runtime.inference.systemParts.length}`}
+              value={runtime.inference.systemParts}
+            />
+            <JsonDisclosure
+              title={`dynamic ${runtime.inference.dynamicParts.length}`}
+              value={runtime.inference.dynamicParts}
+            />
+            <NameList
+              title={`tools ${runtime.inference.tools.length}`}
+              names={runtime.inference.tools}
+            />
             <JsonDisclosure
               title={`retrievable states ${runtime.inference.retrievableStates.length}`}
               value={runtime.inference.retrievableStates}
@@ -263,15 +339,21 @@ function CompiledIrTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
   );
 }
 
-function RealizedPromptTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
-  const result = useQuery(api.sessions.getRealizedPrompts, sessionId ? { sessionId } : "skip") as
-    | RealizedPromptsResult
-    | null
-    | undefined;
+function RealizedPromptTree({
+  sessionId,
+}: {
+  sessionId: Id<"sessions"> | null;
+}) {
+  const result = useQuery(
+    api.sessions.getRealizedPrompts,
+    sessionId ? { sessionId } : "skip",
+  ) as RealizedPromptsResult | null | undefined;
 
   if (!sessionId) return <EmptyTree>No session</EmptyTree>;
-  if (result === undefined) return <EmptyTree>Loading realized prompts...</EmptyTree>;
-  if (!result || result.runtimes.length === 0) return <EmptyTree>No generator runtimes</EmptyTree>;
+  if (result === undefined)
+    return <EmptyTree>Loading realized prompts...</EmptyTree>;
+  if (!result || result.runtimes.length === 0)
+    return <EmptyTree>No generator runtimes</EmptyTree>;
 
   return (
     <div className="space-y-2 text-sm">
@@ -319,8 +401,13 @@ function RealizedPromptInput({ value }: { value: unknown }) {
           {messages.length > 0 ? (
             <div className="space-y-1 rounded border border-terminal-green-dimmer bg-terminal-bg p-2">
               {messages.map((message, index) => (
-                <div key={index} className="grid grid-cols-[80px_minmax(0,1fr)] gap-2 text-xs leading-5">
-                  <span className="text-terminal-cyan">[{messageRole(message)}]:</span>
+                <div
+                  key={index}
+                  className="grid grid-cols-[80px_minmax(0,1fr)] gap-2 text-xs leading-5"
+                >
+                  <span className="text-terminal-cyan">
+                    [{messageRole(message)}]:
+                  </span>
                   <span className="whitespace-pre-wrap break-words text-terminal-green-dim">
                     {messageText(message)}
                   </span>
@@ -333,7 +420,11 @@ function RealizedPromptInput({ value }: { value: unknown }) {
         </TreeSection>
       )}
       <TreeSection title="config">
-        {Object.keys(config).length > 0 ? <JsonPreview value={config} /> : <MutedLine>config empty</MutedLine>}
+        {Object.keys(config).length > 0 ? (
+          <JsonPreview value={config} />
+        ) : (
+          <MutedLine>config empty</MutedLine>
+        )}
       </TreeSection>
     </div>
   );
@@ -359,12 +450,20 @@ function RuntimeInspectionBlock({
         onClick={() => setExpanded((value) => !value)}
         className="flex w-full items-center gap-2 px-2 py-2 text-left hover:bg-terminal-bg focus:outline-none focus:ring-1 focus:ring-terminal-green"
       >
-        <span className="w-3 text-terminal-green-dim">{expanded ? "-" : "+"}</span>
+        <span className="w-3 text-terminal-green-dim">
+          {expanded ? "-" : "+"}
+        </span>
         <span className="text-terminal-yellow">{runtime.kind}</span>
         <span className="text-terminal-green">{runtime.nodeKey}</span>
-        {runtime.name && <span className="truncate text-terminal-cyan">{runtime.name}</span>}
-        <span className="truncate text-terminal-green-dim">{runtime.runtimeInstanceId}</span>
-        <span className="ml-auto shrink-0 text-terminal-green-dim">{summary}</span>
+        {runtime.name && (
+          <span className="truncate text-terminal-cyan">{runtime.name}</span>
+        )}
+        <span className="truncate text-terminal-green-dim">
+          {runtime.runtimeInstanceId}
+        </span>
+        <span className="ml-auto shrink-0 text-terminal-green-dim">
+          {summary}
+        </span>
       </button>
       {expanded && (
         <div className="space-y-2 border-t border-terminal-green-dimmer p-3">
@@ -392,7 +491,9 @@ function omitKeys(
   keys: string[],
 ): Record<string, unknown> {
   const omitted = new Set(keys);
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !omitted.has(key)));
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => !omitted.has(key)),
+  );
 }
 
 function messageRole(message: unknown): string {
@@ -470,54 +571,97 @@ type FrameMessage = {
   [key: string]: unknown;
 };
 
+type FrameHistoryView = {
+  frame: FrameDoc;
+  index: number;
+  messages: FrameMessage[];
+  frameType: FrameType;
+};
+
+type FrameType = "instance" | "work" | "actor";
+
+type HistoryFilterOption = {
+  value: string;
+  label: string;
+  count: number;
+  detail?: string;
+  title?: string;
+};
+
 function HistoryTab({
   sessionId,
-  headFrameId,
+  projectionTree,
+  latestFrameId,
   timeTravelFrameId,
   onTimeTravelFrame,
-  onReturnToHead,
+  onReturnToLatest,
   onSwitchSession,
 }: {
   sessionId: Id<"sessions"> | null;
-  headFrameId: Id<"frames"> | null;
+  projectionTree?: CompiledProjectionTree;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
-  onReturnToHead: () => void;
+  onReturnToLatest: () => void;
   onSwitchSession: (sessionId: Id<"sessions">) => void;
 }) {
   const [activeSubtab, setActiveSubtab] = useAtom(activeHistorySubtabAtom);
-  const isTimeTraveling = Boolean(timeTravelFrameId && headFrameId && timeTravelFrameId !== headFrameId);
+  const stickyHeaderRef = useRef<HTMLDivElement>(null);
+  const [filterStickyTop, setFilterStickyTop] = useState(0);
+  const isTimeTraveling = Boolean(
+    timeTravelFrameId && latestFrameId && timeTravelFrameId !== latestFrameId,
+  );
+  const switchSubtab = (tab: HistorySubtab) => {
+    if (tab === activeSubtab) return;
+    setActiveSubtab(tab);
+  };
+
+  useLayoutEffect(() => {
+    const header = stickyHeaderRef.current;
+    if (!header) {
+      setFilterStickyTop(0);
+      return;
+    }
+    const topBleed = Number.parseFloat(getComputedStyle(header).paddingTop) || 0;
+    setFilterStickyTop(Math.max(0, header.offsetHeight - topBleed));
+  }, [activeSubtab, isTimeTraveling]);
 
   return (
     <div className="flex min-h-0 flex-col">
-      <div className="mb-4 border-b border-terminal-green-dimmer">
+      <div
+        ref={stickyHeaderRef}
+        className="sticky -top-4 z-20 -mx-4 -mt-4 border-b border-terminal-green-dimmer bg-terminal-bg px-4 pt-4"
+      >
         <div className="flex text-xs">
-          {(["frames", "messages", "branches"] as HistorySubtab[]).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => setActiveSubtab(tab)}
-              className={`px-3 py-2 ${
-                activeSubtab === tab
-                  ? "border-b border-terminal-green text-terminal-green"
-                  : "text-terminal-green-dim hover:text-terminal-green"
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
+          {(["frames", "messages", "branches"] as HistorySubtab[]).map(
+            (tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => switchSubtab(tab)}
+                className={`px-3 py-2 ${
+                  activeSubtab === tab
+                    ? "border-b border-terminal-green text-terminal-green"
+                    : "text-terminal-green-dim hover:text-terminal-green"
+                }`}
+              >
+                {tab}
+              </button>
+            ),
+          )}
         </div>
         {isTimeTraveling && (
           <div className="flex items-center justify-between gap-3 px-1 py-2 text-xs">
             <div className="min-w-0 truncate text-terminal-cyan">
-              viewing {timeTravelFrameId ? shortId(timeTravelFrameId) : "history"}
+              viewing{" "}
+              {timeTravelFrameId ? shortId(timeTravelFrameId) : "history"}
             </div>
             <button
               type="button"
-              onClick={onReturnToHead}
+              onClick={onReturnToLatest}
               className="shrink-0 text-terminal-green-dim hover:text-terminal-green"
             >
-              live head
+              live latest
             </button>
           </div>
         )}
@@ -526,7 +670,9 @@ function HistoryTab({
         {activeSubtab === "frames" && (
           <FramesHistory
             sessionId={sessionId}
-            headFrameId={headFrameId}
+            projectionTree={projectionTree}
+            filterStickyTop={filterStickyTop}
+            latestFrameId={latestFrameId}
             timeTravelFrameId={timeTravelFrameId}
             onTimeTravelFrame={onTimeTravelFrame}
           />
@@ -534,7 +680,7 @@ function HistoryTab({
         {activeSubtab === "messages" && (
           <MessagesHistory
             sessionId={sessionId}
-            headFrameId={headFrameId}
+            latestFrameId={latestFrameId}
             timeTravelFrameId={timeTravelFrameId}
             onTimeTravelFrame={onTimeTravelFrame}
           />
@@ -542,7 +688,7 @@ function HistoryTab({
         {activeSubtab === "branches" && (
           <BranchesHistory
             sessionId={sessionId}
-            headFrameId={headFrameId}
+            latestFrameId={latestFrameId}
             timeTravelFrameId={timeTravelFrameId}
             onTimeTravelFrame={onTimeTravelFrame}
             onSwitchSession={onSwitchSession}
@@ -555,112 +701,463 @@ function HistoryTab({
 
 function FramesHistory({
   sessionId,
-  headFrameId,
+  projectionTree,
+  filterStickyTop,
+  latestFrameId,
   timeTravelFrameId,
   onTimeTravelFrame,
 }: {
   sessionId: Id<"sessions"> | null;
-  headFrameId: Id<"frames"> | null;
+  projectionTree?: CompiledProjectionTree;
+  filterStickyTop: number;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
 }) {
-  const frames = useQuery(api.frames.list, sessionId ? { sessionId } : "skip") as FrameDoc[] | undefined;
-  const [expandedFrameIds, setExpandedFrameIds] = useState<Set<string>>(new Set());
+  const frames = useQuery(
+    api.frames.list,
+    sessionId ? { sessionId } : "skip",
+  ) as FrameDoc[] | undefined;
+  const [expandedFrameIds, setExpandedFrameIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [selectedFrameTypes, setSelectedFrameTypes] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [nodeRuntimeFilters, setNodeRuntimeFilters] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    setExpandedFrameIds(new Set());
+    setSelectedFrameTypes(new Set());
+    setNodeRuntimeFilters(new Set());
+  }, [sessionId]);
 
   if (!sessionId) return <EmptyHistory>No session</EmptyHistory>;
   if (!frames) return <EmptyHistory>Loading...</EmptyHistory>;
 
-  const orderedFrames = frames.slice().sort((a, b) => a.createdAt - b.createdAt);
-  if (orderedFrames.length === 0) return <EmptyHistory>No frames yet</EmptyHistory>;
+  const orderedFrames = frames
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (orderedFrames.length === 0)
+    return <EmptyHistory>No frames yet</EmptyHistory>;
+  const frameViews = orderedFrames.map((frame, index) => {
+    const messages = normalizeFrameMessages(frame.messages);
+    return {
+      frame,
+      index,
+      messages,
+      frameType: frameTypeForFrame(frame, messages),
+    };
+  });
+  const activationRuntimeIds = activationRuntimeIdsFromFrameViews(frameViews);
+  const frameTypeOptions = frameTypeFilterOptions(frameViews);
+  const nodeOptions = nodeFilterOptions(
+    projectionTree,
+    frameViews,
+    activationRuntimeIds,
+  );
+  const frameTypeValues = frameTypeOptions.map((option) => option.value);
+  const nodeRuntimeValues = nodeOptions.map((option) => option.value);
+  const filteredFrameViews = frameViews.filter(
+    (view) =>
+      (selectedFrameTypes.size === 0 || selectedFrameTypes.has(view.frameType)) &&
+      (nodeRuntimeFilters.size === 0 ||
+        Array.from(nodeRuntimeFilters).some((runtimeInstanceId) =>
+          frameMatchesRuntime(
+            view.frame,
+            view.messages,
+            activationRuntimeIds,
+            runtimeInstanceId,
+          ),
+        )),
+  );
+  const selectedFrameTypeValues = new Set(
+    selectedFrameTypes.size === 0 ? frameTypeValues : selectedFrameTypes,
+  );
+  const selectedNodeRuntimeIds = new Set(
+    nodeRuntimeFilters.size === 0 ? nodeRuntimeValues : nodeRuntimeFilters,
+  );
+  const activeFrameTypeFilters =
+    selectedFrameTypes.size === 0
+      ? []
+      : frameTypeOptions.filter((option) => selectedFrameTypes.has(option.value));
+  const activeNodeFilters =
+    nodeRuntimeFilters.size === 0 ? [] : nodeOptions.filter((option) => nodeRuntimeFilters.has(option.value));
+  const activeFilterCount = activeFrameTypeFilters.length + activeNodeFilters.length;
+  const toggleFrameTypeFilter = (value: string) => {
+    setSelectedFrameTypes((current) =>
+      toggleInclusiveFilter(current, value, frameTypeValues),
+    );
+  };
+  const toggleNodeRuntimeFilter = (value: string) => {
+    setNodeRuntimeFilters((current) =>
+      toggleInclusiveFilter(current, value, nodeRuntimeValues),
+    );
+  };
+  const clearFilters = () => {
+    setSelectedFrameTypes(new Set());
+    setNodeRuntimeFilters(new Set());
+  };
 
   return (
-    <div className="space-y-2">
-      {orderedFrames.map((frame, index) => {
-        const messages = normalizeFrameMessages(frame.messages);
-        const expanded = expandedFrameIds.has(frame._id);
-        const isHead = frame._id === headFrameId;
-        const isSelected = frame._id === timeTravelFrameId && !isHead;
-        return (
-          <section
-            key={frame._id}
-            className={`rounded border bg-terminal-bg-lighter ${
-              isSelected ? "border-terminal-cyan" : "border-terminal-green-dimmer"
-            }`}
-          >
-            <div className="flex items-stretch">
-              <button
-                type="button"
-                onClick={() => {
-                  setExpandedFrameIds((current) => {
-                    const next = new Set(current);
-                    if (next.has(frame._id)) next.delete(frame._id);
-                    else next.add(frame._id);
-                    return next;
-                  });
-                }}
-                aria-expanded={expanded}
-                className="block min-w-0 flex-1 p-3 text-left hover:bg-terminal-bg focus:outline-none focus:ring-1 focus:ring-terminal-green"
-              >
-                <div className="flex items-center justify-between gap-3 text-xs">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <span className="shrink-0 text-terminal-cyan">frame #{index + 1}</span>
-                      <span className="truncate text-terminal-green-dim">{shortId(frame._id)}</span>
-                      <span className="shrink-0 text-terminal-green">{frameDescriptor(frame, messages)}</span>
-                      {isHead && <span className="text-terminal-yellow">head</span>}
-                      {isSelected && <span className="text-terminal-cyan">viewing</span>}
-                    </div>
-                    <CollapsedFrameMessages frame={frame} messages={messages} />
-                  </div>
-                  <div className="shrink-0 text-right text-terminal-green-dim">
-                    <div>{new Date(frame.createdAt).toLocaleTimeString()}</div>
-                    <div>{messages.length} msgs</div>
-                  </div>
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => onTimeTravelFrame(frame._id)}
-                aria-label={`time travel to frame ${index + 1}`}
-                title="time travel"
-                className={`w-10 shrink-0 border-l border-terminal-green-dimmer hover:bg-terminal-bg focus:outline-none focus:ring-1 focus:ring-terminal-green ${
-                  isSelected ? "text-terminal-cyan" : "text-terminal-green-dim hover:text-terminal-green"
+    <div className="space-y-3">
+      <FrameHistoryFilters
+        frameTypeOptions={frameTypeOptions}
+        nodeOptions={nodeOptions}
+        selectedFrameTypes={selectedFrameTypeValues}
+        selectedNodeRuntimeIds={selectedNodeRuntimeIds}
+        activeFrameTypeFilters={activeFrameTypeFilters}
+        activeNodeFilters={activeNodeFilters}
+        activeFilterCount={activeFilterCount}
+        stickyTop={filterStickyTop}
+        onToggleFrameType={toggleFrameTypeFilter}
+        onToggleNodeRuntime={toggleNodeRuntimeFilter}
+        onClear={clearFilters}
+      />
+      {filteredFrameViews.length === 0 ? (
+        <div className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3 text-xs italic text-terminal-green-dim">
+          No frames match the current filters
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filteredFrameViews.map(({ frame, index, messages, frameType }) => {
+            const expanded = expandedFrameIds.has(frame._id);
+            const isLatest = frame._id === latestFrameId;
+            const isSelected = frame._id === timeTravelFrameId && !isLatest;
+            return (
+              <section
+                key={frame._id}
+                className={`rounded border bg-terminal-bg-lighter ${
+                  isSelected
+                    ? "border-terminal-cyan"
+                    : "border-terminal-green-dimmer"
                 }`}
               >
-                ⑂
-              </button>
-            </div>
-            {expanded && (
-              <div className="space-y-3 border-t border-terminal-green-dimmer p-3 text-xs">
-                {messages.length > 0 ? (
-                  <div className="space-y-2">
-                    {messages.map((message, messageIndex) => (
-                      <HistoryFrameMessage key={messageIndex} message={message} />
-                    ))}
+                <div className="flex items-stretch">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExpandedFrameIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(frame._id)) next.delete(frame._id);
+                        else next.add(frame._id);
+                        return next;
+                      });
+                    }}
+                    aria-expanded={expanded}
+                    className="block min-w-0 flex-1 p-3 text-left hover:bg-terminal-bg focus:outline-none focus:ring-1 focus:ring-terminal-green"
+                  >
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="shrink-0 text-terminal-cyan">
+                            frame #{index + 1}
+                          </span>
+                          <span className="truncate text-terminal-green-dim">
+                            {shortId(frame._id)}
+                          </span>
+                          <span className="shrink-0 text-terminal-green">
+                            {frameType}
+                          </span>
+                          {isLatest && (
+                            <span className="text-terminal-yellow">latest</span>
+                          )}
+                          {isSelected && (
+                            <span className="text-terminal-cyan">viewing</span>
+                          )}
+                        </div>
+                        <CollapsedFrameMessages
+                          frame={frame}
+                          messages={messages}
+                        />
+                      </div>
+                      <div className="shrink-0 text-right text-terminal-green-dim">
+                        <div>
+                          {new Date(frame.createdAt).toLocaleTimeString()}
+                        </div>
+                        <div>{messages.length} msgs</div>
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onTimeTravelFrame(frame._id)}
+                    aria-label={`time travel to frame ${index + 1}`}
+                    title="time travel"
+                    className={`w-10 shrink-0 border-l border-terminal-green-dimmer hover:bg-terminal-bg focus:outline-none focus:ring-1 focus:ring-terminal-green ${
+                      isSelected
+                        ? "text-terminal-cyan"
+                        : "text-terminal-green-dim hover:text-terminal-green"
+                    }`}
+                  >
+                    ⑂
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="space-y-3 border-t border-terminal-green-dimmer p-3 text-xs">
+                    {messages.length > 0 ? (
+                      <div className="space-y-2">
+                        {messages.map((message, messageIndex) => (
+                          <HistoryFrameMessage
+                            key={messageIndex}
+                            message={message}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="italic text-terminal-green-dim">
+                        No frame messages
+                      </div>
+                    )}
+                    <pre className="max-h-72 overflow-auto rounded border border-terminal-green-dimmer bg-terminal-bg p-2 text-terminal-green-dim">
+                      {JSON.stringify(frame, null, 2)}
+                    </pre>
                   </div>
-                ) : (
-                  <div className="italic text-terminal-green-dim">No frame messages</div>
                 )}
-                <pre className="max-h-72 overflow-auto rounded border border-terminal-green-dimmer bg-terminal-bg p-2 text-terminal-green-dim">
-                  {JSON.stringify(frame, null, 2)}
-                </pre>
-              </div>
-            )}
-          </section>
-        );
-      })}
+              </section>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
+function FrameHistoryFilters({
+  frameTypeOptions,
+  nodeOptions,
+  selectedFrameTypes,
+  selectedNodeRuntimeIds,
+  activeFrameTypeFilters,
+  activeNodeFilters,
+  activeFilterCount,
+  stickyTop,
+  onToggleFrameType,
+  onToggleNodeRuntime,
+  onClear,
+}: {
+  frameTypeOptions: HistoryFilterOption[];
+  nodeOptions: HistoryFilterOption[];
+  selectedFrameTypes: Set<string>;
+  selectedNodeRuntimeIds: Set<string>;
+  activeFrameTypeFilters: HistoryFilterOption[];
+  activeNodeFilters: HistoryFilterOption[];
+  activeFilterCount: number;
+  stickyTop: number;
+  onToggleFrameType: (value: string) => void;
+  onToggleNodeRuntime: (value: string) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <section
+        className="sticky z-10 -mx-4 overflow-hidden border-b border-terminal-green-dimmer bg-terminal-bg px-4 text-xs"
+        style={{ top: stickyTop }}
+      >
+        <div className="hide-horizontal-scrollbar terminal-scrollbar flex items-center gap-2 overflow-x-auto px-2 py-2">
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="shrink-0 rounded border border-terminal-green-dimmer bg-terminal-bg px-2 py-1 text-terminal-green hover:border-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+          >
+            filters{activeFilterCount > 0 ? ` ${activeFilterCount}` : ""}
+          </button>
+          {activeFilterCount > 0 && (
+            <>
+              <AppliedFilterChips
+                label="type"
+                options={activeFrameTypeFilters}
+                onRemove={onToggleFrameType}
+              />
+              <AppliedFilterChips
+                label="node"
+                options={activeNodeFilters}
+                onRemove={onToggleNodeRuntime}
+              />
+              <button
+                type="button"
+                onClick={onClear}
+                className="ml-auto shrink-0 text-terminal-green-dim hover:text-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+              >
+                clear
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+      {open && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-terminal-bg/80 p-4">
+          <button
+            type="button"
+            aria-label="close filters"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setOpen(false)}
+          />
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label="frame filters"
+            className="relative w-full max-w-xl rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3 text-xs shadow-2xl shadow-terminal-bg"
+          >
+            <div className="mb-3 flex items-center justify-between gap-3 border-b border-terminal-green-dimmer pb-2">
+              <div className="text-terminal-green">filters</div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-terminal-green-dim hover:text-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+              >
+                close
+              </button>
+            </div>
+            <div className="space-y-3">
+              <FilterChipGroup
+                label="type"
+                options={frameTypeOptions}
+                selectedValues={selectedFrameTypes}
+                emptyLabel="no frame types"
+                onToggle={onToggleFrameType}
+              />
+              <FilterChipGroup
+                label="node"
+                options={nodeOptions}
+                selectedValues={selectedNodeRuntimeIds}
+                emptyLabel="no inference nodes"
+                onToggle={onToggleNodeRuntime}
+              />
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-3 border-t border-terminal-green-dimmer pt-3">
+              {activeFilterCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onClear}
+                  className="text-terminal-green-dim hover:text-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+                >
+                  clear
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-terminal-green-dimmer bg-terminal-bg px-3 py-1 text-terminal-green hover:border-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+              >
+                done
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </>
+  );
+}
+
+function AppliedFilterChips({
+  label,
+  options,
+  onRemove,
+}: {
+  label: string;
+  options: HistoryFilterOption[];
+  onRemove: (value: string) => void;
+}) {
+  if (options.length === 0) return null;
+
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {options.map((option) => (
+        <button
+          key={`${label}:${option.value}`}
+          type="button"
+          title={`remove ${label} ${option.label}`}
+          onClick={() => onRemove(option.value)}
+          className="flex max-w-full shrink-0 items-center gap-1 rounded border border-terminal-cyan bg-terminal-bg px-2 py-1 text-terminal-cyan hover:border-terminal-green hover:text-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+        >
+          <span className="text-terminal-green-dim">{label}</span>
+          <span className="min-w-0 max-w-[11rem] truncate">{option.label}</span>
+          <span className="text-terminal-green-dim">x</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FilterChipGroup({
+  label,
+  options,
+  selectedValues,
+  emptyLabel,
+  onToggle,
+}: {
+  label: string;
+  options: HistoryFilterOption[];
+  selectedValues: Set<string>;
+  emptyLabel: string;
+  onToggle: (value: string) => void;
+}) {
+  return (
+    <div className="grid gap-1">
+      <div className="text-[11px] uppercase tracking-[0.08em] text-terminal-green-dim">
+        {label}
+      </div>
+      {options.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {options.map((option) => {
+            const selected = selectedValues.has(option.value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={selected}
+                title={option.title ?? option.label}
+                onClick={() => onToggle(option.value)}
+                className={`flex max-w-full items-center gap-1 rounded border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-terminal-green ${
+                  selected
+                    ? "border-terminal-cyan bg-terminal-bg text-terminal-cyan"
+                    : "border-terminal-green-dimmer bg-terminal-bg text-terminal-green-dim hover:border-terminal-green hover:text-terminal-green"
+                }`}
+              >
+                <span className="min-w-0 max-w-[11rem] truncate">
+                  {option.label}
+                </span>
+                {option.detail && (
+                  <span
+                    className={
+                      selected
+                        ? "text-terminal-cyan"
+                        : "text-terminal-green-dim"
+                    }
+                  >
+                    {option.detail}
+                  </span>
+                )}
+                <span
+                  className={
+                    selected ? "text-terminal-cyan" : "text-terminal-green-dim"
+                  }
+                >
+                  {option.count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="italic text-terminal-green-dim">{emptyLabel}</div>
+      )}
+    </div>
+  );
+}
 function MessagesHistory({
   sessionId,
-  headFrameId,
+  latestFrameId,
   timeTravelFrameId,
   onTimeTravelFrame,
 }: {
   sessionId: Id<"sessions"> | null;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
 }) {
@@ -677,8 +1174,11 @@ function MessagesHistory({
   if (!sessionId) return <EmptyHistory>No session</EmptyHistory>;
   if (!messages) return <EmptyHistory>Loading...</EmptyHistory>;
 
-  const orderedMessages = messages.slice().sort((a, b) => a.createdAt - b.createdAt);
-  if (orderedMessages.length === 0) return <EmptyHistory>No messages yet</EmptyHistory>;
+  const orderedMessages = messages
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (orderedMessages.length === 0)
+    return <EmptyHistory>No messages yet</EmptyHistory>;
 
   return (
     <div className="space-y-2">
@@ -687,8 +1187,8 @@ function MessagesHistory({
           "frameId" in message && typeof message.frameId === "string"
             ? (message.frameId as Id<"frames">)
             : null;
-        const isHead = frameId === headFrameId;
-        const isSelected = frameId === timeTravelFrameId && !isHead;
+        const isLatest = frameId === latestFrameId;
+        const isSelected = frameId === timeTravelFrameId && !isLatest;
         return (
           <button
             key={message._id}
@@ -707,17 +1207,37 @@ function MessagesHistory({
           >
             <div className="mb-2 flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2">
-                <span className={message.role === "user" ? "text-terminal-cyan" : "text-terminal-green"}>
+                <span
+                  className={
+                    message.role === "user"
+                      ? "text-terminal-cyan"
+                      : "text-terminal-green"
+                  }
+                >
                   {message.role}
                 </span>
-                {message.mode && <span className="text-terminal-green-dim">{message.mode}</span>}
-                {isHead && <span className="text-terminal-yellow">head</span>}
-                {isSelected && <span className="text-terminal-cyan">viewing</span>}
-                {frameId && <span className="truncate text-terminal-green-dim">{shortId(frameId)}</span>}
+                {message.mode && (
+                  <span className="text-terminal-green-dim">
+                    {message.mode}
+                  </span>
+                )}
+                {isLatest && <span className="text-terminal-yellow">latest</span>}
+                {isSelected && (
+                  <span className="text-terminal-cyan">viewing</span>
+                )}
+                {frameId && (
+                  <span className="truncate text-terminal-green-dim">
+                    {shortId(frameId)}
+                  </span>
+                )}
               </div>
-              <span className="shrink-0 text-terminal-green-dim">{new Date(message.createdAt).toLocaleTimeString()}</span>
+              <span className="shrink-0 text-terminal-green-dim">
+                {new Date(message.createdAt).toLocaleTimeString()}
+              </span>
             </div>
-            <div className="whitespace-pre-wrap break-words leading-5 text-terminal-green-dim">{message.content}</div>
+            <div className="whitespace-pre-wrap break-words leading-5 text-terminal-green-dim">
+              {message.content}
+            </div>
           </button>
         );
       })}
@@ -727,7 +1247,7 @@ function MessagesHistory({
 
 type BranchSession = {
   sessionId: Id<"sessions">;
-  headFrameId?: Id<"frames">;
+  latestFrameId?: Id<"frames">;
   contextEpoch: number;
   forkedFromSessionId?: Id<"sessions">;
   forkedFromFrameId?: Id<"frames">;
@@ -746,30 +1266,38 @@ type FamilyTimeline = {
 
 function BranchesHistory({
   sessionId,
-  headFrameId,
+  latestFrameId,
   timeTravelFrameId,
   onTimeTravelFrame,
   onSwitchSession,
 }: {
   sessionId: Id<"sessions"> | null;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
   onSwitchSession: (sessionId: Id<"sessions">) => void;
 }) {
-  const timeline = useQuery(api.sessions.getFamilyTimeline, sessionId ? { sessionId } : "skip") as
-    | FamilyTimeline
-    | null
-    | undefined;
-  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(new Set());
+  const timeline = useQuery(
+    api.sessions.getFamilyTimeline,
+    sessionId ? { sessionId } : "skip",
+  ) as FamilyTimeline | null | undefined;
+  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(
+    new Set(),
+  );
 
   if (!sessionId) return <EmptyHistory>No session</EmptyHistory>;
-  if (timeline === undefined) return <EmptyHistory>Loading branches...</EmptyHistory>;
-  if (!timeline || timeline.sessions.length === 0) return <EmptyHistory>No branch family yet</EmptyHistory>;
+  if (timeline === undefined)
+    return <EmptyHistory>Loading branches...</EmptyHistory>;
+  if (!timeline || timeline.sessions.length === 0)
+    return <EmptyHistory>No branch family yet</EmptyHistory>;
 
   const orderedSessions = timeline.sessions
     .slice()
-    .sort((a, b) => firstFrameTime(a) - firstFrameTime(b) || a.sessionId.localeCompare(b.sessionId));
+    .sort(
+      (a, b) =>
+        firstFrameTime(a) - firstFrameTime(b) ||
+        a.sessionId.localeCompare(b.sessionId),
+    );
   const childrenByParent = new Map<string, BranchSession[]>();
   for (const branch of orderedSessions) {
     if (!branch.forkedFromSessionId) continue;
@@ -778,16 +1306,29 @@ function BranchesHistory({
     childrenByParent.set(branch.forkedFromSessionId, children);
   }
   const rootBranches = orderedSessions.filter(
-    (branch) => branch.sessionId === timeline.familyRootSessionId || !branch.forkedFromSessionId,
+    (branch) =>
+      branch.sessionId === timeline.familyRootSessionId ||
+      !branch.forkedFromSessionId,
   );
-  const branchNumber = new Map(orderedSessions.map((branch, index) => [branch.sessionId, index + 1]));
+  const branchNumber = new Map(
+    orderedSessions.map((branch, index) => [branch.sessionId, index + 1]),
+  );
   const forksByFrame = new Map<string, number>();
   for (const edge of timeline.edges) {
     if (!edge.fromFrameId) continue;
-    forksByFrame.set(edge.fromFrameId, (forksByFrame.get(edge.fromFrameId) ?? 0) + 1);
+    forksByFrame.set(
+      edge.fromFrameId,
+      (forksByFrame.get(edge.fromFrameId) ?? 0) + 1,
+    );
   }
-  const totalFrames = orderedSessions.reduce((total, branch) => total + branch.frames.length, 0);
-  const expandedIds = expandedSessionIds.size === 0 ? new Set(orderedSessions.map((branch) => branch.sessionId)) : expandedSessionIds;
+  const totalFrames = orderedSessions.reduce(
+    (total, branch) => total + branch.frames.length,
+    0,
+  );
+  const expandedIds =
+    expandedSessionIds.size === 0
+      ? new Set(orderedSessions.map((branch) => branch.sessionId))
+      : expandedSessionIds;
 
   return (
     <div className="space-y-4 text-xs">
@@ -804,7 +1345,7 @@ function BranchesHistory({
             depth={0}
             currentSessionId={sessionId}
             rootSessionId={timeline.familyRootSessionId}
-            headFrameId={headFrameId}
+            latestFrameId={latestFrameId}
             timeTravelFrameId={timeTravelFrameId}
             branchNumber={branchNumber}
             childrenByParent={childrenByParent}
@@ -812,7 +1353,10 @@ function BranchesHistory({
             expandedSessionIds={expandedIds}
             onToggleSession={(id) => {
               setExpandedSessionIds((current) => {
-                const source = current.size === 0 ? new Set(orderedSessions.map((item) => item.sessionId)) : current;
+                const source =
+                  current.size === 0
+                    ? new Set(orderedSessions.map((item) => item.sessionId))
+                    : current;
                 const next = new Set(source);
                 if (next.has(id)) next.delete(id);
                 else next.add(id);
@@ -833,7 +1377,7 @@ function BranchNode({
   depth,
   currentSessionId,
   rootSessionId,
-  headFrameId,
+  latestFrameId,
   timeTravelFrameId,
   branchNumber,
   childrenByParent,
@@ -847,7 +1391,7 @@ function BranchNode({
   depth: number;
   currentSessionId: Id<"sessions">;
   rootSessionId: Id<"sessions">;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   branchNumber: Map<Id<"sessions">, number>;
   childrenByParent: Map<string, BranchSession[]>;
@@ -861,7 +1405,9 @@ function BranchNode({
   const isCurrent = branch.sessionId === currentSessionId;
   const isRoot = branch.sessionId === rootSessionId;
   const expanded = expandedSessionIds.has(branch.sessionId);
-  const orderedFrames = branch.frames.slice().sort((a, b) => a.createdAt - b.createdAt);
+  const orderedFrames = branch.frames
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
   const branchLabel = isRoot
     ? "root"
     : `branch ${String(branchNumber.get(branch.sessionId) ?? 1).padStart(2, "0")}`;
@@ -890,13 +1436,29 @@ function BranchNode({
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className={isCurrent ? "text-terminal-cyan" : "text-terminal-green"}>{branchLabel}</span>
-                    {isCurrent && <span className="text-terminal-yellow">current</span>}
-                    {isRoot && <span className="text-terminal-green-dim">family root</span>}
-                    <span className="truncate text-terminal-green-dim">{shortId(branch.sessionId)}</span>
+                    <span
+                      className={
+                        isCurrent ? "text-terminal-cyan" : "text-terminal-green"
+                      }
+                    >
+                      {branchLabel}
+                    </span>
+                    {isCurrent && (
+                      <span className="text-terminal-yellow">current</span>
+                    )}
+                    {isRoot && (
+                      <span className="text-terminal-green-dim">
+                        family root
+                      </span>
+                    )}
+                    <span className="truncate text-terminal-green-dim">
+                      {shortId(branch.sessionId)}
+                    </span>
                   </div>
                   <div className="mt-1 truncate text-terminal-green-dim">
-                    head {branch.headFrameId ? shortId(branch.headFrameId) : "none"} / epoch {branch.contextEpoch}
+                    latest{" "}
+                    {branch.latestFrameId ? shortId(branch.latestFrameId) : "none"}{" "}
+                    / epoch {branch.contextEpoch}
                   </div>
                 </div>
                 <div className="shrink-0 text-right text-terminal-green-dim">
@@ -919,7 +1481,7 @@ function BranchNode({
           <BranchFrameRail
             frames={orderedFrames}
             currentSession={isCurrent}
-            headFrameId={isCurrent ? headFrameId : branch.headFrameId ?? null}
+            latestFrameId={isCurrent ? latestFrameId : (branch.latestFrameId ?? null)}
             timeTravelFrameId={isCurrent ? timeTravelFrameId : null}
             forksByFrame={forksByFrame}
             onFrameClick={(frameId) => {
@@ -932,7 +1494,8 @@ function BranchNode({
           />
           {branch.forkedFromSessionId && branch.forkedFromFrameId && (
             <div className="border-t border-terminal-green-dimmer px-3 py-2 text-terminal-green-dim">
-              forked from {shortId(branch.forkedFromSessionId)} at {shortId(branch.forkedFromFrameId)}
+              forked from {shortId(branch.forkedFromSessionId)} at{" "}
+              {shortId(branch.forkedFromFrameId)}
             </div>
           )}
         </div>
@@ -945,7 +1508,7 @@ function BranchNode({
                 depth={depth + 1}
                 currentSessionId={currentSessionId}
                 rootSessionId={rootSessionId}
-                headFrameId={headFrameId}
+                latestFrameId={latestFrameId}
                 timeTravelFrameId={timeTravelFrameId}
                 branchNumber={branchNumber}
                 childrenByParent={childrenByParent}
@@ -966,30 +1529,38 @@ function BranchNode({
 function BranchFrameRail({
   frames,
   currentSession,
-  headFrameId,
+  latestFrameId,
   timeTravelFrameId,
   forksByFrame,
   onFrameClick,
 }: {
   frames: FrameDoc[];
   currentSession: boolean;
-  headFrameId: Id<"frames"> | null;
+  latestFrameId: Id<"frames"> | null;
   timeTravelFrameId: Id<"frames"> | null;
   forksByFrame: Map<string, number>;
   onFrameClick: (frameId: Id<"frames">) => void;
 }) {
   if (frames.length === 0) {
-    return <div className="border-t border-terminal-green-dimmer px-3 py-2 text-terminal-green-dim">no frames</div>;
+    return (
+      <div className="border-t border-terminal-green-dimmer px-3 py-2 text-terminal-green-dim">
+        no frames
+      </div>
+    );
   }
 
   return (
     <div className="hide-horizontal-scrollbar terminal-scrollbar overflow-x-auto border-t border-terminal-green-dimmer px-3 py-3">
       <div className="relative flex min-w-max items-start gap-2 pr-2">
-        <div aria-hidden className="absolute left-3 right-3 top-[13px] h-px bg-terminal-green-dimmer" />
+        <div
+          aria-hidden
+          className="absolute left-3 right-3 top-[13px] h-px bg-terminal-green-dimmer"
+        />
         {frames.map((frame, index) => {
           const messages = normalizeFrameMessages(frame.messages);
-          const isHead = frame._id === headFrameId;
-          const isSelected = currentSession && frame._id === timeTravelFrameId && !isHead;
+          const isLatest = frame._id === latestFrameId;
+          const isSelected =
+            currentSession && frame._id === timeTravelFrameId && !isLatest;
           const forkCount = forksByFrame.get(frame._id) ?? 0;
           const label = String(index + 1).padStart(2, "0");
           return (
@@ -1004,7 +1575,7 @@ function BranchFrameRail({
                 className={`grid h-7 w-7 place-items-center rounded border text-[11px] ${
                   isSelected
                     ? "border-terminal-cyan bg-terminal-cyan text-terminal-bg"
-                    : isHead
+                    : isLatest
                       ? "border-terminal-yellow bg-terminal-bg text-terminal-yellow"
                       : forkCount > 0
                         ? "border-terminal-cyan bg-terminal-bg text-terminal-cyan"
@@ -1014,7 +1585,9 @@ function BranchFrameRail({
                 {label}
               </span>
               <span className="w-full truncate text-[10px] leading-3 text-terminal-green-dim">
-                {forkCount > 0 ? `${forkCount} fork${forkCount === 1 ? "" : "s"}` : messageKind(messages)}
+                {forkCount > 0
+                  ? `${forkCount} fork${forkCount === 1 ? "" : "s"}`
+                  : messageKind(messages)}
               </span>
             </button>
           );
@@ -1034,7 +1607,10 @@ function BranchMetric({ label, value }: { label: string; value: number }) {
 }
 
 function firstFrameTime(branch: BranchSession) {
-  return branch.frames.reduce((earliest, frame) => Math.min(earliest, frame.createdAt), Number.POSITIVE_INFINITY);
+  return branch.frames.reduce(
+    (earliest, frame) => Math.min(earliest, frame.createdAt),
+    Number.POSITIVE_INFINITY,
+  );
 }
 
 function messageKind(messages: FrameMessage[]) {
@@ -1048,21 +1624,41 @@ function HistoryFrameMessage({ message }: { message: FrameMessage }) {
   return (
     <div className="rounded border border-terminal-green-dimmer p-2">
       <div className="mb-1 flex items-center gap-2">
-        <span className={type === "user" ? "text-terminal-cyan" : "text-terminal-green"}>{type}</span>
-        {message.name && <span className="text-terminal-yellow">{message.name}</span>}
+        <span
+          className={
+            type === "user" ? "text-terminal-cyan" : "text-terminal-green"
+          }
+        >
+          {type}
+        </span>
+        {message.name && (
+          <span className="text-terminal-yellow">{message.name}</span>
+        )}
       </div>
       {typeof message.text === "string" ? (
-        <div className="whitespace-pre-wrap break-words text-terminal-green-dim">{message.text}</div>
+        <div className="whitespace-pre-wrap break-words text-terminal-green-dim">
+          {message.text}
+        </div>
       ) : (
-        <pre className="max-h-40 overflow-auto text-terminal-green-dim">{JSON.stringify(message, null, 2)}</pre>
+        <pre className="max-h-40 overflow-auto text-terminal-green-dim">
+          {JSON.stringify(message, null, 2)}
+        </pre>
       )}
     </div>
   );
 }
 
-function CollapsedFrameMessages({ frame, messages }: { frame: FrameDoc; messages: FrameMessage[] }) {
+function CollapsedFrameMessages({
+  frame,
+  messages,
+}: {
+  frame: FrameDoc;
+  messages: FrameMessage[];
+}) {
   if (messages.length === 0) {
-    return <div className="mt-1 truncate text-terminal-green-dim">no messages</div>;
+    return (
+      <div className="mt-1 truncate text-terminal-green-dim">no messages</div>
+    );
   }
 
   return (
@@ -1071,8 +1667,12 @@ function CollapsedFrameMessages({ frame, messages }: { frame: FrameDoc; messages
         const preview = collapsedFrameMessagePreview(frame, message);
         return (
           <div key={index} className="flex min-w-0 gap-2 leading-5">
-            <span className="shrink-0 text-terminal-green-dim">{preview.label}:</span>
-            <span className="min-w-0 truncate text-terminal-green">{preview.detail}</span>
+            <span className="shrink-0 text-terminal-green-dim">
+              {preview.label}:
+            </span>
+            <span className="min-w-0 truncate text-terminal-green">
+              {preview.detail}
+            </span>
           </div>
         );
       })}
@@ -1081,38 +1681,186 @@ function CollapsedFrameMessages({ frame, messages }: { frame: FrameDoc; messages
 }
 
 function EmptyHistory({ children }: { children: ReactNode }) {
-  return <div className="text-sm italic text-terminal-green-dim">{children}</div>;
+  return (
+    <div className="text-sm italic text-terminal-green-dim">{children}</div>
+  );
 }
 
 function normalizeFrameMessages(messages: unknown): FrameMessage[] {
   return Array.isArray(messages) ? (messages as FrameMessage[]) : [];
 }
 
-function frameDescriptor(frame: FrameDoc, messages: FrameMessage[]) {
-  const metadata = recordValue(frame.metadata);
-  if (metadata?.type === "projector.runtime-completion") return "completion frame";
+function toggleSetValue(current: Set<string>, value: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
 
-  const first = messages[0];
-  if (!first) return "state frame";
+function toggleInclusiveFilter(
+  current: Set<string>,
+  value: string,
+  allValues: string[],
+): Set<string> {
+  if (allValues.length === 0) return new Set();
 
-  if (isToolCallMessage(first)) return "tool call frame";
-  if (first.type === "tool") return "tool result frame";
-  if (first.type === "user") return "user frame";
-  if (first.type === "assistant") return "assistant frame";
-  if (first.type === "work") return `${stringValue(first.kind) ?? "work"} frame`;
-  if (first.type === "instance") {
-    const kind = stringValue(first.kind);
-    if (kind === "state.update") return "state frame";
-    return "instance frame";
+  const source = current.size === 0 ? new Set(allValues) : current;
+  const next = toggleSetValue(source, value);
+  return next.size === 0 || next.size === allValues.length ? new Set() : next;
+}
+
+function frameTypeFilterOptions(
+  frameViews: FrameHistoryView[],
+): HistoryFilterOption[] {
+  const counts = new Map<FrameType, number>();
+  for (const view of frameViews) {
+    counts.set(view.frameType, (counts.get(view.frameType) ?? 0) + 1);
   }
+  return (["instance", "work", "actor"] as FrameType[])
+    .map((frameType) => ({
+      value: frameType,
+      label: frameType,
+      count: counts.get(frameType) ?? 0,
+    }))
+    .filter((option) => option.count > 0);
+}
 
-  return `${first.type ?? first.role ?? "unknown"} frame`;
+function nodeFilterOptions(
+  projectionTree: CompiledProjectionTree | undefined,
+  frameViews: FrameHistoryView[],
+  activationRuntimeIds: Map<string, string>,
+): HistoryFilterOption[] {
+  if (!projectionTree) return [];
+
+  return collectProjectionNodeFilterOptions(projectionTree)
+    .map((option) => ({
+      ...option,
+      count: frameViews.filter((view) =>
+        frameMatchesRuntime(
+          view.frame,
+          view.messages,
+          activationRuntimeIds,
+          option.value,
+        ),
+      ).length,
+    }))
+    .filter((option) => option.count > 0);
+}
+
+function collectProjectionNodeFilterOptions(
+  tree: CompiledProjectionTree,
+): HistoryFilterOption[] {
+  const options: HistoryFilterOption[] = [];
+  const seen = new Set<string>();
+  const visit = (node: CompiledProjectionNode) => {
+    if (!seen.has(node.runtimeInstanceId)) {
+      seen.add(node.runtimeInstanceId);
+      const label = node.name ?? node.nodeKey;
+      const detailParts = [node.kind, node.runtime.concurrency].filter(Boolean);
+      options.push({
+        value: node.runtimeInstanceId,
+        label,
+        detail: detailParts.join(" "),
+        count: 0,
+        title: `${label} ${node.runtimeInstanceId}`,
+      });
+    }
+    node.children.forEach(visit);
+  };
+  tree.roots.forEach(visit);
+  return options;
+}
+
+function activationRuntimeIdsFromFrameViews(
+  frameViews: FrameHistoryView[],
+): Map<string, string> {
+  const runtimeIds = new Map<string, string>();
+  for (const view of frameViews) {
+    const frameActivationId = stringValue(view.frame.activationId);
+    const frameRuntimeInstanceId = stringValue(view.frame.runtimeInstanceId);
+    if (frameActivationId && frameRuntimeInstanceId) {
+      runtimeIds.set(frameActivationId, frameRuntimeInstanceId);
+    }
+
+    for (const message of view.messages) {
+      if (message.type !== "work" || message.kind !== "activation") continue;
+      const activationId = stringValue(message.activationId);
+      const runtimeInstanceId = stringValue(message.runtimeInstanceId);
+      if (activationId && runtimeInstanceId) {
+        runtimeIds.set(activationId, runtimeInstanceId);
+      }
+    }
+  }
+  return runtimeIds;
+}
+
+function frameMatchesRuntime(
+  frame: FrameDoc,
+  messages: FrameMessage[],
+  activationRuntimeIds: Map<string, string>,
+  runtimeInstanceId: string,
+): boolean {
+  if (stringValue(frame.runtimeInstanceId) === runtimeInstanceId) return true;
+  if (
+    generatorMatchesRuntime(stringValue(frame.generatorId), runtimeInstanceId)
+  )
+    return true;
+  const frameActivationId = stringValue(frame.activationId);
+  if (
+    frameActivationId &&
+    activationRuntimeIds.get(frameActivationId) === runtimeInstanceId
+  )
+    return true;
+
+  return messages.some((message) => {
+    if (stringValue(message.runtimeInstanceId) === runtimeInstanceId)
+      return true;
+    if (
+      generatorMatchesRuntime(
+        stringValue(message.generatorId),
+        runtimeInstanceId,
+      )
+    )
+      return true;
+    const activationId = stringValue(message.activationId);
+    return Boolean(
+      activationId &&
+      activationRuntimeIds.get(activationId) === runtimeInstanceId,
+    );
+  });
+}
+
+function generatorMatchesRuntime(
+  generatorId: string | undefined,
+  runtimeInstanceId: string,
+): boolean {
+  if (!generatorId) return false;
+  return (
+    generatorId === runtimeInstanceId ||
+    generatorId.startsWith(`generator:${runtimeInstanceId}:activation:`) ||
+    generatorId.startsWith(`generator:${runtimeInstanceId}:activation:`)
+  );
+}
+
+function frameTypeForFrame(frame: FrameDoc, messages: FrameMessage[]): FrameType {
+  const metadata = recordValue(frame.metadata);
+  const metadataType = stringValue(metadata?.type);
+  if (
+    metadataType === "projector.runtime-completion" ||
+    metadataType === "projector.runtime-turn"
+  ) {
+    return "work";
+  }
+  if (messages.some((message) => message.type === "work")) return "work";
+  if (messages.length === 0) return "instance";
+  if (messages.some((message) => message.type === "instance")) return "instance";
+  return "actor";
 }
 
 function frameSummary(frame: FrameDoc, messages: FrameMessage[]) {
   const preview = messages.map(messagePreview).find(Boolean);
   if (preview) return preview;
-  return `${frame.instanceId} state frame`;
+  return `state frame`;
 }
 
 function messagePreview(message: FrameMessage) {
@@ -1130,13 +1878,19 @@ function collapsedFrameMessagePreview(frame: FrameDoc, message: FrameMessage) {
   if (isToolCallMessage(message)) {
     return {
       label: "tool call",
-      detail: stringValue(message.name) ?? stringValue(message.toolName) ?? stringValue(message.tool_name) ?? "unknown",
+      detail:
+        stringValue(message.name) ??
+        stringValue(message.toolName) ??
+        stringValue(message.tool_name) ??
+        "unknown",
     };
   }
 
   if (message.type === "tool") {
     const name = stringValue(message.name);
-    const result = truncatePreview(renderUnknown(message.text ?? message.value));
+    const result = truncatePreview(
+      renderUnknown(message.text ?? message.value),
+    );
     return {
       label: "tool result",
       detail: [name, result].filter(Boolean).join(" "),
@@ -1144,11 +1898,17 @@ function collapsedFrameMessagePreview(frame: FrameDoc, message: FrameMessage) {
   }
 
   if (message.type === "user" || message.role === "user") {
-    return { label: "user", detail: truncatePreview(renderMessageText(message)) };
+    return {
+      label: "user",
+      detail: truncatePreview(renderMessageText(message)),
+    };
   }
 
   if (message.type === "assistant" || message.role === "assistant") {
-    return { label: "assistant", detail: truncatePreview(renderMessageText(message)) };
+    return {
+      label: "assistant",
+      detail: truncatePreview(renderMessageText(message)),
+    };
   }
 
   if (message.type === "instance") {
@@ -1192,7 +1952,8 @@ function renderInstanceMessage(message: FrameMessage) {
 
 function renderWorkMessage(frame: FrameDoc, message: FrameMessage) {
   const kind = stringValue(message.kind) ?? "work";
-  const runtimeInstanceId = stringValue(message.runtimeInstanceId) ?? frame.runtimeInstanceId ?? "";
+  const runtimeInstanceId =
+    stringValue(message.runtimeInstanceId) ?? frame.runtimeInstanceId ?? "";
   return [kind, runtimeInstanceId].filter(Boolean).join(" ");
 }
 
@@ -1206,7 +1967,9 @@ function keysFromRecord(record: Record<string, unknown> | undefined) {
 }
 
 function recordValue(value: unknown) {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function stringValue(value: unknown) {
@@ -1216,7 +1979,8 @@ function stringValue(value: unknown) {
 function renderUnknown(value: unknown) {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
   try {
     return JSON.stringify(value);
   } catch {
@@ -1256,24 +2020,40 @@ function InstanceNode({
         className="flex w-full items-center gap-2 rounded px-1 py-1 text-left hover:bg-terminal-bg-lighter focus:outline-none focus:ring-1 focus:ring-terminal-green"
         style={{ paddingLeft: depth * 16 + 4 }}
       >
-        <span className="w-3 text-terminal-green-dim">{expanded ? "-" : "+"}</span>
+        <span className="w-3 text-terminal-green-dim">
+          {expanded ? "-" : "+"}
+        </span>
         <span className="text-terminal-green-dim">{instance.kind}</span>
         <span className="text-terminal-green">{instance.nodeKey}</span>
-        {instance.name && <span className="truncate text-terminal-cyan">{instance.name}</span>}
+        {instance.name && (
+          <span className="truncate text-terminal-cyan">{instance.name}</span>
+        )}
         <span className="text-terminal-yellow">{instance.runtime.type}</span>
-        <span className="truncate text-terminal-green-dim">{instance.runtime.runtimeInstanceId}</span>
+        <span className="truncate text-terminal-green-dim">
+          {instance.runtime.runtimeInstanceId}
+        </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
           {details} meta / {childCount} child
         </span>
       </button>
       {expanded && (
-        <div className="space-y-2 rounded bg-lightener py-2 pr-2" style={{ paddingLeft: depth * 16 + 24 }}>
+        <div
+          className="space-y-2 rounded bg-lightener py-2 pr-2"
+          style={{ paddingLeft: depth * 16 + 24 }}
+        >
           <TreeDisclosure title="metadata">
             <KeyValueRows
               plain
               rows={[
-                ["runtime address", addressLabel(instance.runtime.runtimeAddress)],
-                ...(instance.id ? ([["instance id", instance.id]] as Array<[string, ReactNode]>) : []),
+                [
+                  "runtime address",
+                  addressLabel(instance.runtime.runtimeAddress),
+                ],
+                ...(instance.id
+                  ? ([["instance id", instance.id]] as Array<
+                      [string, ReactNode]
+                    >)
+                  : []),
               ]}
             />
           </TreeDisclosure>
@@ -1282,7 +2062,11 @@ function InstanceNode({
           {instance.members.length > 0 ? (
             <TreeSection title={`members ${instance.members.length}`}>
               {instance.members.map((member) => (
-                <InstanceNode key={member.runtime.runtimeInstanceId} instance={member} depth={depth + 1} />
+                <InstanceNode
+                  key={member.runtime.runtimeInstanceId}
+                  instance={member}
+                  depth={depth + 1}
+                />
               ))}
             </TreeSection>
           ) : (
@@ -1291,7 +2075,11 @@ function InstanceNode({
           {instance.children.length > 0 ? (
             <TreeSection title={`children ${instance.children.length}`}>
               {instance.children.map((child) => (
-                <InstanceNode key={child.runtime.runtimeInstanceId} instance={child} depth={depth + 1} />
+                <InstanceNode
+                  key={child.runtime.runtimeInstanceId}
+                  instance={child}
+                  depth={depth + 1}
+                />
               ))}
             </TreeSection>
           ) : (
@@ -1303,7 +2091,13 @@ function InstanceNode({
   );
 }
 
-function ProjectionNode({ node, depth }: { node: CompiledProjectionNode; depth: number }) {
+function ProjectionNode({
+  node,
+  depth,
+}: {
+  node: CompiledProjectionNode;
+  depth: number;
+}) {
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -1315,37 +2109,58 @@ function ProjectionNode({ node, depth }: { node: CompiledProjectionNode; depth: 
         className="flex w-full items-center gap-2 rounded px-1 py-1 text-left hover:bg-terminal-bg-lighter focus:outline-none focus:ring-1 focus:ring-terminal-green"
         style={{ paddingLeft: depth * 16 + 4 }}
       >
-        <span className="w-3 text-terminal-green-dim">{expanded ? "-" : "+"}</span>
+        <span className="w-3 text-terminal-green-dim">
+          {expanded ? "-" : "+"}
+        </span>
         <span className="text-terminal-yellow">{node.kind}</span>
         <span className="text-terminal-green">{node.nodeKey}</span>
-        {node.name && <span className="truncate text-terminal-cyan">{node.name}</span>}
-        <span className="text-terminal-green-dim">{node.runtime.trigger.type}</span>
-        <span className="truncate text-terminal-green-dim">{node.runtimeInstanceId}</span>
+        {node.name && (
+          <span className="truncate text-terminal-cyan">{node.name}</span>
+        )}
+        <span className="text-terminal-green-dim">
+          {node.runtime.trigger.type}
+        </span>
+        <span className="truncate text-terminal-green-dim">
+          {node.runtimeInstanceId}
+        </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
-          system {node.compiled.systemParts.length} / dynamic {node.compiled.dynamicParts.length} / tools{" "}
+          system {node.compiled.systemParts.length} / dynamic{" "}
+          {node.compiled.dynamicParts.length} / tools{" "}
           {node.compiled.tools.length}
         </span>
       </button>
       {expanded && (
-        <div className="space-y-2 pb-2" style={{ paddingLeft: depth * 16 + 24 }}>
+        <div
+          className="space-y-2 pb-2"
+          style={{ paddingLeft: depth * 16 + 24 }}
+        >
           <KeyValueRows
             rows={[
               ["address", addressLabel(node.address)],
               ["concurrency", node.runtime.concurrency],
               ["history", node.runtime.activationHistory],
               ["own projection", projectionLabel(node.projection.own)],
-              ["boundary projection", projectionLabel(node.projection.boundary)],
+              [
+                "boundary projection",
+                projectionLabel(node.projection.boundary),
+              ],
               ...(node.parentRuntimeInstanceId
-                ? ([["parent runtime", node.parentRuntimeInstanceId]] as Array<[string, ReactNode]>)
+                ? ([["parent runtime", node.parentRuntimeInstanceId]] as Array<
+                    [string, ReactNode]
+                  >)
                 : []),
             ]}
           />
           <CompiledPayload node={node} />
-          <ProjectionFrameList frames={node.frames} />
+          <ProjectionNodeList projectionNodes={node.projectionNodes} />
           {node.children.length > 0 ? (
             <TreeSection title={`child projections ${node.children.length}`}>
               {node.children.map((child) => (
-                <ProjectionNode key={child.runtimeInstanceId} node={child} depth={depth + 1} />
+                <ProjectionNode
+                  key={child.runtimeInstanceId}
+                  node={child}
+                  depth={depth + 1}
+                />
               ))}
             </TreeSection>
           ) : (
@@ -1370,9 +2185,18 @@ function CompiledPayload({ node }: { node: CompiledProjectionNode }) {
 
   return (
     <TreeSection title="compiled payload">
-      <JsonDisclosure title={`system ${node.compiled.systemParts.length}`} value={node.compiled.systemParts} />
-      <JsonDisclosure title={`dynamic ${node.compiled.dynamicParts.length}`} value={node.compiled.dynamicParts} />
-      <JsonDisclosure title={`tools ${node.compiled.tools.length}`} value={node.compiled.tools} />
+      <JsonDisclosure
+        title={`system ${node.compiled.systemParts.length}`}
+        value={node.compiled.systemParts}
+      />
+      <JsonDisclosure
+        title={`dynamic ${node.compiled.dynamicParts.length}`}
+        value={node.compiled.dynamicParts}
+      />
+      <JsonDisclosure
+        title={`tools ${node.compiled.tools.length}`}
+        value={node.compiled.tools}
+      />
       <JsonDisclosure
         title={`retrievable states ${node.compiled.retrievableStates.length}`}
         value={node.compiled.retrievableStates}
@@ -1381,34 +2205,44 @@ function CompiledPayload({ node }: { node: CompiledProjectionNode }) {
   );
 }
 
-function ProjectionFrameList({ frames }: { frames: CompiledProjectionFrameView[] }) {
-  if (frames.length === 0) {
-    return <MutedLine>source frames empty</MutedLine>;
+function ProjectionNodeList({
+  projectionNodes,
+}: {
+  projectionNodes: CompiledProjectionNodeView[];
+}) {
+  if (projectionNodes.length === 0) {
+    return <MutedLine>projection nodes empty</MutedLine>;
   }
 
   return (
-    <TreeSection title={`source frames ${frames.length}`}>
+    <TreeSection title={`projection nodes ${projectionNodes.length}`}>
       <div className="space-y-2">
-        {frames.map((frame) => (
+        {projectionNodes.map((projectionNode) => (
           <div
-            key={frame.runtimeInstanceId}
+            key={projectionNode.runtimeInstanceId}
             className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-2"
           >
             <div className="flex min-w-0 items-center gap-2">
-              <span className="text-terminal-green-dim">{frame.kind}</span>
-              <span className="text-terminal-green">{frame.nodeKey}</span>
-              {frame.name && <span className="truncate text-terminal-cyan">{frame.name}</span>}
-              <span className="truncate text-terminal-green-dim">{frame.runtimeInstanceId}</span>
+              <span className="text-terminal-green-dim">{projectionNode.kind}</span>
+              <span className="text-terminal-green">{projectionNode.nodeKey}</span>
+              {projectionNode.name && (
+                <span className="truncate text-terminal-cyan">
+                  {projectionNode.name}
+                </span>
+              )}
+              <span className="truncate text-terminal-green-dim">
+                {projectionNode.runtimeInstanceId}
+              </span>
             </div>
             <KeyValueRows
               rows={[
-                ["address", addressLabel(frame.address)],
-                ["projection", projectionLabel(frame.projection)],
+                ["address", addressLabel(projectionNode.address)],
+                ["projection", projectionLabel(projectionNode.projection)],
               ]}
             />
-            <StateList states={frame.states} />
-            <ActionList title="tools" actions={frame.tools} />
-            <ActionList title="commands" actions={frame.commands} />
+            <StateList states={projectionNode.states} />
+            <ActionList title="tools" actions={projectionNode.tools} />
+            <ActionList title="commands" actions={projectionNode.commands} />
           </div>
         ))}
       </div>
@@ -1434,7 +2268,10 @@ function StateList({
     <TreeSection title={`states ${states.length}`}>
       <div className="space-y-2">
         {states.map((state) => (
-          <StateTreeItem key={`${addressLabel(state.address)}:${state.key}`} state={state} />
+          <StateTreeItem
+            key={`${addressLabel(state.address)}:${state.key}`}
+            state={state}
+          />
         ))}
       </div>
     </TreeSection>
@@ -1456,8 +2293,12 @@ function StateTreeItem({
       title={
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-terminal-green">{state.key}</span>
-          {state.projection && <span className="text-terminal-yellow">{state.projection}</span>}
-          <span className="truncate text-terminal-green-dim">{addressLabel(state.address)}</span>
+          {state.projection && (
+            <span className="text-terminal-yellow">{state.projection}</span>
+          )}
+          <span className="truncate text-terminal-green-dim">
+            {addressLabel(state.address)}
+          </span>
         </div>
       }
       preview={jsonInline(state.value)}
@@ -1487,7 +2328,10 @@ function ActionList({
     <TreeSection title={`${title} ${actions.length}`}>
       <div className="space-y-1">
         {actions.map((action, index) => (
-          <ActionTreeItem key={`${title}:${action.name}:${index}`} action={action} />
+          <ActionTreeItem
+            key={`${title}:${action.name}:${index}`}
+            action={action}
+          />
         ))}
       </div>
     </TreeSection>
@@ -1512,15 +2356,24 @@ function ActionTreeItem({
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-terminal-green">{action.name}</span>
           {action.target !== undefined && (
-            <span className="truncate text-terminal-green-dim">{addressLabel(action.target)}</span>
+            <span className="truncate text-terminal-green-dim">
+              {addressLabel(action.target)}
+            </span>
           )}
         </div>
       }
-      preview={action.description ?? (action.inputSchema !== undefined ? "input schema" : "")}
+      preview={
+        action.description ??
+        (action.inputSchema !== undefined ? "input schema" : "")
+      }
     >
       <div className="space-y-2">
-        {action.description && <div className="text-terminal-green-dim">{action.description}</div>}
-        {action.inputSchema !== undefined && <JsonDisclosure title="input schema" value={action.inputSchema} />}
+        {action.description && (
+          <div className="text-terminal-green-dim">{action.description}</div>
+        )}
+        {action.inputSchema !== undefined && (
+          <JsonDisclosure title="input schema" value={action.inputSchema} />
+        )}
         {!hasDetails && <MutedLine>no action details</MutedLine>}
       </div>
     </TreeDisclosure>
@@ -1530,16 +2383,22 @@ function ActionTreeItem({
 function JsonDisclosure({ title, value }: { title: string; value: unknown }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div className={`rounded ${expanded ? "border border-terminal-green-dimmer bg-lightener" : ""}`}>
+    <div
+      className={`rounded ${expanded ? "border border-terminal-green-dimmer bg-lightener" : ""}`}
+    >
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
         aria-expanded={expanded}
         className="flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-terminal-bg-lighter focus:outline-none focus:ring-1 focus:ring-terminal-green"
       >
-        <span className="w-3 text-terminal-green-dim">{expanded ? "-" : "+"}</span>
+        <span className="w-3 text-terminal-green-dim">
+          {expanded ? "-" : "+"}
+        </span>
         <span className="text-terminal-green-dim">{title}</span>
-        <span className="truncate text-terminal-green">{jsonInline(value)}</span>
+        <span className="truncate text-terminal-green">
+          {jsonInline(value)}
+        </span>
       </button>
       {expanded && (
         <pre className="max-h-72 overflow-auto border-t border-terminal-green-dimmer p-2 text-terminal-green-dim">
@@ -1550,9 +2409,17 @@ function JsonDisclosure({ title, value }: { title: string; value: unknown }) {
   );
 }
 
-function JsonPreview({ value, className = "bg-terminal-bg" }: { value: unknown; className?: string }) {
+function JsonPreview({
+  value,
+  className = "bg-terminal-bg",
+}: {
+  value: unknown;
+  className?: string;
+}) {
   return (
-    <pre className={`max-h-40 overflow-auto rounded p-2 text-terminal-green-dim ${className}`}>
+    <pre
+      className={`max-h-40 overflow-auto rounded p-2 text-terminal-green-dim ${className}`}
+    >
       {JSON.stringify(value, null, 2)}
     </pre>
   );
@@ -1573,19 +2440,29 @@ function TreeDisclosure({
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div className={`overflow-hidden rounded ${expanded ? `border border-terminal-green-dimmer ${expandedClassName}` : ""}`}>
+    <div
+      className={`overflow-hidden rounded ${expanded ? `border border-terminal-green-dimmer ${expandedClassName}` : ""}`}
+    >
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
         aria-expanded={expanded}
         className="flex w-full min-w-0 items-center gap-2 px-2 py-1 text-left hover:bg-terminal-bg-lighter focus:outline-none focus:ring-1 focus:ring-terminal-green"
       >
-        <span className="w-3 shrink-0 text-terminal-green-dim">{expanded ? "-" : "+"}</span>
+        <span className="w-3 shrink-0 text-terminal-green-dim">
+          {expanded ? "-" : "+"}
+        </span>
         <div className="min-w-0 flex-1">{title}</div>
-        {preview && <span className="min-w-0 max-w-[45%] truncate text-terminal-green-dim">{preview}</span>}
+        {preview && (
+          <span className="min-w-0 max-w-[45%] truncate text-terminal-green-dim">
+            {preview}
+          </span>
+        )}
       </button>
       {expanded && (
-        <div className={`border-t border-terminal-green-dimmer p-2 ${expandedBodyClassName}`}>
+        <div
+          className={`border-t border-terminal-green-dimmer p-2 ${expandedBodyClassName}`}
+        >
           {children}
         </div>
       )}
@@ -1593,22 +2470,44 @@ function TreeDisclosure({
   );
 }
 
-function TreeSection({ title, children }: { title: string; children: ReactNode }) {
+function TreeSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
   return (
     <section className="space-y-1">
-      <div className="text-[11px] uppercase tracking-[0.08em] text-terminal-green-dim">{title}</div>
+      <div className="text-[11px] uppercase tracking-[0.08em] text-terminal-green-dim">
+        {title}
+      </div>
       {children}
     </section>
   );
 }
 
-function KeyValueRows({ rows, plain = false }: { rows: Array<[string, ReactNode]>; plain?: boolean }) {
+function KeyValueRows({
+  rows,
+  plain = false,
+}: {
+  rows: Array<[string, ReactNode]>;
+  plain?: boolean;
+}) {
   return (
-    <div className={plain ? "space-y-1" : "space-y-1 rounded border border-terminal-green-dimmer bg-lightener p-2"}>
+    <div
+      className={
+        plain
+          ? "space-y-1"
+          : "space-y-1 rounded border border-terminal-green-dimmer bg-lightener p-2"
+      }
+    >
       {rows.map(([key, value]) => (
         <div key={key} className="grid grid-cols-[104px_minmax(0,1fr)] gap-2">
           <span className="text-terminal-green-dim">{key}</span>
-          <span className="min-w-0 break-words text-terminal-green">{value}</span>
+          <span className="min-w-0 break-words text-terminal-green">
+            {value}
+          </span>
         </div>
       ))}
     </div>
@@ -1616,11 +2515,15 @@ function KeyValueRows({ rows, plain = false }: { rows: Array<[string, ReactNode]
 }
 
 function EmptyTree({ children }: { children: ReactNode }) {
-  return <div className="text-sm italic text-terminal-green-dim">{children}</div>;
+  return (
+    <div className="text-sm italic text-terminal-green-dim">{children}</div>
+  );
 }
 
 function MutedLine({ children }: { children: ReactNode }) {
-  return <div className="text-xs italic text-terminal-green-dim">{children}</div>;
+  return (
+    <div className="text-xs italic text-terminal-green-dim">{children}</div>
+  );
 }
 
 function projectionLabel(projection: unknown) {
@@ -1673,8 +2576,13 @@ function StateTab({ instances }: { instances: DemoClientInstance[] }) {
   return (
     <div className="space-y-4">
       {states.map((state) => (
-        <section key={`${state.address.instanceId}:${state.address.stateKey}`} className="space-y-2">
-          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">{state.key}</div>
+        <section
+          key={`${state.address.instanceId}:${state.address.stateKey}`}
+          className="space-y-2"
+        >
+          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">
+            {state.key}
+          </div>
           <pre className="overflow-x-auto rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3 text-xs leading-5 text-terminal-green">
             {JSON.stringify(state.value, null, 2)}
           </pre>
@@ -1705,7 +2613,9 @@ function CommandsTab({
   readOnly: boolean;
 }) {
   const commands = collectCommands(instances);
-  const demoAddress = instances[0]?.states.find((item) => item.key === "demo")?.address;
+  const demoAddress = instances[0]?.states.find(
+    (item) => item.key === "demo",
+  )?.address;
   const run = async (commandMeta: DemoClientInstance["commands"][number]) => {
     if (readOnly) return;
     const name = commandMeta.name;
@@ -1713,13 +2623,14 @@ function CommandsTab({
       name === "setThemeHue"
         ? { hue: Math.round(Math.random() * 360) }
         : name.startsWith("set")
-            ? { enabled: true }
-            : {};
+          ? { enabled: true }
+          : {};
     const command = effigy.getCommand(name as never, {
       target: commandMeta.target,
       optimistic: (ctx) => {
         if (!demoAddress) return;
-        if (name === "setThemeHue" && "hue" in input) ctx.patchAt(demoAddress, { themeHue: input.hue });
+        if (name === "setThemeHue" && "hue" in input)
+          ctx.patchAt(demoAddress, { themeHue: input.hue });
       },
     });
     await command.run(input as never);
@@ -1735,7 +2646,9 @@ function CommandsTab({
         >
           <div>{command.name}</div>
           <div className="text-xs text-terminal-green-dim">
-            {readOnly ? "fork session to run commands" : command.description ?? "client command"}
+            {readOnly
+              ? "fork session to run commands"
+              : (command.description ?? "client command")}
           </div>
         </button>
       ))}
@@ -1756,8 +2669,12 @@ function PlaygroundTab({
 }) {
   const optimisticState = findState(instances, "agentControls");
   const canonicalState = findState(canonicalInstances, "agentControls");
-  const optimisticControls = optimisticState?.value as { testCounter?: number } | undefined;
-  const canonicalControls = canonicalState?.value as { testCounter?: number } | undefined;
+  const optimisticControls = optimisticState?.value as
+    | { testCounter?: number }
+    | undefined;
+  const canonicalControls = canonicalState?.value as
+    | { testCounter?: number }
+    | undefined;
   const optimisticValue = optimisticControls?.testCounter ?? 0;
   const canonicalValue = canonicalControls?.testCounter ?? 0;
   const incrementCommand = findCommand(instances, "incrementTestCounter");
@@ -1767,7 +2684,9 @@ function PlaygroundTab({
     const command = effigy.getCommand("incrementTestCounter" as never, {
       target: incrementCommand.target,
       optimistic: (ctx) => {
-        ctx.patchAt(optimisticState.address, { testCounter: optimisticValue + 1 });
+        ctx.patchAt(optimisticState.address, {
+          testCounter: optimisticValue + 1,
+        });
       },
     });
     await command.run({ amount: 1 } as never);
@@ -1777,7 +2696,9 @@ function PlaygroundTab({
     <div className="space-y-4 text-sm">
       <section className="space-y-3 rounded border border-terminal-green-dimmer p-3">
         <div>
-          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">test counter</div>
+          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">
+            test counter
+          </div>
           <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
             <Metric label="optimistic" value={optimisticValue} />
             <Metric label="canonical" value={canonicalValue} />
@@ -1824,7 +2745,9 @@ function DevTab({
     <div className="space-y-4">
       <section className="space-y-3">
         <div>
-          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">message transport</div>
+          <div className="text-xs uppercase tracking-[0.08em] text-terminal-green-dim">
+            message transport
+          </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             {(["convex", "livekit"] as MessageTransport[]).map((transport) => (
               <button
@@ -1845,12 +2768,18 @@ function DevTab({
         <div className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3 text-xs leading-5">
           <div className="flex items-center justify-between gap-3">
             <span className="text-terminal-green-dim">livekit rpc</span>
-            <span className={liveKitReady ? "text-terminal-cyan" : "text-terminal-yellow"}>
+            <span
+              className={
+                liveKitReady ? "text-terminal-cyan" : "text-terminal-yellow"
+              }
+            >
               {liveKitReady ? "ready" : liveKitStatus.status}
             </span>
           </div>
           {liveKitStatus.detail && (
-            <div className={`mt-2 ${liveKitStatus.status === "error" ? "text-terminal-red" : liveKitReady ? "text-terminal-green-dim" : "text-terminal-yellow"}`}>
+            <div
+              className={`mt-2 ${liveKitStatus.status === "error" ? "text-terminal-red" : liveKitReady ? "text-terminal-green-dim" : "text-terminal-yellow"}`}
+            >
               {liveKitStatus.detail}
             </div>
           )}
@@ -1881,7 +2810,10 @@ function collectCommands(instances: DemoClientInstance[]) {
   return commands;
 }
 
-function findState(instances: DemoClientInstance[], key: string): DemoClientInstance["states"][number] | undefined {
+function findState(
+  instances: DemoClientInstance[],
+  key: string,
+): DemoClientInstance["states"][number] | undefined {
   for (const instance of instances) {
     const state = findStateInInstance(instance, key);
     if (state) return state;
@@ -1889,7 +2821,10 @@ function findState(instances: DemoClientInstance[], key: string): DemoClientInst
   return undefined;
 }
 
-function findCommand(instances: DemoClientInstance[], name: string): DemoClientInstance["commands"][number] | undefined {
+function findCommand(
+  instances: DemoClientInstance[],
+  name: string,
+): DemoClientInstance["commands"][number] | undefined {
   for (const instance of instances) {
     const command = findCommandInInstance(instance, name);
     if (command) return command;
@@ -1897,7 +2832,10 @@ function findCommand(instances: DemoClientInstance[], name: string): DemoClientI
   return undefined;
 }
 
-function findCommandInInstance(instance: DemoClientInstance, name: string): DemoClientInstance["commands"][number] | undefined {
+function findCommandInInstance(
+  instance: DemoClientInstance,
+  name: string,
+): DemoClientInstance["commands"][number] | undefined {
   const command = instance.commands.find((item) => item.name === name);
   if (command) return command;
   for (const member of instance.members) {
@@ -1911,7 +2849,10 @@ function findCommandInInstance(instance: DemoClientInstance, name: string): Demo
   return undefined;
 }
 
-function findStateInInstance(instance: DemoClientInstance, key: string): DemoClientInstance["states"][number] | undefined {
+function findStateInInstance(
+  instance: DemoClientInstance,
+  key: string,
+): DemoClientInstance["states"][number] | undefined {
   const state = instance.states.find((item) => item.key === key);
   if (state) return state;
   for (const member of instance.members) {

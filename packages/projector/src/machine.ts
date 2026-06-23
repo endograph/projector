@@ -5,17 +5,18 @@ import {
 } from "./actions.ts";
 import {
   assertUniqueInstanceIds,
-  findFrameByRuntimeId,
-  topStateInstance,
-  traversalFrames,
-  type ProjectionFrame,
-} from "./frames.ts";
+  findProjectionNodeByRuntimeId,
+  hoistStateInstance,
+  collectProjectionNodes,
+  type ProjectionNode,
+} from "./projection-nodes.ts";
 import {
   assistantMessageFromTextOutput,
   createActivationFrame,
   createCompletionFrame,
   isWorkActivationMessage,
   isWorkCompletionMessage,
+  isWorkMessage,
 } from "./history.ts";
 import {
   isHistoryProjectionFunction,
@@ -33,6 +34,7 @@ import type {
   Charter,
   CompiledInference,
   CommandMessage,
+  ExecuteCommandResult,
   ExecutorRunRequest,
   ExecutorRunResult,
   Frame,
@@ -44,7 +46,6 @@ import type {
   InstanceMessage,
   NormalizedRuntime,
   OutputConfig,
-  PrimaryRuntime,
   RetrievableState,
   RuntimeConcurrency,
   RuntimeInstanceId,
@@ -56,7 +57,7 @@ import type {
   StateKey,
   StatePath,
   StateUpdate,
-  WorkerRuntime,
+  GeneratorRuntime,
   WorkActivationMessage,
   WorkCompletionMessage,
   WorkCompletionReason,
@@ -82,7 +83,7 @@ export type MachineOptions<TDataContent = never> = {
 
 export type Activation = WorkActivationMessage & {
   kind: "activation";
-  generatorKind: "primary" | "worker";
+  generatorKind: "generator";
   frameId: string;
   frameIndex: number;
 };
@@ -90,10 +91,6 @@ export type Activation = WorkActivationMessage & {
 export type RunMachineOptions = {
   scheduleWork?: boolean;
 };
-
-export type ExecuteCommandResult<T = unknown> =
-  | { success: true; value?: T; clientId?: string }
-  | { success: false; error: string; clientId?: string };
 
 export type MachineRun<TDataContent = never> =
 AsyncIterable<Frame<TDataContent>> & {
@@ -137,7 +134,7 @@ type WorkState = {
 
 type RuntimeCandidate = {
   runtimeInstanceId: RuntimeInstanceId;
-  generatorKind: "primary" | "worker";
+  generatorKind: "generator";
   trigger: RuntimeTrigger;
   concurrency: RuntimeConcurrency;
   concurrencyKey: string;
@@ -192,6 +189,7 @@ export function createMachine<TDataContent = never>({
     },
   };
   assertUniqueInstanceIds(machine.root);
+  assertHasSourceInstance(machine.root);
   validateMachineActionStateCompatibility(machine.root, machine.charter);
   return machine;
 }
@@ -281,19 +279,30 @@ function notifyFrame<TDataContent>(
   }
 }
 
+function assertHasSourceInstance(root: Instance<any>): void {
+  if (hasSourceInstance(root)) {
+    return;
+  }
+  throw new Error("Projector machine requires at least one source instance");
+}
+
+function hasSourceInstance(instance: Instance<any>): boolean {
+  return Boolean(instance.isSource) || (instance.children ?? []).some(hasSourceInstance);
+}
+
 function generatorForRuntime<TDataContent>(
   root: Instance<TDataContent>,
   runtimeInstanceId: RuntimeInstanceId,
   generatorId: GeneratorId | undefined,
 ): Generator {
-  const frame = findFrameByRuntimeId(root, runtimeInstanceId);
-  if (!frame || (frame.node.runtime.type !== "primary" && frame.node.runtime.type !== "worker")) {
+  const projectionNode = findProjectionNodeByRuntimeId(root, runtimeInstanceId);
+  if (!projectionNode || projectionNode.node.runtime.type !== "generator") {
     throw new Error(`Unknown runtime "${runtimeInstanceId}"`);
   }
 
   return {
     id: generatorId ?? runtimeInstanceId,
-    kind: frame.node.runtime.type,
+    kind: "generator",
     runtimeInstanceId,
   };
 }
@@ -304,7 +313,7 @@ export function collectRunnableActivations<TDataContent = never>(
   const state = foldWork(machine);
   const candidates = [...state.activations.values()]
     .filter((activation) => !state.completions.has(activation.activationId))
-    .filter((activation) => findFrameByRuntimeId(machine.root, activation.runtimeInstanceId));
+    .filter((activation) => findProjectionNodeByRuntimeId(machine.root, activation.runtimeInstanceId));
 
   const serialByKey = new Map<string, Activation>();
   const runnable: Activation[] = [];
@@ -332,8 +341,8 @@ export async function runActivation<TDataContent = never>(
   if (!activation) return undefined;
   if (initialState.completions.has(activationId)) return undefined;
 
-  const frame = findFrameByRuntimeId(machine.root, activation.runtimeInstanceId);
-  if (!frame) {
+  const projectionNode = findProjectionNodeByRuntimeId(machine.root, activation.runtimeInstanceId);
+  if (!projectionNode) {
     machine.enqueueFrame(createCompletionFrame({
       activationId,
       sourceFrameId: activation.sourceFrameId,
@@ -342,7 +351,7 @@ export async function runActivation<TDataContent = never>(
     return { completionReason: "cancelled" };
   }
 
-  const runtime = frame.node.runtime;
+  const runtime = projectionNode.node.runtime;
   const frameDefaults = {
     generatorId: activation.generatorId,
     runtimeInstanceId: activation.runtimeInstanceId,
@@ -361,12 +370,13 @@ export async function runActivation<TDataContent = never>(
   const getState = inference.retrievableStates.length > 0
     ? createRetrievableStateGetter(machine, inference.retrievableStates)
     : undefined;
+  const output = outputConfigForRuntime(projectionNode.node.output, runtime);
   const request: ExecutorRunRequest<TDataContent> = {
     generatorId: activation.generatorId,
     runtimeInstanceId: activation.runtimeInstanceId,
     activationId,
     inference,
-    output: frame.node.output,
+    output,
     createActionContext: (action) =>
       createMachineActionContext(machine, action, frameDefaults, getState),
     enqueueFrame: (draft) =>
@@ -379,7 +389,7 @@ export async function runActivation<TDataContent = never>(
   };
 
   const result = await machine.charter.executor.run(request);
-  enqueueExecutorResult(machine, result, frame.node.output, frameDefaults);
+  enqueueExecutorResult(machine, result, output, frameDefaults);
   if (!foldWork(machine).completions.has(activationId)) {
     machine.enqueueFrame(createCompletionFrame({
       activationId,
@@ -422,7 +432,7 @@ export async function executeCommand<
   machine.enqueueFrame({ messages: [message] });
 
   try {
-    const context = createFrameActionContext(machine, resolved.frame, {});
+    const context = createProjectionNodeActionContext(machine, resolved.projectionNode, {});
     const value = await resolved.command.run?.(input as never, context as never);
     enqueueActionResult(machine, value);
     return { success: true, value: value as T, clientId: message.clientId };
@@ -438,26 +448,26 @@ export async function executeCommand<
 function resolveCommand<TDataContent>(
   machine: Machine<TDataContent>,
   message: CommandMessage,
-): { command: AnyAction; frame: ProjectionFrame<TDataContent> } | undefined {
-  const frames = traversalFrames(machine.root);
+): { command: AnyAction; projectionNode: ProjectionNode<TDataContent> } | undefined {
+  const projectionNodes = collectProjectionNodes(machine.root);
   if (message.target) {
     const targetRuntimeId = encodeRuntimeAddress(message.target);
-    const frame = frames.find((candidate) => candidate.runtimeInstanceId === targetRuntimeId);
-    const command = frame
-      ? resolveFrameCommands(frame, machine.charter).find((candidate) => candidate.name === message.name)
+    const projectionNode = projectionNodes.find((candidate) => candidate.runtimeInstanceId === targetRuntimeId);
+    const command = projectionNode
+      ? resolveFrameCommands(projectionNode, machine.charter).find((candidate) => candidate.name === message.name)
       : undefined;
-    if (frame && command) {
-      assertNodeActionStateCompatibility(command, frame.node, "command");
+    if (projectionNode && command) {
+      assertNodeActionStateCompatibility(command, projectionNode.node, "command");
     }
-    return frame && command ? { command, frame } : undefined;
+    return projectionNode && command ? { command, projectionNode } : undefined;
   }
 
-  let resolved: { command: AnyAction; frame: ProjectionFrame<TDataContent> } | undefined;
-  for (const frame of frames) {
-    const command = resolveFrameCommands(frame, machine.charter).find((candidate) => candidate.name === message.name);
+  let resolved: { command: AnyAction; projectionNode: ProjectionNode<TDataContent> } | undefined;
+  for (const projectionNode of projectionNodes) {
+    const command = resolveFrameCommands(projectionNode, machine.charter).find((candidate) => candidate.name === message.name);
     if (command) {
-      assertNodeActionStateCompatibility(command, frame.node, "command");
-      resolved = { command, frame };
+      assertNodeActionStateCompatibility(command, projectionNode.node, "command");
+      resolved = { command, projectionNode };
     }
   }
   return resolved;
@@ -467,12 +477,12 @@ function validateMachineActionStateCompatibility<TDataContent>(
   root: Instance<TDataContent>,
   charter: Charter<TDataContent>,
 ): void {
-  for (const frame of traversalFrames(root)) {
-    for (const tool of resolveFrameTools(frame, charter)) {
-      assertNodeActionStateCompatibility(tool, frame.node, "tool");
+  for (const projectionNode of collectProjectionNodes(root)) {
+    for (const tool of resolveFrameTools(projectionNode, charter)) {
+      assertNodeActionStateCompatibility(tool, projectionNode.node, "tool");
     }
-    for (const command of resolveFrameCommands(frame, charter)) {
-      assertNodeActionStateCompatibility(command, frame.node, "command");
+    for (const command of resolveFrameCommands(projectionNode, charter)) {
+      assertNodeActionStateCompatibility(command, projectionNode.node, "command");
     }
   }
 }
@@ -484,13 +494,13 @@ function createMachineActionContext<TDataContent>(
   getState?: ActionContext["getState"],
 ): ActionContext<unknown, TDataContent> {
   const binding = getActionBinding(action);
-  const frame = binding
-    ? findFrameByRuntimeId(machine.root, binding.runtimeInstanceId)
+  const projectionNode = binding
+    ? findProjectionNodeByRuntimeId(machine.root, binding.runtimeInstanceId)
     : undefined;
-  if (!frame) {
+  if (!projectionNode) {
     return createUnboundActionContext(getState);
   }
-  const context = createFrameActionContext(machine, frame, frameDefaults);
+  const context = createProjectionNodeActionContext(machine, projectionNode, frameDefaults);
   if (getState) {
     context.getState = getState;
   }
@@ -513,13 +523,13 @@ function createRetrievableStateGetter<TDataContent>(
   };
 }
 
-function createFrameActionContext<TDataContent>(
+function createProjectionNodeActionContext<TDataContent>(
   machine: Machine<TDataContent>,
-  frame: ProjectionFrame<TDataContent>,
+  projectionNode: ProjectionNode<TDataContent>,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "runtimeInstanceId" | "activationId">>,
 ): ActionContext<unknown, TDataContent> {
-  const stateAddress = stateAddressForFrame(frame);
-  const instance = createActionInstanceContext(machine, frame, frameDefaults);
+  const stateAddress = stateAddressForProjectionNode(projectionNode);
+  const instance = createActionInstanceContext(machine, projectionNode, frameDefaults);
   if (!stateAddress) {
     return { instance };
   }
@@ -551,13 +561,13 @@ function createFrameActionContext<TDataContent>(
 
 function createActionInstanceContext<TDataContent>(
   machine: Machine<TDataContent>,
-  frame: ProjectionFrame<TDataContent>,
+  projectionNode: ProjectionNode<TDataContent>,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "runtimeInstanceId" | "activationId">>,
 ): NonNullable<ActionContext<unknown, TDataContent>["instance"]> {
-  const ownerInstanceId = frame.concreteInstance.id;
+  const ownerInstanceId = projectionNode.concreteInstance.id;
   return {
-    runtimeInstanceId: frame.runtimeInstanceId,
-    address: frame.address,
+    runtimeInstanceId: projectionNode.runtimeInstanceId,
+    address: projectionNode.address,
     ownerInstanceId,
     spawn: (node, options) => {
       machine.enqueueFrame({
@@ -657,10 +667,32 @@ function enqueueExecutorResult<TDataContent>(
   if (result.value !== undefined) {
     enqueueFrameWithDefaults(
       machine,
-      { messages: [assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>] },
+      {
+        messages: [
+          assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>,
+        ],
+      },
       frameDefaults,
     );
   }
+}
+
+function outputConfigForRuntime<TDataContent>(
+  output: OutputConfig<TDataContent> | undefined,
+  runtime: NormalizedRuntime<TDataContent>,
+): OutputConfig<TDataContent> | undefined {
+  if (runtime.type !== "generator" || output?.audience !== undefined) {
+    return output;
+  }
+
+  if (runtime.outputAudienceDefault === undefined) {
+    return output;
+  }
+
+  return {
+    ...output,
+    audience: runtime.outputAudienceDefault,
+  };
 }
 
 function enqueueFrameWithDefaults<TDataContent>(
@@ -779,7 +811,7 @@ function foldFrameIntoMachine<TDataContent>(
   validateMachineActionStateCompatibility(machine.root, machine.charter);
 }
 
-function applyInstanceMessage<TDataContent>(
+export function applyInstanceMessage<TDataContent>(
   root: Instance<TDataContent>,
   message: InstanceMessage<TDataContent>,
   charter: Charter<TDataContent>,
@@ -888,14 +920,16 @@ function stateOverrideTarget(
   instance: Instance<any>,
   stateKey: string,
 ): Instance<any> {
-  const frame = traversalFrames(root).find(
+  const projectionNode = collectProjectionNodes(root).find(
     (candidate) => !candidate.isMember && candidate.concreteInstance === instance,
   );
-  const descriptor = frame?.node.state;
-  if (!frame || !descriptor || descriptor.key !== stateKey) {
+  const descriptor = projectionNode?.node.state;
+  if (!projectionNode || !descriptor || descriptor.key !== stateKey) {
     return instance;
   }
-  return descriptor.scope === "local" ? frame.concreteInstance : topStateInstance(frame);
+  return descriptor.scope === "local"
+    ? projectionNode.concreteInstance
+    : hoistStateInstance(projectionNode);
 }
 
 function readStateValue(root: Instance<any>, address: StateAddress): unknown {
@@ -923,16 +957,18 @@ function findResolvedState(root: Instance<any>, address: StateAddress) {
   return state;
 }
 
-function stateAddressForFrame(
-  frame: ProjectionFrame<any>,
+function stateAddressForProjectionNode(
+  projectionNode: ProjectionNode<any>,
 ): StateAddress | undefined {
-  const descriptor = frame.node.state;
+  const descriptor = projectionNode.node.state;
   if (!descriptor) {
     return undefined;
   }
   return {
     instanceId:
-      descriptor.scope === "local" ? frame.concreteInstance.id : topStateInstance(frame).id,
+      descriptor.scope === "local"
+        ? projectionNode.concreteInstance.id
+        : hoistStateInstance(projectionNode).id,
     stateKey: descriptor.key,
   };
 }
@@ -1230,7 +1266,7 @@ function reconcileWorkOnce<TDataContent>(
   for (const activation of state.activations.values()) {
     if (
       !state.completions.has(activation.activationId) &&
-      !findFrameByRuntimeId(machine.root, activation.runtimeInstanceId)
+      !findProjectionNodeByRuntimeId(machine.root, activation.runtimeInstanceId)
     ) {
       const frame = machine.enqueueFrame(createCompletionFrame({
         activationId: activation.activationId,
@@ -1250,7 +1286,7 @@ function reconcileWorkOnce<TDataContent>(
     }
   }
 
-  for (const sourceFrame of machine.frames.slice()) {
+  for (const sourceFrame of schedulingSourceFrames(machine.frames)) {
     if (sourceFrame.inert) continue;
     if (pendingFrameIds?.has(sourceFrame.id)) continue;
 
@@ -1296,6 +1332,25 @@ function reconcileWorkOnce<TDataContent>(
   return appended;
 }
 
+function schedulingSourceFrames<TDataContent>(
+  frames: readonly Frame<TDataContent>[],
+): readonly Frame<TDataContent>[] {
+  const lastWorkFrameIndex = findLastWorkFrameIndex(frames);
+  const startIndex = lastWorkFrameIndex ?? 0;
+  return frames.slice(startIndex);
+}
+
+function findLastWorkFrameIndex<TDataContent>(
+  frames: readonly Frame<TDataContent>[],
+): number | undefined {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    if (frames[index]?.messages.some(isWorkMessage)) {
+      return index;
+    }
+  }
+  return undefined;
+}
+
 function hasActivationForRuntimeSource(
   state: WorkState,
   runtimeInstanceId: RuntimeInstanceId,
@@ -1318,41 +1373,41 @@ function runtimeCandidatesForSource<TDataContent>(
   state: WorkState,
 ): RuntimeCandidate[] {
   const candidates: RuntimeCandidate[] = [];
-  for (const frame of traversalFrames(machine.root)) {
-    if (frame.node.runtime.type !== "primary" && frame.node.runtime.type !== "worker") {
+  for (const projectionNode of collectProjectionNodes(machine.root)) {
+    if (projectionNode.node.runtime.type !== "generator") {
       continue;
     }
 
-    const runtime = frame.node.runtime as PrimaryRuntime<TDataContent> | WorkerRuntime<TDataContent>;
-    if (sourceFrameProducedByRuntime(sourceFrame, frame.runtimeInstanceId, state)) {
+    const runtime = projectionNode.node.runtime as GeneratorRuntime<TDataContent>;
+    if (sourceFrameProducedByRuntime(sourceFrame, projectionNode.runtimeInstanceId, state)) {
       continue;
     }
     const concurrency = runtime.concurrency ?? "serial";
     const generatorId = generatorIdFor(
-      frame.runtimeInstanceId,
+      projectionNode.runtimeInstanceId,
       runtime.type,
       concurrency,
       sourceFrame.id,
       machine.id,
       runtime.trigger,
     );
-    if (!triggerMatches(machine, frame.runtimeInstanceId, runtime.trigger, sourceFrame, state)) {
+    if (!triggerMatches(machine, projectionNode.runtimeInstanceId, runtime.trigger, sourceFrame, state)) {
       continue;
     }
 
     candidates.push({
-      runtimeInstanceId: frame.runtimeInstanceId,
-      generatorKind: runtime.type,
+      runtimeInstanceId: projectionNode.runtimeInstanceId,
+      generatorKind: "generator",
       trigger: runtime.trigger,
       concurrency,
       concurrencyKey: concurrency === "parallel"
         ? activationIdFor({
             machineId: machine.id,
-            runtimeInstanceId: frame.runtimeInstanceId,
+            runtimeInstanceId: projectionNode.runtimeInstanceId,
             trigger: runtime.trigger,
             sourceFrameId: sourceFrame.id,
           })
-        : frame.runtimeInstanceId,
+        : projectionNode.runtimeInstanceId,
       generatorId,
     });
   }
@@ -1410,12 +1465,12 @@ function foldWork<TDataContent>(machine: Machine<TDataContent>): WorkState {
   machine.frames.forEach((frame, frameIndex) => {
     for (const message of frame.messages) {
       if (isWorkActivationMessage(message) && !activations.has(message.activationId)) {
-        const projectionFrame = findFrameByRuntimeId(machine.root, message.runtimeInstanceId);
-        const runtimeType = projectionFrame?.node.runtime.type;
-        if (runtimeType !== "primary" && runtimeType !== "worker") continue;
+        const projectionNode = findProjectionNodeByRuntimeId(machine.root, message.runtimeInstanceId);
+        const runtimeType = projectionNode?.node.runtime.type;
+        if (runtimeType !== "generator") continue;
         activations.set(message.activationId, {
           ...message,
-          generatorKind: runtimeType,
+          generatorKind: "generator",
           frameId: frame.id,
           frameIndex,
         });
@@ -1500,12 +1555,12 @@ function nearestAncestorRuntimeId(
   root: Instance<any>,
   runtimeInstanceId: RuntimeInstanceId,
 ): RuntimeInstanceId | undefined {
-  const frame = findFrameByRuntimeId(root, runtimeInstanceId);
-  if (!frame) return undefined;
+  const projectionNode = findProjectionNodeByRuntimeId(root, runtimeInstanceId);
+  if (!projectionNode) return undefined;
 
-  let parent = frame.parent;
+  let parent = projectionNode.parent;
   while (parent) {
-    if (parent.node.runtime.type === "primary" || parent.node.runtime.type === "worker") {
+    if (parent.node.runtime.type === "generator") {
       return parent.runtimeInstanceId;
     }
     parent = parent.parent;
@@ -1515,7 +1570,7 @@ function nearestAncestorRuntimeId(
 
 function generatorIdFor(
   runtimeInstanceId: RuntimeInstanceId,
-  kind: "primary" | "worker",
+  kind: "generator",
   concurrency: RuntimeConcurrency,
   sourceFrameId: string,
   machineId: string,
@@ -1549,7 +1604,7 @@ function completionReasonForRuntime(
 ): WorkCompletionReason {
   if (reason === "cancelled" || reason === "delegated") return reason;
   if (reason === "error") return "cancelled";
-  return runtime.type === "primary" ? "end-turn" : "done";
+  return runtime.type === "generator" && runtime.trigger.type === "actor-frame" ? "end-turn" : "done";
 }
 
 function hashString(value: string): string {

@@ -2,7 +2,7 @@
 
 LiveKit worker for the projector demo.
 
-The web app dispatches this worker when the demo voice toggle is enabled. The worker joins the LiveKit room, starts an OpenAI Realtime session, syncs compiled projector instructions/tools through `@projectors/livekit-executor`, and persists voice transcripts back to the same Convex session used by text chat.
+The web app dispatches this worker when the demo voice toggle is enabled. The worker joins the LiveKit room, starts an OpenAI Realtime session, syncs compiled projector instructions/tools through `@projectors/livekit-realtime-executor`, and persists voice transcripts back to the same Convex session used by text chat.
 
 ## Setup
 

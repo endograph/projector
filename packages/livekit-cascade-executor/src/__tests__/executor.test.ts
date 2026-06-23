@@ -3,7 +3,7 @@ import {
   ROOT_RUNTIME_INSTANCE_ID,
   createGetStateAction,
   createNode,
-  createTool,
+  createAction,
   createUnboundActionContext,
   textAssistantMessage,
   textUserMessage,
@@ -12,7 +12,7 @@ import {
 } from "@projectors/core";
 import { z } from "zod";
 import {
-  LiveKitExecutor,
+  LiveKitCascadeExecutor,
   REALTIME_GENERATOR_ID,
   buildLiveKitInstructions,
   buildLiveKitToolDefinitions,
@@ -106,10 +106,10 @@ class FakeRoom {
   }
 }
 
-describe("LiveKitExecutor", () => {
+describe("LiveKitCascadeExecutor", () => {
   it("delegates non-root activations to the discrete executor", async () => {
     const discrete = fakeDiscreteExecutor();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       discreteExecutor: discrete,
     });
@@ -122,7 +122,7 @@ describe("LiveKitExecutor", () => {
 
   it("delegates root activations when realtime is inactive", async () => {
     const discrete = fakeDiscreteExecutor();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       discreteExecutor: discrete,
     });
@@ -149,7 +149,7 @@ describe("LiveKitExecutor", () => {
       dynamicParts: ["Current mode: voice."],
       history: [{ ...textUserMessage("hello") }],
     });
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: discrete,
       agent,
@@ -178,7 +178,7 @@ describe("LiveKitExecutor", () => {
     const agent: LiveKitAgentLike = {
       _agentActivity: { realtimeLLMSession: realtimeSession },
     };
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       discreteExecutor: fakeDiscreteExecutor(),
       agent,
@@ -199,7 +199,7 @@ describe("LiveKitExecutor", () => {
 
   it("realizes active realtime root prompts as LiveKit instructions and tools", async () => {
     const discrete = fakeDiscreteExecutor();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       discreteExecutor: discrete,
       realtime: { enabled: true },
@@ -211,7 +211,7 @@ describe("LiveKitExecutor", () => {
           systemParts: ["System A"],
           dynamicParts: ["Dynamic B"],
           history: [{ ...textUserMessage("Hi") }],
-          tools: [createTool({ state: null, name: "lookup", description: "Lookup things" })],
+          tools: [createAction({ state: null, name: "lookup", description: "Lookup things" })],
         }),
       }),
     );
@@ -227,7 +227,7 @@ describe("LiveKitExecutor", () => {
 
   it("does not forward the same visible user frame to realtime twice", async () => {
     const session = new FakeSession();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -243,7 +243,7 @@ describe("LiveKitExecutor", () => {
   it("records LiveKit transcript events as inert realtime root frames", async () => {
     const session = new FakeSession();
     const frames: FrameDraft[] = [];
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -302,7 +302,7 @@ describe("LiveKitExecutor", () => {
     const frames: FrameDraft[] = [];
     const userUpdates: any[] = [];
     const session = new FakeSession();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -354,7 +354,7 @@ describe("LiveKitExecutor", () => {
     const session = new FakeSession();
     const room = new FakeRoom();
     const frames: FrameDraft[] = [];
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       room,
       discreteExecutor: fakeDiscreteExecutor(),
@@ -396,7 +396,7 @@ describe("LiveKitExecutor", () => {
     const session = new FakeSession(originalOutput);
     const frames: FrameDraft[] = [];
     const streamUpdates: any[] = [];
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -441,7 +441,7 @@ describe("LiveKitExecutor", () => {
   it("forwards transcript output to the original LiveKit sink", async () => {
     const originalOutput = new FakeTextOutput();
     const session = new FakeSession(originalOutput);
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -463,7 +463,7 @@ describe("LiveKitExecutor", () => {
   it("restores original transcription output on disconnect", async () => {
     const originalOutput = new FakeTextOutput();
     const session = new FakeSession(originalOutput);
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -481,7 +481,7 @@ describe("LiveKitExecutor", () => {
   it("does not duplicate conversation_item_added when assistant stream wrapper is active", async () => {
     const session = new FakeSession(new FakeTextOutput());
     const frames: FrameDraft[] = [];
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -510,7 +510,7 @@ describe("LiveKitExecutor", () => {
   it("does not emit partial transcript frames when no stream callback is configured", async () => {
     const session = new FakeSession(new FakeTextOutput());
     const frames: FrameDraft[] = [];
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
       realtime: { enabled: true },
@@ -535,7 +535,7 @@ describe("LiveKitExecutor", () => {
   });
 
   it("uses last compiled tool wins and resolves callbacks against the latest snapshot", async () => {
-    const first = createTool({
+    const first = createAction({
       state: null,
       name: "lookup",
       description: "first",
@@ -543,7 +543,7 @@ describe("LiveKitExecutor", () => {
       run: vi.fn(() => "first-result"),
     });
     const secondRun = vi.fn(() => "second-result");
-    const second = createTool({
+    const second = createAction({
       state: null,
       name: "lookup",
       description: "second",
@@ -556,7 +556,7 @@ describe("LiveKitExecutor", () => {
       updateTools: vi.fn(),
     };
     const session = new FakeSession();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
       discreteExecutor: fakeDiscreteExecutor(),
@@ -611,7 +611,7 @@ describe("LiveKitExecutor", () => {
       updateInstructions: vi.fn(),
       updateTools: vi.fn(),
     };
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
       discreteExecutor: fakeDiscreteExecutor(),
@@ -644,7 +644,7 @@ describe("LiveKitExecutor", () => {
   });
 
   it("syncs projected retrieval tools without a current request", async () => {
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session: new FakeSession(),
       discreteExecutor: fakeDiscreteExecutor(),
     });
@@ -668,9 +668,57 @@ describe("LiveKitExecutor", () => {
     );
   });
 
+  it("enqueues formed messages returned by tools", async () => {
+    const frames: FrameDraft[] = [];
+    const ping = createAction({
+      state: null,
+      name: "ping",
+      inputSchema: z.object({}),
+      run: () => textAssistantMessage("pong"),
+    });
+    const executor = new LiveKitCascadeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+    });
+
+    await executor.syncRuntime(
+      syncContext(
+        {
+          inference: inference({
+            tools: [ping],
+          }),
+        },
+        frames,
+      ),
+    );
+
+    await expect(executor.executeTool("ping", {})).resolves.toEqual(textAssistantMessage("pong"));
+    expect(frames).toMatchObject([
+      {
+        inert: true,
+        messages: [{ type: "tool", name: "ping", value: { phase: "call", input: {} } }],
+      },
+      {
+        inert: true,
+        messages: [
+          {
+            type: "tool",
+            name: "ping",
+            value: { phase: "result", value: textAssistantMessage("pong") },
+          },
+        ],
+      },
+      {
+        inert: true,
+        metadata: { transport: "livekit", actionResult: true },
+        messages: [textAssistantMessage("pong")],
+      },
+    ]);
+  });
+
   it("removes event handlers on disconnect", () => {
     const session = new FakeSession();
-    const executor = new LiveKitExecutor({
+    const executor = new LiveKitCascadeExecutor({
       session,
       discreteExecutor: fakeDiscreteExecutor(),
     });
@@ -742,8 +790,8 @@ describe("LiveKit prompt and tool rendering", () => {
     const definitions = buildLiveKitToolDefinitions(
       inference({
         tools: [
-          createTool({ state: null, name: "same", description: "first" }),
-          createTool({ state: null, name: "same", description: "last" }),
+          createAction({ state: null, name: "same", description: "first" }),
+          createAction({ state: null, name: "same", description: "last" }),
           createGetStateAction(),
         ],
         retrievableStates: [
@@ -838,7 +886,7 @@ function syncContext(
     runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
     generator: {
       id: REALTIME_GENERATOR_ID,
-      kind: "primary",
+      kind: "generator",
       runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
     },
     inference: inference(),

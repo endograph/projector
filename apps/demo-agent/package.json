@@ -16,7 +16,7 @@
     "@livekit/agents": "^1.0.40",
     "@livekit/agents-plugin-openai": "^1.0.40",
     "@livekit/rtc-node": "^0.13.24",
-    "@projectors/livekit-executor": "workspace:*",
+    "@projectors/livekit-realtime-executor": "workspace:*",
     "@projectors/aisdk-executor": "workspace:*",
     "convex": "^1.31.2",
     "@projectors/demo": "workspace:*",

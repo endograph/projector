@@ -1,0 +1,30 @@
+{
+  "name": "@projectors/livekit-realtime-executor",
+  "version": "0.0.1",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsgo"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.0.40",
+    "@livekit/agents-plugin-openai": "^1.0.40",
+    "@projectors/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "^4.0.17",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "zod": "catalog:"
+  }
+}

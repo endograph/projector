@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { ParticipantInfo_Kind } from "@livekit/protocol";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
+import { randomUUID } from "node:crypto";
 
 const AGENT_NAME = "demo-agent";
 const DISPATCH_LOCK_TTL_MS = 20_000;
@@ -31,8 +32,10 @@ export const getToken = action({
     }
 
     const roomName = `demo-${sessionId}`;
+    const identity = userParticipantIdentity(sessionId);
+
     const token = new AccessToken(apiKey, apiSecret, {
-      identity: `user-${sessionId}-${crypto.randomUUID()}`,
+      identity,
       ttl: "15m",
     });
     token.addGrant({
@@ -120,7 +123,7 @@ async function ensureAgentDispatchedImpl(
     const hasLiveWorkerAfterLock = await ctx.runQuery(internal.livekitAgent.hasLiveAgentWorkerLease, { sessionId });
 
     const now = Date.now();
-    const httpUrl = liveKitUrl.replace("wss://", "https://").replace("ws://", "http://");
+    const httpUrl = liveKitHttpUrl(liveKitUrl);
     const dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
     const roomService = new RoomServiceClient(httpUrl, apiKey, apiSecret);
     let activeDispatches = await listActiveDispatches(dispatchClient, roomName);
@@ -291,8 +294,16 @@ async function removeParticipantBestEffort(roomService: RoomServiceClient, roomN
   try {
     await roomService.removeParticipant(roomName, identity);
   } catch (error) {
-    console.warn(`[livekit] Failed to remove agent participant ${identity} from room ${roomName}:`, error);
+    console.warn(`[livekit] Failed to remove participant ${identity} from room ${roomName}:`, error);
   }
+}
+
+function userParticipantIdentity(sessionId: string): string {
+  return `user-${sessionId}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+}
+
+function liveKitHttpUrl(url: string): string {
+  return url.replace("wss://", "https://").replace("ws://", "http://");
 }
 
 function nextDispatchAt(now: number, reconnectAttempt: number): number {

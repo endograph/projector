@@ -25,7 +25,7 @@ import type {
   FrameMessage,
   LiveKitAgentLike,
   LiveKitAssistantTranscriptUpdate,
-  LiveKitExecutorConfig,
+  LiveKitCascadeExecutorConfig,
   LiveKitEventNames,
   LiveKitFunctionTool,
   LiveKitRealtimeSessionLike,
@@ -39,7 +39,7 @@ import type {
 
 export const REALTIME_GENERATOR_ID = ROOT_RUNTIME_INSTANCE_ID;
 
-const ASSISTANT_TRANSCRIPT_OUTPUT_OWNER = Symbol("livekitExecutorAssistantTranscriptOutputOwner");
+const ASSISTANT_TRANSCRIPT_OUTPUT_OWNER = Symbol("liveKitCascadeExecutorAssistantTranscriptOutputOwner");
 
 const DEFAULT_EVENT_NAMES: LiveKitEventNames = {
   userInputTranscribed: "user_input_transcribed",
@@ -48,15 +48,15 @@ const DEFAULT_EVENT_NAMES: LiveKitEventNames = {
   dataReceived: "data_received",
 };
 
-export class LiveKitExecutor<
+export class LiveKitCascadeExecutor<
   TDataContent = never,
 > implements ProjectorExecutor<TDataContent> {
-  readonly type = "livekit";
+  readonly type = "livekit-cascade";
 
-  readonly connection: LiveKitConnection<TDataContent>;
+  readonly connection: LiveKitCascadeConnection<TDataContent>;
 
-  constructor(readonly config: LiveKitExecutorConfig<TDataContent>) {
-    this.connection = new LiveKitConnection(this, config);
+  constructor(readonly config: LiveKitCascadeExecutorConfig<TDataContent>) {
+    this.connection = new LiveKitCascadeConnection(this, config);
   }
 
   disconnect(): void {
@@ -109,14 +109,14 @@ export class LiveKitExecutor<
   log(message: string, details?: unknown): void {
     if (!this.config.debug) return;
     if (details === undefined) {
-      console.log(`[LiveKitExecutor] ${message}`);
+      console.log(`[LiveKitCascadeExecutor] ${message}`);
     } else {
-      console.log(`[LiveKitExecutor] ${message}`, details);
+      console.log(`[LiveKitCascadeExecutor] ${message}`, details);
     }
   }
 }
 
-export class LiveKitConnection<TDataContent = never> {
+export class LiveKitCascadeConnection<TDataContent = never> {
   private readonly eventNames: LiveKitEventNames;
   private readonly handlers: Array<{
     target: "session" | "room";
@@ -135,8 +135,8 @@ export class LiveKitConnection<TDataContent = never> {
   private readonly userTranscripts = new UserTranscriptEnvelope<TDataContent>(this);
 
   constructor(
-    private readonly executor: LiveKitExecutor<TDataContent>,
-    readonly config: LiveKitExecutorConfig<TDataContent>,
+    private readonly executor: LiveKitCascadeExecutor<TDataContent>,
+    readonly config: LiveKitCascadeExecutorConfig<TDataContent>,
   ) {
     this.eventNames = {
       ...DEFAULT_EVENT_NAMES,
@@ -221,6 +221,7 @@ export class LiveKitConnection<TDataContent = never> {
         ? await action.run(input, context)
         : undefined;
     await this.enqueueToolFrame(name, { phase: "result", value });
+    await this.enqueueActionResultMessages(value);
     return value;
   }
 
@@ -502,13 +503,43 @@ export class LiveKitConnection<TDataContent = never> {
     });
   }
 
+  private async enqueueActionResultMessages(value: unknown): Promise<void> {
+    const messages = actionResultMessages<TDataContent>(value);
+    if (messages.length === 0) return;
+
+    await this.enqueueFrame({
+      generatorId: this.executor.realtimeRuntimeInstanceId(),
+      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
+      inert: true,
+      metadata: { transport: "livekit", actionResult: true },
+      messages,
+    });
+  }
+
   private async enqueueFrame(frame: FrameDraft<TDataContent>): Promise<Frame<TDataContent>> {
     const result = this.currentSyncContext?.machine.enqueueFrame(frame);
     if (!result) {
-      throw new Error("LiveKitConnection cannot enqueue a frame before runtime sync");
+      throw new Error("LiveKitCascadeConnection cannot enqueue a frame before runtime sync");
     }
     return result;
   }
+}
+
+function actionResultMessages<TDataContent>(
+  value: unknown,
+): FrameMessage<TDataContent>[] {
+  if (Array.isArray(value)) {
+    return value.filter(isFrameMessageLike) as FrameMessage<TDataContent>[];
+  }
+  return isFrameMessageLike(value) ? [value as FrameMessage<TDataContent>] : [];
+}
+
+function isFrameMessageLike(value: unknown): value is { type: string } {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof (value as { type?: unknown }).type === "string",
+  );
 }
 
 class AssistantTranscriptStream<TDataContent> {
@@ -516,7 +547,7 @@ class AssistantTranscriptStream<TDataContent> {
   private text = "";
   private seq = 0;
 
-  constructor(private readonly connection: LiveKitConnection<TDataContent>) {}
+  constructor(private readonly connection: LiveKitCascadeConnection<TDataContent>) {}
 
   install(): void {
     const output = this.connection.config.session.output;
@@ -595,7 +626,7 @@ class UserTranscriptEnvelope<TDataContent> {
   private messageId?: string;
   private seq = 0;
 
-  constructor(private readonly connection: LiveKitConnection<TDataContent>) {}
+  constructor(private readonly connection: LiveKitCascadeConnection<TDataContent>) {}
 
   begin(): void {
     if (this.messageId) return;
@@ -735,7 +766,7 @@ export function buildLiveKitToolDefinitions(
 
 export function buildLiveKitToolContext<TDataContent = never>(
   inference: CompiledInference<TDataContent>,
-  connection: LiveKitConnection<TDataContent>,
+  connection: LiveKitCascadeConnection<TDataContent>,
 ): LiveKitToolContext {
   const tools: LiveKitToolContext = {};
 

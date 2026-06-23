@@ -247,7 +247,7 @@ configured realtime runtime id.
 Recommended:
 
 ```ts
-new LiveKitExecutor({
+new LiveKitRealtimeExecutor({
   realtimeRuntimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
   ...
 });

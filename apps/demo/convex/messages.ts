@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { collectSessionFramePath, getFrameIndexForSession } from "./frameHistory";
+import { collectSessionFramePath, getFrameIndexForSession, getLatestSessionFrameDoc } from "./frameHistory";
 
 type DbCtx = MutationCtx | QueryCtx;
 type MessageDoc = Doc<"messages">;
@@ -14,9 +14,11 @@ export const listForFramePath = query({
   },
   handler: async (ctx, { sessionId, upToFrameId }) => {
     const session = await ctx.db.get(sessionId);
-    if (!session?.headFrameId) return [];
+    if (!session) return [];
 
-    const frameId = upToFrameId ?? session.headFrameId;
+    const latestFrame = await getLatestSessionFrameDoc(ctx, sessionId);
+    const frameId = upToFrameId ?? latestFrame?._id;
+    if (!frameId) return [];
     const framePath = await collectSessionFramePath(ctx, session, frameId);
     const frameIds = new Set(framePath.map((frame) => frame._id));
     const messages = await listMessagesForSession(ctx, sessionId);
@@ -37,9 +39,11 @@ export const add = mutation({
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
-    if (!session?.headFrameId) throw new Error("Session not found");
+    if (!session) throw new Error("Session not found");
 
-    const frameId = args.frameId ?? session.headFrameId;
+    const latestFrame = await getLatestSessionFrameDoc(ctx, args.sessionId);
+    const frameId = args.frameId ?? latestFrame?._id;
+    if (!frameId) throw new Error("Session has no frames");
     const frameIndex = await getFrameIndexForSession(ctx, args.sessionId, frameId);
     if (!frameIndex) throw new Error("Message frame is not indexed for session");
 

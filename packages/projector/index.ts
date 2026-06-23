@@ -2,7 +2,7 @@ export * from "./src/actions.ts";
 export * from "./src/charter.ts";
 export * from "./src/compile.ts";
 export * from "./src/create.ts";
-export * from "./src/frames.ts";
+export * from "./src/projection-nodes.ts";
 export * from "./src/history.ts";
 export * from "./src/machine.ts";
 export * from "./src/projection-functions.ts";

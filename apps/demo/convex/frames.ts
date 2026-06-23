@@ -6,7 +6,7 @@ export const list = query({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, { sessionId }) => {
     const session = await ctx.db.get(sessionId);
-    if (!session?.headFrameId) return [];
+    if (!session) return [];
     const frames = await listSessionFrameDocs(ctx, sessionId);
     return frames.map(restoreFrame);
   },

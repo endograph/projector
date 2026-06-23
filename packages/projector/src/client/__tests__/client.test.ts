@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
-import { createCommand, createNode, type StateAddress } from "../../../index.ts";
+import { createAction, createNode, type StateAddress } from "../../../index.ts";
 import {
   consumeCommandResidue,
   createCommandMessage,
@@ -18,7 +18,7 @@ import {
 
 describe("client command typing and messages", () => {
   it("constructs typed command messages with generated or supplied client IDs", () => {
-    const setLiveMode = createCommand({
+    const setLiveMode = createAction({
       state: null,
       name: "setLiveMode",
       inputSchema: z.object({ enabled: z.boolean() }),
@@ -87,7 +87,7 @@ describe("machine effigy", () => {
 
 describe("client instance realization", () => {
   it("realizes concrete instances, member runtime addresses, state addresses, and command targets", () => {
-    const setLiveMode = createCommand({
+    const setLiveMode = createAction({
       state: null,
       name: "setLiveMode",
       inputSchema: z.object({ enabled: z.boolean() }),
@@ -112,8 +112,9 @@ describe("client instance realization", () => {
 
     const client = realizeClientInstances({
       id: "agent-1",
+      isSource: true,
       node: agent,
-      children: [{ id: "child-1", node: child }],
+      children: [{ id: "child-1", isSource: true, node: child }],
     });
 
     expect(client.runtime.runtimeInstanceId).toBe("instance:agent-1");

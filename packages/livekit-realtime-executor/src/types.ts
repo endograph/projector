@@ -14,6 +14,7 @@ import type {
   RetrievableState,
   RuntimeSyncContext,
 } from "@projectors/core";
+import type { llm } from "@livekit/agents";
 
 export type {
   CompletionReason,
@@ -51,7 +52,11 @@ export type LiveKitTextOutputLike = {
 };
 
 export type LiveKitRealtimeSessionLike = {
+  chatCtx?: unknown;
+  on?: (event: string, handler: LiveKitEventHandler) => unknown;
+  off?: (event: string, handler: LiveKitEventHandler) => unknown;
   updateInstructions?: (instructions: string) => unknown | Promise<unknown>;
+  updateChatCtx?: (chatCtx: llm.ChatContext) => unknown | Promise<unknown>;
   updateTools?: (tools: LiveKitToolContext) => unknown | Promise<unknown>;
   generateReply?: (instructions?: string) => unknown | Promise<unknown>;
   sendInput?: (input: string) => unknown | Promise<unknown>;
@@ -81,8 +86,10 @@ export type LiveKitSessionLike = {
 export type LiveKitAgentLike = {
   instructions?: string;
   toolCtx?: LiveKitToolContext;
+  chatCtx?: unknown;
   _instructions?: string;
   _tools?: LiveKitToolContext;
+  _chatCtx?: unknown;
   _agentActivity?: {
     realtimeLLMSession?: LiveKitRealtimeSessionLike;
     realtimeSession?: LiveKitRealtimeSessionLike;
@@ -138,7 +145,7 @@ export type LiveKitUserTranscriptUpdate = {
   error?: string;
 };
 
-export type LiveKitExecutorConfig<TDataContent = never> = {
+export type LiveKitRealtimeExecutorConfig<TDataContent = never> = {
   debug?: boolean;
   session: LiveKitSessionLike;
   agent?: LiveKitAgentLike;
