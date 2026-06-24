@@ -15,5 +15,5 @@ export const activeAgentTabAtom = atomWithStorage<AgentTab>("demo-agent-tab", "t
 export type TreeSubtab = "instance" | "projection" | "ir" | "realized";
 export const activeTreeSubtabAtom = atomWithStorage<TreeSubtab>("demo-tree-subtab", "instance");
 
-export type HistorySubtab = "frames" | "messages" | "branches";
+export type HistorySubtab = "frames" | "messages" | "branches" | "controls";
 export const activeHistorySubtabAtom = atomWithStorage<HistorySubtab>("demo-history-subtab", "frames");

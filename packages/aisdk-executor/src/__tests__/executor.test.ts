@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  actionResult,
   createUnboundActionContext,
   createGetStateAction,
   textAssistantMessage,
@@ -64,9 +65,9 @@ describe("AI SDK prompt rendering", () => {
               stateKey: "status",
               update: { op: "patch", value: { ready: true } },
             },
-            { type: "tool", name: "lookup", value: { ok: true } },
+            { type: "action", kind: "result", action: "tool", name: "lookup", callId: "lookup-1", success: true, value: { ok: true } },
             { type: "work", kind: "completion", activationId: "a", reason: "done" },
-            { type: "tool", name: "search", text: "done" },
+            { type: "action", kind: "result", action: "tool", name: "search", callId: "search-1", success: true, value: "done" },
           ],
         }),
       ),
@@ -425,7 +426,10 @@ describe("AiSdkExecutor", () => {
             {
               state: null,
               name: "announce",
-              run: () => ({ ...textAssistantMessage("from tool"), audience: "broadcast" }),
+              run: () => {
+                const message = { ...textAssistantMessage("from tool"), audience: "broadcast" as const };
+                return actionResult({ value: message, messages: [message] });
+              },
             },
           ],
         }),
@@ -433,14 +437,187 @@ describe("AiSdkExecutor", () => {
       config(),
     );
 
-    await (tools.announce as any).execute({});
+    await (tools.announce as any).execute({}, { toolCallId: "call-1" });
 
     expect(frames).toMatchObject([
       {
-        generatorId: "generator-1",
-        runtimeInstanceId: "runtime-1",
+        generatorId: "runtime-1",
         activationId: "activation-1",
-        messages: [{ ...textAssistantMessage("from tool"), audience: "broadcast" }],
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "announce",
+            input: {},
+            callId: "call-1",
+          },
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "announce",
+            success: true,
+            value: { ...textAssistantMessage("from tool"), audience: "broadcast" },
+            outputMessageIndices: [2],
+            callId: "call-1",
+          },
+          { ...textAssistantMessage("from tool"), audience: "broadcast" },
+        ],
+      },
+    ]);
+  });
+
+  it("enqueues synchronous tool calls and results in one frame for plain values", async () => {
+    const frames: FrameDraft[] = [];
+    const tools = buildAiSdkTools(
+      request({
+        enqueueFrame: enqueueTo(frames),
+        inference: inference({
+          tools: [
+            {
+              state: null,
+              name: "lookup",
+              run: () => ({ ok: true }),
+            },
+          ],
+        }),
+      }),
+      config(),
+    );
+
+    await expect((tools.lookup as any).execute({ query: "x" })).resolves.toEqual({ ok: true });
+
+    expect(frames).toMatchObject([
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "lookup",
+            input: { query: "x" },
+            callId: expect.any(String),
+          },
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "lookup",
+            success: true,
+            value: { ok: true },
+            callId: expect.any(String),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("enqueues asynchronous tool calls and results in separate frames", async () => {
+    const frames: FrameDraft[] = [];
+    const tools = buildAiSdkTools(
+      request({
+        enqueueFrame: enqueueTo(frames),
+        inference: inference({
+          tools: [
+            {
+              state: null,
+              name: "lookup",
+              run: async () => ({ ok: true }),
+            },
+          ],
+        }),
+      }),
+      config(),
+    );
+
+    await expect((tools.lookup as any).execute({ query: "x" })).resolves.toEqual({ ok: true });
+
+    expect(frames).toMatchObject([
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "lookup",
+            input: { query: "x" },
+            callId: expect.any(String),
+          },
+        ],
+      },
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "lookup",
+            success: true,
+            value: { ok: true },
+            callId: expect.any(String),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("enqueues synchronous tool errors in one frame", async () => {
+    const frames: FrameDraft[] = [];
+    const tools = buildAiSdkTools(
+      request({
+        enqueueFrame: enqueueTo(frames),
+        inference: inference({
+          tools: [
+            {
+              state: null,
+              name: "lookup",
+              run: () => {
+                throw new Error("lookup failed");
+              },
+            },
+          ],
+        }),
+      }),
+      config(),
+    );
+
+    await expect((tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" }))
+      .rejects.toThrow("lookup failed");
+
+    expect(frames).toMatchObject([
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "lookup",
+            input: { query: "x" },
+            callId: "call-1",
+          },
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "lookup",
+            success: false,
+            error: "lookup failed",
+            callId: "call-1",
+          },
+        ],
       },
     ]);
   });
@@ -580,9 +757,8 @@ function request<TDataContent = never>(
   overrides: Partial<ExecutorRunRequest<TDataContent>> = {},
 ): ExecutorRunRequest<TDataContent> {
   return {
-    generatorId: "generator-1",
     activationId: "activation-1",
-    runtimeInstanceId: "runtime-1",
+    generatorId: "runtime-1",
     inference: inference<TDataContent>({
       history: [{ ...textUserMessage("hello") }] as CompiledInference<TDataContent>["history"],
     }),
@@ -594,7 +770,7 @@ function request<TDataContent = never>(
 function enqueueTo<TDataContent = never>(
   frames: FrameDraft<TDataContent>[],
 ) {
-  return async (frame: FrameDraft<TDataContent>): Promise<Frame<TDataContent>> => {
+  return (frame: FrameDraft<TDataContent>): Frame<TDataContent> => {
     frames.push(frame);
     return { id: `frame-${frames.length}`, ...frame };
   };

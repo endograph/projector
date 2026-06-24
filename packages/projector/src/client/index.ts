@@ -1,29 +1,29 @@
 import * as z from "zod";
 import {
-  collectProjectionNodes,
+  collectContributors,
   createRoot,
-  directProjectionNodeChildren,
-  type ProjectionNode,
-} from "../projection-nodes.ts";
-import { encodeRuntimeAddress } from "../runtime-address.ts";
+  directContributorChildren,
+  type Contributor,
+} from "../contributors.ts";
+import { encodeProjectionAddress } from "../projection-address.ts";
 import { resolveFrameCommands } from "../scoped-actions.ts";
 import { resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
+  ActionRequestMessage,
+  ExecuteActionResult,
   Charter,
-  CommandMessage,
-  ExecuteCommandResult,
   Instance,
   NormalizedRuntime,
-  RuntimeAddress,
+  ProjectionAddress,
   StateAddress,
   StateProjection,
 } from "../types.ts";
 
 export type JSONSchema = unknown;
 
-export type ClientMachineMessage = CommandMessage;
-export type { CommandMessage, ExecuteCommandResult };
+export type ClientMachineMessage = ActionRequestMessage & { action: "command" };
+export type { ActionRequestMessage, ExecuteActionResult };
 
 export type MachineClientSnapshot<TRoot = unknown> = {
   root: TRoot;
@@ -47,10 +47,10 @@ export type MachineSyncState = {
   recentCommandResidue: string[];
 };
 
-export type ClientRuntimeMeta = {
-  type: NormalizedRuntime["type"];
-  runtimeInstanceId: string;
-  runtimeAddress: RuntimeAddress;
+export type ClientContributorMeta = {
+  id: string;
+  address: ProjectionAddress;
+  runtimeType: NormalizedRuntime["type"];
 };
 
 export type ClientStateView<TValue = unknown> = {
@@ -69,7 +69,7 @@ export type ClientCommandMeta<
   name: TName;
   description?: string;
   inputSchema?: JSONSchema;
-  target?: RuntimeAddress;
+  target?: ProjectionAddress;
   __input?: TInput;
   __result?: TResult;
 };
@@ -82,7 +82,7 @@ export type ClientInstance<
   id?: string;
   nodeKey: string;
   name?: string;
-  runtime: ClientRuntimeMeta;
+  contributor: ClientContributorMeta;
   states: ClientStateView<TState>[];
   commands: TCommands[];
   members: ClientInstance[];
@@ -162,7 +162,7 @@ export type ClientCommandHandle<
 };
 
 export type ClientCommandOptions<TInstances, TName extends string> = {
-  target?: RuntimeAddress;
+  target?: ProjectionAddress;
   optimistic?: (
     ctx: OptimisticContext<TInstances>,
     input: ClientCommandInput<TInstances, TName>,
@@ -181,11 +181,20 @@ export type OptimisticEffigy<TInstances = unknown> = MachineEffigy<TInstances> &
     name: TName,
     options?: ClientCommandOptions<TInstances, TName>,
   ): ClientCommandHandle<TName, ClientCommandInput<TInstances, TName>>;
+  getPendingCommands(): PendingOptimisticCommand[];
   clearPending(): void;
 };
 
+export type PendingOptimisticCommand = {
+  callId: string;
+  name: string;
+  target?: ProjectionAddress;
+};
+
 type PendingOverlay<TInstances> = {
-  clientId: string;
+  callId: string;
+  name: string;
+  target?: ProjectionAddress;
   apply(instances: TInstances | undefined): TInstances | undefined;
 };
 
@@ -239,20 +248,22 @@ export function createMachineEffigy<TInstances>(
   };
 }
 
-export function createCommandMessage<TCommand extends AnyCommandDefinition>(
+export function createCommandActionRequest<TCommand extends AnyCommandDefinition>(
   name: ClientCommandDefinitionName<TCommand>,
   input: ClientCommandDefinitionInput<TCommand>,
   options: {
-    target?: RuntimeAddress;
-    clientId?: string;
+    target?: ProjectionAddress;
+    callId?: string;
   } = {},
 ): ClientMachineMessage {
   return {
-    type: "command",
+    type: "action",
+    kind: "request",
+    action: "command",
     name,
     input,
     target: options.target,
-    clientId: options.clientId ?? createClientId(),
+    callId: options.callId ?? createCallId(),
   };
 }
 
@@ -271,13 +282,14 @@ export function createOptimisticEffigy<TInstances>(
   const retireResidue = () => {
     const residue = new Set(effigy.getRecentCommandResidue());
     if (residue.size === 0) {
-      return;
+      return false;
     }
-    pending = pending.filter((overlay) => !residue.has(overlay.clientId));
+    const before = pending.length;
+    pending = pending.filter((overlay) => !residue.has(overlay.callId));
+    return pending.length !== before;
   };
 
   const getInstances = () => {
-    retireResidue();
     let overlaid = cloneValue(effigy.getInstances());
     for (const overlay of pending) {
       overlaid = overlay.apply(overlaid);
@@ -289,12 +301,18 @@ export function createOptimisticEffigy<TInstances>(
     getInstances,
     setInstances: (instances) => {
       effigy.setInstances(instances);
-      retireResidue();
+      if (retireResidue()) {
+        notify();
+      }
     },
     getRecentCommandResidue: () => effigy.getRecentCommandResidue(),
+    getPendingCommands: () =>
+      pending.map(({ callId, name, target }) => ({ callId, name, target })),
     setRecentCommandResidue: (ids) => {
       effigy.setRecentCommandResidue(ids);
-      retireResidue();
+      if (retireResidue()) {
+        notify();
+      }
     },
     subscribe: (listener) => {
       listeners.add(listener);
@@ -318,16 +336,18 @@ export function createOptimisticEffigy<TInstances>(
         name,
         inputSchema: command?.inputSchema,
         message: (input) =>
-          createUntypedCommandMessage(name, input, {
+          createUntypedCommandActionRequest(name, input, {
             target: options.target ?? command?.target,
           }),
         run: async (input) => {
-          const message = createUntypedCommandMessage(name, input, {
+          const message = createUntypedCommandActionRequest(name, input, {
             target: options.target ?? command?.target,
           });
           if (options.optimistic) {
             const overlay = createOverlay(
-              message.clientId!,
+              message.callId,
+              name,
+              options.target ?? command?.target,
               options.optimistic,
               input as ClientCommandInput<TInstances, typeof name>,
             );
@@ -337,7 +357,7 @@ export function createOptimisticEffigy<TInstances>(
           try {
             return await effigy.send(message);
           } catch (error) {
-            pending = pending.filter((overlay) => overlay.clientId !== message.clientId);
+            pending = pending.filter((overlay) => overlay.callId !== message.callId);
             notify();
             throw error;
           }
@@ -358,20 +378,20 @@ export function createMachineSyncState(
 
 export function recordCommandResidue(
   state: MachineSyncState,
-  clientId: string | undefined,
+  callId: string | undefined,
   options: { limit?: number } = {},
 ): MachineSyncState {
-  if (!clientId) {
+  if (!callId) {
     return createMachineSyncState(state.recentCommandResidue, options);
   }
-  return createMachineSyncState([...state.recentCommandResidue, clientId], options);
+  return createMachineSyncState([...state.recentCommandResidue, callId], options);
 }
 
 export function consumeCommandResidue(
   state: MachineSyncState,
-  clientIds: readonly string[],
+  callIds: readonly string[],
 ): MachineSyncState {
-  const consumed = new Set(clientIds);
+  const consumed = new Set(callIds);
   return {
     recentCommandResidue: state.recentCommandResidue.filter((id) => !consumed.has(id)),
   };
@@ -395,18 +415,18 @@ export function realizeClientInstances(
     ? createRoot([...instances])
     : instances as Instance;
   const states = resolveStates(root);
-  const statesByProjectionNode = groupStatesByProjectionNode(states);
-  const rootProjectionNode = collectProjectionNodes(root)[0];
-  if (!rootProjectionNode) {
+  const statesByContributor = groupStatesByContributor(states);
+  const rootContributor = collectContributors(root)[0];
+  if (!rootContributor) {
     throw new Error("Unable to realize empty client instance");
   }
-  return realizeProjectionNode(rootProjectionNode, statesByProjectionNode, options.charter);
+  return realizeContributor(rootContributor, statesByContributor, options.charter);
 }
 
 export function findClientCommand<TName extends string>(
   instances: unknown,
   name: TName,
-  target?: RuntimeAddress,
+  target?: ProjectionAddress,
 ): ClientCommandMeta<TName> | undefined {
   let match: ClientCommandMeta<TName> | undefined;
 
@@ -414,7 +434,7 @@ export function findClientCommand<TName extends string>(
     for (const command of instance.commands) {
       if (
         command.name === name &&
-        (!target || (command.target && sameRuntimeAddress(command.target, target)))
+        (!target || (command.target && sameProjectionAddress(command.target, target)))
       ) {
         match = command as ClientCommandMeta<TName>;
       }
@@ -424,14 +444,14 @@ export function findClientCommand<TName extends string>(
   return match;
 }
 
-function realizeProjectionNode(
-  projectionNode: ProjectionNode,
-  statesByProjectionNode: Map<string, ResolvedState[]>,
+function realizeContributor(
+  contributor: Contributor,
+  statesByContributor: Map<string, ResolvedState[]>,
   charter: Charter | undefined,
 ): ClientInstance {
-  const memberNodes: ProjectionNode[] = [];
-  const childNodes: ProjectionNode[] = [];
-  for (const child of directProjectionNodeChildren(projectionNode)) {
+  const memberNodes: Contributor[] = [];
+  const childNodes: Contributor[] = [];
+  for (const child of directContributorChildren(contributor)) {
     if (child.isMember) {
       memberNodes.push(child);
     } else {
@@ -440,29 +460,29 @@ function realizeProjectionNode(
   }
 
   return {
-    kind: projectionNode.isMember ? "member" : "instance",
-    id: projectionNode.isMember ? undefined : projectionNode.concreteInstance.id,
-    nodeKey: projectionNode.node.key,
-    name: projectionNode.node.name,
-    runtime: {
-      type: projectionNode.node.runtime.type,
-      runtimeAddress: projectionNode.address,
-      runtimeInstanceId: projectionNode.runtimeInstanceId,
+    kind: contributor.isMember ? "member" : "instance",
+    id: contributor.isMember ? undefined : contributor.concreteInstance.id,
+    nodeKey: contributor.node.key,
+    name: contributor.node.name,
+    contributor: {
+      id: contributor.id,
+      address: contributor.address,
+      runtimeType: contributor.node.runtime.type,
     },
-    states: (statesByProjectionNode.get(projectionNode.runtimeInstanceId) ?? []).map(realizeState),
-    commands: resolveFrameCommands(projectionNode, charter).map((command) =>
-      realizeCommand(command, projectionNode.address)
+    states: (statesByContributor.get(contributor.id) ?? []).map(realizeState),
+    commands: resolveFrameCommands(contributor, charter).map((command) =>
+      realizeCommand(command, contributor.address)
     ),
     members: memberNodes.map((member) =>
-      realizeProjectionNode(member, statesByProjectionNode, charter)
+      realizeContributor(member, statesByContributor, charter)
     ),
     children: childNodes.map((child) =>
-      realizeProjectionNode(child, statesByProjectionNode, charter)
+      realizeContributor(child, statesByContributor, charter)
     ),
   };
 }
 
-function realizeCommand(command: Action, target: RuntimeAddress): ClientCommandMeta {
+function realizeCommand(command: Action, target: ProjectionAddress): ClientCommandMeta {
   return {
     name: command.name,
     description: command.description,
@@ -481,30 +501,32 @@ function realizeState(state: ResolvedState): ClientStateView {
   };
 }
 
-function groupStatesByProjectionNode(states: ResolvedState[]): Map<string, ResolvedState[]> {
+function groupStatesByContributor(states: ResolvedState[]): Map<string, ResolvedState[]> {
   const grouped = new Map<string, ResolvedState[]>();
   for (const state of states) {
-    const projectionNodeKey = stateProjectionNodeKey(state);
-    const list = grouped.get(projectionNodeKey) ?? [];
+    const contributorKey = stateContributorKey(state);
+    const list = grouped.get(contributorKey) ?? [];
     list.push(state);
-    grouped.set(projectionNodeKey, list);
+    grouped.set(contributorKey, list);
   }
   return grouped;
 }
 
-function stateProjectionNodeKey(state: ResolvedState): string {
+function stateContributorKey(state: ResolvedState): string {
   if (state.descriptor.scope === "hoist") {
-    return encodeRuntimeAddress({
+    return encodeProjectionAddress({
       type: "instance",
       instanceId: state.targetInstance.id,
     });
   }
 
-  return state.sourceProjectionNode.runtimeInstanceId;
+  return state.sourceContributor.id;
 }
 
 function createOverlay<TInstances, TName extends string>(
-  clientId: string,
+  callId: string,
+  name: string,
+  target: ProjectionAddress | undefined,
   optimistic: (
     ctx: OptimisticContext<TInstances>,
     input: ClientCommandInput<TInstances, TName>,
@@ -512,7 +534,9 @@ function createOverlay<TInstances, TName extends string>(
   input: ClientCommandInput<TInstances, TName>,
 ): PendingOverlay<TInstances> {
   return {
-    clientId,
+    callId,
+    name,
+    target,
     apply: (instances) => {
       const draft = cloneValue(instances);
       const ctx = createOptimisticContext(draft);
@@ -552,17 +576,19 @@ function createOptimisticContext<TInstances>(
   };
 }
 
-function createUntypedCommandMessage(
+function createUntypedCommandActionRequest(
   name: string,
   input: unknown,
-  options: { target?: RuntimeAddress } = {},
+  options: { target?: ProjectionAddress } = {},
 ): ClientMachineMessage {
   return {
-    type: "command",
+    type: "action",
+    kind: "request",
+    action: "command",
     name,
     input,
     target: options.target,
-    clientId: createClientId(),
+    callId: createCallId(),
   };
 }
 
@@ -620,7 +646,7 @@ function isClientInstance(value: unknown): value is ClientInstance {
       "commands" in value &&
       "members" in value &&
       "children" in value &&
-      "runtime" in value,
+      "contributor" in value,
   );
 }
 
@@ -631,8 +657,8 @@ function patchObject(value: unknown, patch: Record<string, unknown>): unknown {
   };
 }
 
-function sameRuntimeAddress(a: RuntimeAddress, b: RuntimeAddress): boolean {
-  return encodeRuntimeAddress(a) === encodeRuntimeAddress(b);
+function sameProjectionAddress(a: ProjectionAddress, b: ProjectionAddress): boolean {
+  return encodeProjectionAddress(a) === encodeProjectionAddress(b);
 }
 
 function boundResidue(ids: readonly string[], limit = 100): string[] {
@@ -658,7 +684,7 @@ function cloneValue<T>(value: T): T {
   }
 }
 
-function createClientId(): string {
+function createCallId(): string {
   const cryptoWithRandomUuid = globalThis.crypto as
     | (Crypto & { randomUUID?: () => `${string}-${string}-${string}-${string}-${string}` })
     | undefined;

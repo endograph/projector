@@ -1,4 +1,5 @@
 import { normalizeStateDescriptor } from "./create.ts";
+import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
   AnyAction,
   Charter,
@@ -25,9 +26,7 @@ export function createCharter<TDataContent = never>(
       "state",
       (state) => state.key,
     ),
-    projections: registryFrom(config.projections, "projection function", (projection) => projection.name, {
-      refWord: false,
-    }),
+    projections: projectionRegistryFrom(config.projections),
     historyProjections: registryFrom(
       config.historyProjections ?? [],
       "history projection function",
@@ -55,13 +54,30 @@ function registryFrom<TValue extends CharterRegistryValue<any>>(
   const registry: Record<string, TValue> = {};
   for (const value of values) {
     const ref = refFor(value);
-    if (!ref.trim()) {
-      throw new Error(`${capitalize(kind)} requires a ref`);
-    }
+    assertProjectorIdentifier(ref, `${capitalize(kind)} ref`);
     if (registry[ref]) {
       throw new Error(`Duplicate ${kind}${refWord ? " ref" : ""} "${ref}"`);
     }
     registry[ref] = value;
+  }
+  return registry;
+}
+
+function projectionRegistryFrom<TDataContent>(
+  values: readonly ProjectionFunction<TDataContent>[],
+): Record<string, ProjectionFunction<TDataContent>> {
+  const registry: Record<string, ProjectionFunction<TDataContent>> = {};
+  for (const projection of values) {
+    const ref = projection.name;
+    assertProjectorIdentifier(ref, "Projection function ref");
+    const existing = registry[ref];
+    if (!existing) {
+      registry[ref] = projection;
+      continue;
+    }
+    if (existing.method !== projection.method) {
+      throw new Error(`Duplicate projection function "${ref}" with different methods`);
+    }
   }
   return registry;
 }

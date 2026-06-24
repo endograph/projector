@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { llm } from "@livekit/agents";
 import {
-  ROOT_RUNTIME_INSTANCE_ID,
+  actionResult,
+  ROOT_GENERATOR_ID,
   createGetStateAction,
   createNode,
   createAction,
@@ -977,9 +978,28 @@ describe("LiveKitRealtimeExecutor", () => {
         instance: expect.objectContaining({ ownerInstanceId: "" }),
       }),
     );
-    expect(frames.map((frame) => frame.messages[0]?.value)).toEqual([
-      { phase: "call", input: { query: "x" } },
-      { phase: "result", value: "second-result" },
+    expect(frames).toMatchObject([
+      {
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "lookup",
+            input: { query: "x" },
+            callId: expect.any(String),
+          },
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "lookup",
+            success: true,
+            value: "second-result",
+            callId: expect.any(String),
+          },
+        ],
+      },
     ]);
   });
 
@@ -1056,7 +1076,10 @@ describe("LiveKitRealtimeExecutor", () => {
       state: null,
       name: "ping",
       inputSchema: z.object({}),
-      run: () => textAssistantMessage("pong"),
+      run: () => {
+        const message = textAssistantMessage("pong");
+        return actionResult({ value: message, messages: [message] });
+      },
     });
     const executor = new LiveKitRealtimeExecutor({
       session: new FakeSession(),
@@ -1077,23 +1100,27 @@ describe("LiveKitRealtimeExecutor", () => {
     await expect(executor.executeTool("ping", {})).resolves.toEqual(textAssistantMessage("pong"));
     expect(frames).toMatchObject([
       {
-        inert: true,
-        messages: [{ type: "tool", name: "ping", value: { phase: "call", input: {} } }],
-      },
-      {
-        inert: true,
         messages: [
           {
-            type: "tool",
+            type: "action",
+            kind: "request",
+            action: "tool",
             name: "ping",
-            value: { phase: "result", value: textAssistantMessage("pong") },
+            input: {},
+            callId: expect.any(String),
           },
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "ping",
+            success: true,
+            value: textAssistantMessage("pong"),
+            outputMessageIndices: [2],
+            callId: expect.any(String),
+          },
+          textAssistantMessage("pong"),
         ],
-      },
-      {
-        inert: true,
-        metadata: { transport: "livekit", actionResult: true },
-        messages: [textAssistantMessage("pong")],
       },
     ]);
   });
@@ -1133,7 +1160,7 @@ describe("LiveKit prompt and tool rendering", () => {
             update: { op: "patch", value: { ready: true } },
           },
           { ...textAssistantMessage("Hello") },
-          { type: "tool", name: "lookup", value: { ok: true } },
+          { type: "action", kind: "result", action: "tool", name: "lookup", callId: "lookup-1", success: true, value: { ok: true } },
           { type: "work", kind: "completion", activationId: "a", reason: "done" },
         ],
       }),
@@ -1322,9 +1349,8 @@ function realtimeMessageToLiveKitMessage(item: any): llm.ChatMessage | undefined
 
 function request(overrides: Partial<ExecutorRunRequest> = {}): ExecutorRunRequest {
   return {
-    generatorId: REALTIME_GENERATOR_ID,
     activationId: "activation-1",
-    runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+    generatorId: ROOT_GENERATOR_ID,
     inference: inference(),
     enqueueFrame: enqueueTo([]),
     ...overrides,
@@ -1385,12 +1411,7 @@ function syncContext(
   const machine = overrides.machine ?? fakeMachine(frames);
   return {
     machine,
-    runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
-    generator: {
-      id: REALTIME_GENERATOR_ID,
-      kind: "generator",
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
-    },
+    generatorId: ROOT_GENERATOR_ID,
     inference: inference(),
     createActionContext: () => createUnboundActionContext(),
     enqueueFrame: (frame) => machine.enqueueFrame(frame),
@@ -1427,7 +1448,7 @@ function fakeMachine(frames: FrameDraft[]): RuntimeSyncContext["machine"] {
 }
 
 function enqueueTo(frames: FrameDraft[]) {
-  return async (frame: FrameDraft): Promise<Frame> => {
+  return (frame: FrameDraft): Frame => {
     frames.push(frame);
     return { id: `frame-${frames.length}`, ...frame };
   };
@@ -1441,11 +1462,10 @@ function expectRealtimeTurnFrame(
   expect(sourceFrameId).toBeTruthy();
   expect(frame).toMatchObject({
     generatorId: REALTIME_GENERATOR_ID,
-    runtimeInstanceId: REALTIME_GENERATOR_ID,
     activationId: expect.stringMatching(/^activation:realtime:/),
     metadata: {
       type: "projector.runtime-turn",
-      runtimeInstanceId: REALTIME_GENERATOR_ID,
+      generatorId: REALTIME_GENERATOR_ID,
       sourceFrameId,
       completionReason: "end-turn",
       mode: "voice",
@@ -1456,7 +1476,6 @@ function expectRealtimeTurnFrame(
       {
         type: "work",
         kind: "activation",
-        runtimeInstanceId: REALTIME_GENERATOR_ID,
         generatorId: REALTIME_GENERATOR_ID,
         sourceFrameId,
         concurrencyKey: REALTIME_GENERATOR_ID,

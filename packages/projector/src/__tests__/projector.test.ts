@@ -3,15 +3,17 @@ import { z } from "zod";
 import {
   actorMessages,
   appendState,
-  applyStaticProjection,
+  applyStandardProjection,
   compileProjection,
   createActivationFrame,
   createCompletionFrame,
   createCharter,
   createAction,
   createMachine,
+  actionResult,
   createHistoryProjectionFunction,
   createProjectionFunction,
+  createStandardProjectionFunction,
   createRuntimeCompletionFrame,
   createRuntimeTurnFrame,
   createNode,
@@ -38,8 +40,12 @@ import {
   syncMachineRuntime,
   textAssistantMessage,
   textUserMessage,
-  ROOT_RUNTIME_INSTANCE_ID,
-  collectProjectionNodes,
+  ROOT_GENERATOR_ID,
+  collectContributors,
+  augmentProjection,
+  defaultProjection,
+  hiddenProjection,
+  replaceProjection,
   type Action,
   type ActorMessage,
   type Charter,
@@ -164,16 +170,12 @@ describe("node normalization", () => {
       runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
 
-    expect(node.projection).toEqual({
-      mode: "augment",
-      instructions: "system",
-      tools: "provider-static",
-    });
+    expect(node.projection).toBe(defaultProjection);
     expect(node.runtime).toMatchObject({
       type: "generator",
       concurrency: "serial",
       activationHistory: "live",
-      boundaryProjection: { mode: "hidden" },
+      boundaryProjection: hiddenProjection,
     });
     expect(node.state).toMatchObject({
       key: "memory",
@@ -301,7 +303,7 @@ describe("projection traversal", () => {
       { id: "b", isSource: true, node: rootB },
     ]);
 
-    expect(collectProjectionNodes(root).map((frame) => frame.node.key)).toEqual([
+    expect(collectContributors(root).map((frame) => frame.node.key)).toEqual([
       "root",
       "rootA",
       "critic",
@@ -309,7 +311,7 @@ describe("projection traversal", () => {
       "childB",
       "rootB",
     ]);
-    expect(collectProjectionNodes(root)[1]?.parent?.runtimeInstanceId).toBe(ROOT_RUNTIME_INSTANCE_ID);
+    expect(collectContributors(root)[1]?.parent?.id).toBe(ROOT_GENERATOR_ID);
   });
 
   it("rejects duplicate instance ids without reserving root globally", () => {
@@ -351,10 +353,10 @@ describe("projection traversal", () => {
     const instanceA: Instance = { id: "abc", isSource: true, node: first };
     const instanceB: Instance = { id: "abc", isSource: true, node: second };
 
-    expect(collectProjectionNodes(instanceA).map((frame) => frame.runtimeInstanceId)).toContain(
+    expect(collectContributors(instanceA).map((frame) => frame.id)).toContain(
       "member:abc/research/retriever",
     );
-    expect(collectProjectionNodes(instanceB).map((frame) => frame.runtimeInstanceId)).toContain(
+    expect(collectContributors(instanceB).map((frame) => frame.id)).toContain(
       "member:abc/research/retriever",
     );
     expect(instanceA.children).toBeUndefined();
@@ -369,7 +371,7 @@ describe("projection compilation", () => {
       key: "hidden",
       instructions: "hidden",
       tools: [{ state: null, name: "hiddenTool" }],
-      projection: { mode: "hidden" },
+      projection: hiddenProjection,
     });
     const first = createNode({
       key: "first",
@@ -380,7 +382,11 @@ describe("projection compilation", () => {
       key: "replace",
       instructions: "replace",
       tools: [secondTool],
-      projection: { mode: "replace", instructions: "dynamic" },
+      projection: createStandardProjectionFunction({
+        name: "replaceDynamicProjection",
+        mode: "replace",
+        instructions: "dynamic",
+      }),
       members: [hidden, createNode({ key: "replaceChild", instructions: "replace child" })],
     });
     const root = createNode({ key: "root", instructions: "root", members: [first, replace] });
@@ -398,14 +404,14 @@ describe("projection compilation", () => {
 
   it("lets projection functions mutate the projection draft", () => {
     let callSite: string | undefined;
-    let runtimeInstanceId: string | undefined;
+    let generatorId: string | undefined;
     const hiddenTool: Action = { state: null, name: "hiddenTool" };
     const projectSensor = createProjectionFunction({
       name: "projectSensor",
       method: (ctx, draft, source) => {
         callSite = ctx.callSite;
-        runtimeInstanceId = ctx.runtimeInstanceId;
-        applyStaticProjection(draft, source, { tools: "hidden" });
+        generatorId = ctx.generatorId;
+        applyStandardProjection(ctx, draft, source, { tools: "hidden" });
         draft.dynamicParts.push({
           type: "text",
           text: "Camera sees: a red marker",
@@ -422,13 +428,65 @@ describe("projection compilation", () => {
     const compiled = compileProjection({ id: "sensor-instance", isSource: true, node: sensor });
 
     expect(callSite).toBe("node");
-    expect(runtimeInstanceId).toBe("instance:sensor-instance");
+    expect(generatorId).toBe("instance:sensor-instance");
     expect(compiled.systemParts).toEqual(textParts("base"));
     expect(compiled.dynamicParts).toEqual(textParts("Camera sees: a red marker"));
     expect(compiled.tools).toEqual([]);
   });
 
-  it("rejects static boundaryProjection instructions and tools", () => {
+  it("passes source.node for node projections and source.ir for boundary projections", () => {
+    const seen: Array<{
+      callSite: string;
+      nodeKey?: string;
+      hasIr: boolean;
+      irText?: string[];
+    }> = [];
+    const captureNodeSource = createProjectionFunction({
+      name: "captureNodeSource",
+      method: (ctx, draft, source) => {
+        seen.push({
+          callSite: ctx.callSite,
+          nodeKey: source.node?.key,
+          hasIr: Boolean(source.ir),
+        });
+        applyStandardProjection(ctx, draft, source);
+      },
+    });
+    const captureBoundarySource = createProjectionFunction({
+      name: "captureBoundarySource",
+      method: (_ctx, draft, source) => {
+        seen.push({
+          callSite: "boundary",
+          nodeKey: source.node?.key,
+          hasIr: Boolean(source.ir),
+          irText: source.ir?.systemParts.flatMap((part) => part.type === "text" ? [part.text] : []),
+        });
+        if (source.ir) {
+          draft.systemParts.push(...source.ir.systemParts);
+        }
+      },
+    });
+    const generator = createNode({
+      key: "generator",
+      instructions: "generator",
+      projection: captureNodeSource,
+      runtime: {
+        type: "generator",
+        trigger: { type: "spawn" },
+        boundaryProjection: captureBoundarySource,
+      },
+    });
+    const root = createNode({ key: "root", members: [generator] });
+
+    compileProjection({ id: "r", isSource: true, node: root });
+
+    expect(seen).toEqual([
+      { callSite: "node", nodeKey: "generator", hasIr: false },
+      { callSite: "boundary", nodeKey: undefined, hasIr: true, irText: ["generator"] },
+    ]);
+  });
+
+  it("rejects object projection policies", () => {
     expect(() =>
       createNode({
         key: "generator",
@@ -438,24 +496,17 @@ describe("projection compilation", () => {
           boundaryProjection: { mode: "augment", instructions: "dynamic" } as any,
         },
       }),
-    ).toThrow(/only supports "mode"/);
+    ).toThrow(/projection function or ref/);
 
     expect(() =>
-      hydrateNode(
-        {
-          key: "generator",
-          runtime: {
-            type: "generator",
-            trigger: { type: "spawn" },
-            boundaryProjection: { mode: "augment", tools: "hidden" },
-          },
-        } as any,
-        charter(),
-      ),
-    ).toThrow(/only supports "mode"/);
+      createNode({
+        key: "node",
+        projection: { mode: "replace" } as any,
+      }),
+    ).toThrow(/projection function or ref/);
   });
 
-  it("hides runtime boundaries by default and exports static boundaryProjection aggregates as compiled", () => {
+  it("hides runtime boundaries by default and exports standard boundaryProjection aggregates as compiled", () => {
     const inside = createNode({ key: "inside", instructions: "inside" });
     const generator = createNode({
       key: "generator",
@@ -464,7 +515,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment" },
+        boundaryProjection: augmentProjection,
       },
     });
     const hiddenWorker = createNode({
@@ -486,11 +537,7 @@ describe("projection compilation", () => {
     const own = compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: {
-          id: "member:r/generator",
-          kind: "generator",
-          runtimeInstanceId: "member:r/generator",
-        },
+        targetGeneratorId: "member:r/generator",
       },
     );
     expect(own.systemParts).toEqual(textParts("generator", "inside"));
@@ -503,7 +550,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "replace" },
+        boundaryProjection: replaceProjection,
       },
     });
     const root = createNode({ key: "root", instructions: "root", members: [generator] });
@@ -520,7 +567,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment" },
+        boundaryProjection: augmentProjection,
       },
     });
     const root = createNode({
@@ -537,15 +584,15 @@ describe("projection compilation", () => {
     expect(rootProjection?.nodeKey).toBe("root");
     expect(rootProjection?.compiled.systemParts).toEqual(textParts("root", "generator", "inside"));
     expect(rootProjection?.compiled.dynamicParts).toEqual([]);
-    expect(rootProjection?.projectionNodes.map((projectionNode) => projectionNode.nodeKey)).toEqual(["root"]);
+    expect(rootProjection?.contributors.map((contributor) => contributor.nodeKey)).toEqual(["root"]);
     expect(generatorProjection?.nodeKey).toBe("generator");
     expect(generatorProjection?.kind).toBe("generator");
     expect(generatorProjection?.compiled.systemParts).toEqual(textParts("generator", "inside"));
-    expect(generatorProjection?.projectionNodes.map((projectionNode) => projectionNode.nodeKey)).toEqual([
+    expect(generatorProjection?.contributors.map((contributor) => contributor.nodeKey)).toEqual([
       "generator",
       "inside",
     ]);
-    expect(generatorProjection?.parentRuntimeInstanceId).toBe("instance:r");
+    expect(generatorProjection?.parentId).toBe("instance:r");
   });
 
   it("includes hidden runtime boundaries in inspection without exporting their parent payload", () => {
@@ -575,7 +622,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "replace" },
+        boundaryProjection: replaceProjection,
       },
     });
     const root = createNode({
@@ -609,20 +656,20 @@ describe("projection compilation", () => {
 
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
-      { targetGenerator: makeGenerator("member:r/generator", "generator") },
+      { targetGeneratorId: "member:r/generator" },
     );
 
     expect(compiled.systemParts).toEqual(textParts("generator"));
     expect(compiled.tools.map((entry) => entry.name)).toEqual(["save"]);
   });
 
-  it("preserves the supplied target generator identity in projection context", () => {
+  it("preserves the supplied target generator id in projection context", () => {
     const seenTargets: string[] = [];
     const captureTarget = createProjectionFunction({
       name: "captureTarget",
       method: (ctx, draft, source) => {
-        seenTargets.push(ctx.target?.id ?? "");
-        applyStaticProjection(draft, source);
+        seenTargets.push(ctx.targetGeneratorId ?? "");
+        applyStandardProjection(ctx, draft, source);
       },
     });
     const generator = createNode({
@@ -639,15 +686,11 @@ describe("projection compilation", () => {
     compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: {
-          id: "generator:activation-specific",
-          kind: "generator",
-          runtimeInstanceId: "member:r/generator",
-        },
+        targetGeneratorId: "member:r/generator",
       },
     );
 
-    expect(seenTargets).toEqual(["generator:activation-specific"]);
+    expect(seenTargets).toEqual(["member:r/generator"]);
   });
 
   it("projects fully compiled child generators through their boundaryProjection", () => {
@@ -657,7 +700,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "parent-completion" },
-        boundaryProjection: { mode: "augment" },
+        boundaryProjection: augmentProjection,
       },
     });
     const generator = createNode({
@@ -667,7 +710,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: { mode: "augment" },
+        boundaryProjection: augmentProjection,
       },
     });
     const root = createNode({ key: "root", instructions: "root", members: [generator] });
@@ -866,19 +909,15 @@ describe("retrieval aliases", () => {
     expect(JSON.stringify(uniqueSchema)).not.toContain('"enum"');
   });
 
-  it("throws generated alias collisions", () => {
+  it("rejects reserved state key characters before alias generation", () => {
     const retrieval = (nodeKey: string, stateKey: string) =>
       createNode({
         key: nodeKey,
         state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
       });
-    const root = createRoot([
-      { id: "x", isSource: true, node: retrieval("a", "a") },
-      { id: "y", isSource: true, node: retrieval("b", "a") },
-      { id: "z", isSource: true, node: retrieval("collision", "a:x") },
-    ]);
 
-    expect(() => compileProjection(root)).toThrow(/alias collision/);
+    expect(() => retrieval("collision", "a:x")).toThrow(/cannot contain/);
+    expect(() => retrieval("slash", "a/x")).toThrow(/cannot contain/);
   });
 
   it("reserves the getState tool name when retrieval state is projected", () => {
@@ -895,7 +934,10 @@ describe("retrieval aliases", () => {
     const retriever = createNode({
       key: "retriever",
       state: { key: "secret", schema: z.number(), init: 1, projection: "retrieval" },
-      projection: { tools: "hidden" },
+      projection: createStandardProjectionFunction({
+        name: "hideRetrieverTools",
+        tools: "hidden",
+      }),
     });
 
     const compiled = compileProjection({ id: "r", isSource: true, node: retriever });
@@ -905,7 +947,10 @@ describe("retrieval aliases", () => {
     const omitRetrievalBoundary = createProjectionFunction({
       name: "omitRetrievalBoundary",
       method: (_ctx, draft, source) => {
-        const promptParts = [...source.systemParts, ...source.dynamicParts].filter(
+        const promptParts = [
+          ...(source.ir?.systemParts ?? []),
+          ...(source.ir?.dynamicParts ?? []),
+        ].filter(
           (part) => !(part.type === "state" && part.section === "retrieval"),
         );
         draft.systemParts.push(...promptParts);
@@ -951,7 +996,7 @@ describe("retrieval aliases", () => {
 
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
-      { targetGenerator: makeGenerator("instance:r", "generator") },
+      { targetGeneratorId: "instance:r" },
     );
 
     expect(compiled.dynamicParts).toContainEqual({ type: "text", text: "State `memories`: []" });
@@ -969,7 +1014,7 @@ describe("history projection", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
 
     const compiled = compileProjection(instance, {
-      targetGenerator: makeGenerator("member:r/generator", "generator"),
+      targetGeneratorId: "member:r/generator",
       frameHistory: [
         frame("one", [{ ...textUserMessage("hello") }]),
         frame("two", [
@@ -1027,7 +1072,7 @@ describe("history projection", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
 
     const compiled = compileProjection(instance, {
-      targetGenerator: makeGenerator("member:r/generator", "generator"),
+      targetGeneratorId: "member:r/generator",
       frameHistory: [frame("one", [{ ...textUserMessage("remember tea") }])],
     });
 
@@ -1063,7 +1108,7 @@ describe("history projection", () => {
         { id: "b", node },
       ]),
       {
-        targetGenerator: makeGenerator("instance:a", "generator"),
+        targetGeneratorId: "instance:a",
         frameHistory: [],
       },
     );
@@ -1073,10 +1118,9 @@ describe("history projection", () => {
     ]);
   });
 
-  it("projects messages before and since the target runtime's last completion", () => {
+  it("projects messages before and since the target generator's last completion", () => {
     const ctx = {
-      target: makeGenerator("member:r/memory", "generator"),
-      runtimeInstanceId: "member:r/memory",
+      generatorId: "member:r/memory",
       activationId: "activation-2",
       trigger: { type: "parent-completion" as const },
       states: {},
@@ -1086,7 +1130,6 @@ describe("history projection", () => {
           id: "completion",
           ...createRuntimeCompletionFrame({
             generatorId: "member:r/memory",
-            runtimeInstanceId: "member:r/memory",
             activationId: "activation-1",
             completionReason: "done",
           }),
@@ -1136,13 +1179,13 @@ describe("history projection", () => {
       },
     });
     const root = createNode({ key: "root", members: [generator] });
-    const runtimeInstanceId = "member:r/generator";
+    const generatorId = "member:r/generator";
     const activationId = "activation-1";
 
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: makeGenerator(runtimeInstanceId, "generator"),
+        targetGeneratorId: generatorId,
         activationId,
         frameHistory: [
           frame("before", [{ ...textUserMessage("queued before"), delivery: "queued" }]),
@@ -1151,10 +1194,9 @@ describe("history projection", () => {
             id: "activation",
             ...createActivationFrame({
               activationId,
-              runtimeInstanceId,
-              generatorId: runtimeInstanceId,
+              generatorId,
               sourceFrameId: "before",
-              concurrencyKey: runtimeInstanceId,
+              concurrencyKey: generatorId,
               concurrency: "serial",
             }),
           },
@@ -1164,8 +1206,7 @@ describe("history projection", () => {
           ]),
           {
             id: "same-activation",
-            generatorId: runtimeInstanceId,
-            runtimeInstanceId,
+            generatorId,
             activationId,
             messages: [{ ...textAssistantMessage("same activation") }],
           },
@@ -1179,10 +1220,9 @@ describe("history projection", () => {
         type: "work",
         kind: "activation",
         activationId,
-        runtimeInstanceId,
-        generatorId: runtimeInstanceId,
+        generatorId,
         sourceFrameId: "before",
-        concurrencyKey: runtimeInstanceId,
+        concurrencyKey: generatorId,
         concurrency: "serial",
       },
       { ...textAssistantMessage("same activation") },
@@ -1224,24 +1264,87 @@ describe("commands and instance mutations", () => {
 
     await expect(
       executeCommand(machine, {
-        type: "command",
+        type: "action",
+        kind: "request",
+        action: "command",
         name: "setCounter",
         input: { value: 4 },
         target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
-        clientId: "client-1",
+        callId: "call-1",
       }),
     ).resolves.toEqual({
       success: true,
       value: { ...textAssistantMessage("updated"), audience: "broadcast" },
-      clientId: "client-1",
+      callId: "call-1",
     });
 
     expect(instance.states?.counter?.value).toEqual({ count: 4 });
-    expect(machine.frames.map((item) => item.messages[0])).toMatchObject([
-      { type: "command", name: "setCounter", clientId: "client-1" },
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages).toMatchObject([
+      { type: "action", kind: "request", action: "command", name: "setCounter", callId: "call-1" },
       { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
       { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
-      { ...textAssistantMessage("updated"), audience: "broadcast" },
+      {
+        type: "action",
+        kind: "result",
+        action: "command",
+        name: "setCounter",
+        callId: "call-1",
+        success: true,
+        value: { ...textAssistantMessage("updated"), audience: "broadcast" },
+      },
+    ]);
+  });
+
+  it("keeps output message indices aligned when merging synchronous command frames", async () => {
+    const counterState = {
+      key: "counter",
+      schema: z.object({ count: z.number() }),
+      init: { count: 0 },
+    };
+    const announceCounter = createAction({
+      state: counterState,
+      name: "announceCounter",
+      run: (_input, ctx) => {
+        ctx.updateState?.(patchState({ count: 1 }));
+        const message = textAssistantMessage("counter updated");
+        return actionResult({ value: message, messages: [message] });
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({
+        key: "root",
+        state: counterState,
+        commands: [announceCounter],
+      }),
+    };
+    const machine = createMachine({
+      root: instance,
+      charter: charter(),
+    });
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "announceCounter",
+      input: {},
+      callId: "announce-counter",
+    });
+
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages).toMatchObject([
+      { type: "action", kind: "request", callId: "announce-counter" },
+      { type: "instance", kind: "state.update", stateKey: "counter" },
+      {
+        type: "action",
+        kind: "result",
+        callId: "announce-counter",
+        outputMessageIndices: [3],
+      },
+      { type: "assistant", text: "counter updated" },
     ]);
   });
 
@@ -1274,19 +1377,137 @@ describe("commands and instance mutations", () => {
     });
 
     await executeCommand(machine, {
-      type: "command",
+      type: "action",
+      kind: "request",
+      action: "command",
       name: "appendLog",
       input: { value: "created" },
+      callId: "append-log",
     });
 
     expect(instance.states?.log?.value).toEqual(["created", "indexed"]);
-    expect(machine.frames[1]?.messages[0]).toMatchObject({
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages[1]).toMatchObject({
       type: "instance",
       kind: "state.update",
       instanceId: "r",
       stateKey: "log",
       update: { op: "append", values: ["created", "indexed"] },
     });
+  });
+
+  it("splits async command request and result frames", async () => {
+    let resolveCommand!: () => void;
+    const pendingCommand = new Promise<void>((resolve) => {
+      resolveCommand = resolve;
+    });
+    const wait = createAction({
+      state: null,
+      name: "wait",
+      run: async () => {
+        await pendingCommand;
+        return "done";
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({ key: "root", commands: [wait] }),
+    };
+    const machine = createMachine({
+      root: instance,
+      charter: charter(),
+    });
+
+    const result = executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "wait",
+      input: {},
+      callId: "wait-command",
+    });
+
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages).toMatchObject([
+      { type: "action", kind: "request", action: "command", name: "wait", callId: "wait-command" },
+    ]);
+
+    resolveCommand();
+    await expect(result).resolves.toEqual({
+      success: true,
+      value: "done",
+      callId: "wait-command",
+    });
+    expect(machine.frames).toHaveLength(2);
+    expect(machine.frames[1]?.messages).toMatchObject([
+      { type: "action", kind: "result", action: "command", name: "wait", callId: "wait-command", success: true },
+    ]);
+  });
+
+  it("evaluates functional state updates against the latest state after awaits", async () => {
+    let releaseCommands!: () => void;
+    const commandGate = new Promise<void>((resolve) => {
+      releaseCommands = resolve;
+    });
+    const counterState = {
+      key: "counter",
+      schema: z.object({ count: z.number() }),
+      init: { count: 0 },
+    };
+    const increment = createAction({
+      state: counterState,
+      name: "increment",
+      inputSchema: z.object({ amount: z.number() }),
+      run: async ({ amount }, ctx) => {
+        await commandGate;
+        ctx.updateState?.((state) => patchState({ count: state.count + amount }));
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({
+        key: "root",
+        state: counterState,
+        commands: [increment],
+      }),
+    };
+    const machine = createMachine({
+      root: instance,
+      charter: charter(),
+    });
+
+    const first = executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "increment",
+      input: { amount: 1 },
+      callId: "increment-1",
+    });
+    const second = executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "increment",
+      input: { amount: 2 },
+      callId: "increment-2",
+    });
+
+    expect(instance.states?.counter?.value).toEqual({ count: 0 });
+    releaseCommands();
+    await Promise.all([first, second]);
+
+    expect(instance.states?.counter?.value).toEqual({ count: 3 });
+    expect(machine.frames.map((frame) => frame.messages)).toMatchObject([
+      [{ type: "action", kind: "request", callId: "increment-1" }],
+      [{ type: "action", kind: "request", callId: "increment-2" }],
+      [{ type: "instance", kind: "state.update", update: { op: "patch", value: { count: 1 } } }],
+      [{ type: "instance", kind: "state.update", update: { op: "patch", value: { count: 3 } } }],
+      [{ type: "action", kind: "result", callId: "increment-1", success: true }],
+      [{ type: "action", kind: "result", callId: "increment-2", success: true }],
+    ]);
   });
 
   it("folds spawn messages and derives spawn-triggered runtime work", async () => {
@@ -1332,7 +1553,6 @@ describe("commands and instance mutations", () => {
     expect(activation?.messages[0]).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "instance:child",
       generatorId: "instance:child",
       sourceFrameId: spawnFrame.id,
     });
@@ -1357,14 +1577,18 @@ describe("commands and instance mutations", () => {
     });
 
     await executeCommand(machine, {
-      type: "command",
+      type: "action",
+      kind: "request",
+      action: "command",
       name: "spawnChild",
       input: {},
       target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+      callId: "spawn-member-child",
     });
 
     expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
-    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages[1]).toMatchObject({
       type: "instance",
       kind: "spawn",
       parentInstanceId: "r",
@@ -1390,13 +1614,17 @@ describe("commands and instance mutations", () => {
     });
 
     await executeCommand(machine, {
-      type: "command",
+      type: "action",
+      kind: "request",
+      action: "command",
       name: "spawnChild",
       input: {},
+      callId: "spawn-concrete-child",
     });
 
     expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
-    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages[1]).toMatchObject({
       type: "instance",
       kind: "spawn",
       parentInstanceId: "r",
@@ -1430,14 +1658,18 @@ describe("commands and instance mutations", () => {
     });
 
     await executeCommand(machine, {
-      type: "command",
+      type: "action",
+      kind: "request",
+      action: "command",
       name: "cedeCamera",
       input: {},
       target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+      callId: "cede-camera",
     });
 
     expect(instance.children?.map((item) => item.id)).toEqual(["other-1"]);
-    expect(machine.frames.at(-1)?.messages).toMatchObject([
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages.slice(1, -1)).toMatchObject([
       {
         type: "instance",
         kind: "remove",
@@ -1466,14 +1698,18 @@ describe("commands and instance mutations", () => {
     });
 
     await executeCommand(machine, {
-      type: "command",
+      type: "action",
+      kind: "request",
+      action: "command",
       name: "transitionOwner",
       input: {},
       target: { type: "member", ownerInstanceId: "r", memberPath: ["controls"] },
+      callId: "transition-owner",
     });
 
     expect(instance.node.key).toBe("next");
-    expect(machine.frames.at(-1)?.messages[0]).toMatchObject({
+    expect(machine.frames).toHaveLength(1);
+    expect(machine.frames[0]?.messages[1]).toMatchObject({
       type: "instance",
       kind: "transition",
       instanceId: "r",
@@ -1549,7 +1785,7 @@ describe("work scheduling", () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
+        calls.push(request.generatorId);
         return { completionReason: "done" as const };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -1584,7 +1820,6 @@ describe("work scheduling", () => {
     expect(rootActivationMessage).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "instance:r",
       generatorId: "instance:r",
       sourceFrameId: userFrame.id,
       concurrencyKey: "instance:r",
@@ -1607,7 +1842,6 @@ describe("work scheduling", () => {
     expect(memoryActivationMessage).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "member:r/memory",
       generatorId: "member:r/memory",
       sourceFrameId: rootCompletion.value?.id,
       concurrencyKey: "member:r/memory",
@@ -1634,13 +1868,13 @@ describe("work scheduling", () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
-        if (request.runtimeInstanceId === "instance:r") {
+        calls.push(request.generatorId);
+        if (request.generatorId === "instance:r") {
           await rootStep;
         }
         return {
           completionReason: "done" as const,
-          value: request.runtimeInstanceId,
+          value: request.generatorId,
         };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -1668,7 +1902,7 @@ describe("work scheduling", () => {
     expect(activation.value?.messages[0]).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "instance:r",
+      generatorId: "instance:r",
     });
     expect(calls).toEqual([]);
 
@@ -1680,7 +1914,7 @@ describe("work scheduling", () => {
 
     expect(machine.frames.map((frame) => frame.messages[0])).toMatchObject([
       { type: "user" },
-      { type: "work", kind: "activation", runtimeInstanceId: "instance:r" },
+      { type: "work", kind: "activation", generatorId: "instance:r" },
       { type: "assistant", content: textParts("instance:r"), text: "instance:r" },
       { type: "work", kind: "completion" },
     ]);
@@ -1702,7 +1936,7 @@ describe("work scheduling", () => {
     expect(memoryActivation.value?.messages[0]).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "member:r/memory",
+      generatorId: "member:r/memory",
     });
     expect(calls).toEqual(["instance:r"]);
   });
@@ -1711,7 +1945,7 @@ describe("work scheduling", () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
+        calls.push(request.generatorId);
         return { completionReason: "done" as const };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -1750,7 +1984,7 @@ describe("work scheduling", () => {
     expect(memoryActivation.value?.messages[0]).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "member:r/memory",
+      generatorId: "member:r/memory",
     });
     const memoryActivationId = (memoryActivation.value?.messages[0] as { activationId?: string } | undefined)
       ?.activationId;
@@ -1817,7 +2051,6 @@ describe("work scheduling", () => {
     });
     machine.enqueueFrame({
       generatorId: "instance:r",
-      runtimeInstanceId: "instance:r",
       activationId: "activation-existing",
       messages: [{ ...textAssistantMessage("self output") }],
     });
@@ -1854,8 +2087,8 @@ describe("work scheduling", () => {
     const memoryHistoryTexts: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
-        if (request.runtimeInstanceId === "member:r/memory") {
+        calls.push(request.generatorId);
+        if (request.generatorId === "member:r/memory") {
           memoryHistoryTexts.push(
             ...request.inference.history
               .filter(isActorMessage)
@@ -1878,21 +2111,18 @@ describe("work scheduling", () => {
     });
     const userTranscript = machine.enqueueFrame({
       id: "user-transcript",
-      generatorId: ROOT_RUNTIME_INSTANCE_ID,
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       inert: true,
       messages: [{ ...textUserMessage("voice request") }],
     } as Frame);
     const assistantTranscript = machine.enqueueFrame({
       id: "assistant-transcript",
-      generatorId: ROOT_RUNTIME_INSTANCE_ID,
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       inert: true,
       messages: [{ ...textAssistantMessage("voice answer") }],
     } as Frame);
     const turn = machine.enqueueFrame(createRuntimeTurnFrame({
-      generatorId: ROOT_RUNTIME_INSTANCE_ID,
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       activationId: "external-root-turn",
       sourceFrameId: assistantTranscript.id,
     }));
@@ -1908,7 +2138,7 @@ describe("work scheduling", () => {
       expect.objectContaining({
         type: "work",
         kind: "activation",
-        runtimeInstanceId: "member:r/memory",
+        generatorId: "member:r/memory",
         sourceFrameId: turn.id,
       }),
     );
@@ -1918,7 +2148,7 @@ describe("work scheduling", () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
+        calls.push(request.generatorId);
         return { completionReason: "delegated" as const };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -1936,14 +2166,14 @@ describe("work scheduling", () => {
 
     await collectFrames(runMachine(machine));
 
-    expect(calls).toEqual([ROOT_RUNTIME_INSTANCE_ID, "instance:r"]);
+    expect(calls).toEqual([ROOT_GENERATOR_ID, "instance:r"]);
   });
 
   it("uses the nearest concrete generator boundary before the root runtime", async () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
+        calls.push(request.generatorId);
         return { completionReason: "done" as const };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -1966,7 +2196,6 @@ describe("work scheduling", () => {
     const activationId = "root-activation";
     machine.enqueueFrame(createActivationFrame({
       activationId,
-      runtimeInstanceId: "instance:r",
       generatorId: "instance:r",
       sourceFrameId: userFrame.id,
       concurrencyKey: "instance:r",
@@ -1984,7 +2213,7 @@ describe("work scheduling", () => {
       .find((message) =>
         message.type === "work" &&
         message.kind === "activation" &&
-        message.runtimeInstanceId === "member:r/memory" &&
+        message.generatorId === "member:r/memory" &&
         message.sourceFrameId === rootCompletion.id
       );
 
@@ -1992,11 +2221,11 @@ describe("work scheduling", () => {
     expect(calls).toContain("member:r/memory");
   });
 
-  it("treats the root runtime as the parent runtime for generators under component children", async () => {
+  it("treats the root generator as the parent generator for generators under component children", async () => {
     const calls: string[] = [];
     const runtimeExecutor = {
       run: async (request: ExecutorRunRequest) => {
-        calls.push(request.runtimeInstanceId);
+        calls.push(request.generatorId);
         return { completionReason: "done" as const };
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
@@ -2018,7 +2247,7 @@ describe("work scheduling", () => {
 
     await collectFrames(runMachine(machine));
 
-    expect(calls).toEqual([ROOT_RUNTIME_INSTANCE_ID, "member:r/memory"]);
+    expect(calls).toEqual([ROOT_GENERATOR_ID, "member:r/memory"]);
   });
 
   it("lets a host persist frames and sync the root runtime after each non-inert frame", async () => {
@@ -2056,7 +2285,7 @@ describe("work scheduling", () => {
       persisted.push(frame.id);
       if (!frame.inert) {
         await syncMachineRuntime(machine, {
-          runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+          generatorId: ROOT_GENERATOR_ID,
           visibleFrames: [frame],
         });
       }
@@ -2132,7 +2361,7 @@ describe("work scheduling", () => {
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: { mode: "augment" },
+          boundaryProjection: augmentProjection,
         },
       }),
     };
@@ -2159,7 +2388,7 @@ describe("work scheduling", () => {
     });
 
     await syncMachineRuntime(machine, {
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       visibleFrames: [],
     });
 
@@ -2189,7 +2418,7 @@ describe("work scheduling", () => {
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: { mode: "augment" },
+          boundaryProjection: augmentProjection,
         },
       }),
     };
@@ -2213,14 +2442,13 @@ describe("work scheduling", () => {
     });
 
     await syncMachineRuntime(machine, {
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       visibleFrames: [],
     });
 
     expect(instance.children?.map((item) => item.node.key)).toEqual(["child"]);
     expect(machine.frames[0]).toMatchObject({
-      generatorId: ROOT_RUNTIME_INSTANCE_ID,
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       messages: [
         {
           type: "instance",
@@ -2249,7 +2477,7 @@ describe("work scheduling", () => {
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: { mode: "augment" },
+          boundaryProjection: augmentProjection,
         },
       }),
     };
@@ -2274,7 +2502,7 @@ describe("work scheduling", () => {
     });
 
     await syncMachineRuntime(machine, {
-      runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+      generatorId: ROOT_GENERATOR_ID,
       visibleFrames: [],
     });
   });
@@ -2286,7 +2514,21 @@ describe("work scheduling", () => {
         expect(request.output?.audience).toEqual(audience);
         return {
           completionReason: "done" as const,
-          frames: [{ messages: [{ type: "tool" as const, name: "trace", text: "ran" }] }],
+          frames: [
+            {
+              messages: [
+                {
+                  type: "action" as const,
+                  kind: "result" as const,
+                  action: "tool" as const,
+                  name: "trace",
+                  callId: "trace-1",
+                  success: true,
+                  value: "ran",
+                },
+              ],
+            },
+          ],
           value: "hello from the model",
         };
       },
@@ -2309,7 +2551,7 @@ describe("work scheduling", () => {
     expect(frames.map((frame) => frame.messages[0])).toMatchObject([
       { ...textUserMessage("hi") },
       { type: "work", kind: "activation" },
-      { type: "tool", name: "trace", text: "ran" },
+      { type: "action", kind: "result", action: "tool", name: "trace", callId: "trace-1", success: true, value: "ran" },
       {
         type: "assistant",
         content: textParts("hello from the model"),
@@ -2320,11 +2562,9 @@ describe("work scheduling", () => {
     ]);
     expect(frames[2]).toMatchObject({
       generatorId: "instance:r",
-      runtimeInstanceId: "instance:r",
     });
     expect(frames[3]).toMatchObject({
       generatorId: "instance:r",
-      runtimeInstanceId: "instance:r",
     });
   });
 
@@ -2392,7 +2632,85 @@ describe("serialization and refs", () => {
     );
   });
 
+  it("serializes default projections by omission", () => {
+    const node = createNode({
+      key: "generator",
+      runtime: { type: "generator", trigger: { type: "spawn" } },
+    });
+
+    const serialized = serializeNode(node, charter());
+
+    expect(typeof serialized).toBe("object");
+    if (typeof serialized === "string") {
+      throw new Error("Expected inline serialized node");
+    }
+    expect(serialized).toMatchObject({
+      key: "generator",
+      runtime: {
+        type: "generator",
+        trigger: { type: "spawn" },
+      },
+    });
+    expect(serialized.projection).toBeUndefined();
+    expect(serialized.runtime?.type === "generator" ? serialized.runtime.boundaryProjection : undefined).toBeUndefined();
+  });
+
+  it("serializes projection refs from source node slots", () => {
+    const nodeProjection = createProjectionFunction({
+      name: "sourceNodeProjection",
+      method: (ctx, draft, source) => applyStandardProjection(ctx, draft, source),
+    });
+    const boundaryProjection = createProjectionFunction({
+      name: "sourceBoundaryProjection",
+      method: (_ctx, draft, source) => {
+        if (source.ir) {
+          draft.systemParts.push(...source.ir.systemParts);
+        }
+      },
+    });
+    const source = createNode({
+      key: "source",
+      projection: nodeProjection,
+      runtime: {
+        type: "generator",
+        trigger: { type: "spawn" },
+        boundaryProjection,
+      },
+    });
+    const derived = createNode({
+      key: "source",
+      sourceNodeKey: "source",
+      projection: nodeProjection,
+      runtime: {
+        type: "generator",
+        trigger: { type: "spawn" },
+        boundaryProjection,
+      },
+    });
+    const registry = charter({ nodes: [source] });
+
+    const serialized = serializeNode(derived, registry);
+    const hydrated = hydrateNode(serialized, registry);
+
+    expect(typeof serialized).toBe("object");
+    if (typeof serialized === "string") {
+      throw new Error("Expected inline serialized node");
+    }
+    expect(serialized.projection).toBe("sourceNodeProjection");
+    expect(serialized.runtime?.type === "generator" ? serialized.runtime.boundaryProjection : undefined).toBe(
+      "sourceBoundaryProjection",
+    );
+    expect(hydrated.projection).toBe(nodeProjection);
+    expect(hydrated.runtime.type === "generator" ? hydrated.runtime.boundaryProjection : undefined).toBe(
+      boundaryProjection,
+    );
+  });
+
   it("rejects duplicate projection function names", () => {
+    const method = () => {};
+    const projection = createProjectionFunction({ name: "same", method });
+    expect(charter({ projections: [projection, projection] }).projections.same).toBe(projection);
+
     expect(() =>
       charter({
         projections: [
@@ -2400,7 +2718,13 @@ describe("serialization and refs", () => {
           createProjectionFunction({ name: "duplicate", method: () => {} }),
         ],
       }),
-    ).toThrow(/Duplicate projection function "duplicate"/);
+    ).toThrow(/Duplicate projection function "duplicate" with different methods/);
+  });
+
+  it("requires standard projection function names", () => {
+    expect(() => createStandardProjectionFunction({ mode: "replace" } as any)).toThrow(
+      /Projection function name must be non-empty/,
+    );
   });
 
   it("hydrates location-aware plain refs and rejects unknown refs", () => {
@@ -2525,10 +2849,6 @@ describe("serialization and refs", () => {
     expect(serialized.children?.map((item) => item.id)).toEqual(["c"]);
   });
 });
-
-function makeGenerator(runtimeInstanceId: string, kind: "generator") {
-  return { id: runtimeInstanceId, kind, runtimeInstanceId };
-}
 
 function frame(id: string, messages: Frame["messages"]): Frame {
   return { id, generatorId: id, messages };

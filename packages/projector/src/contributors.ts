@@ -1,21 +1,23 @@
 import { createNode } from "./create.ts";
-import { encodeRuntimeAddress } from "./runtime-address.ts";
-import { ROOT_INSTANCE_ID } from "./runtime-address.ts";
+import { hiddenProjection } from "./projection-functions.ts";
+import { encodeProjectionAddress } from "./projection-address.ts";
+import { ROOT_INSTANCE_ID } from "./projection-address.ts";
+import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
   Instance,
   Node,
-  RuntimeAddress,
+  ProjectionAddress,
 } from "./types.ts";
 
-export type ProjectionNode<TDataContent = never> = {
+export type Contributor<TDataContent = never> = {
   node: Node<TDataContent>;
   instance: Instance<TDataContent>;
   concreteInstance: Instance<TDataContent>;
   sourceInstance?: Instance<TDataContent>;
-  address: RuntimeAddress;
-  runtimeInstanceId: string;
+  address: ProjectionAddress;
+  id: string;
   memberPath: string[];
-  parent?: ProjectionNode<TDataContent>;
+  parent?: Contributor<TDataContent>;
   isMember: boolean;
 };
 
@@ -26,7 +28,7 @@ const rootNode = createNode({
     type: "generator",
     trigger: { type: "actor-frame" },
   },
-  projection: { mode: "hidden" },
+  projection: hiddenProjection,
 });
 
 export type CreateInstanceOptions<TDataContent = never> = {
@@ -44,6 +46,7 @@ export function createInstance<TDataContent = never>({
   states,
   children,
 }: CreateInstanceOptions<TDataContent>): Instance<TDataContent> {
+  assertProjectorIdentifier(id, "Instance id");
   return {
     id,
     node,
@@ -71,61 +74,61 @@ export function createRoot<TDataContent = never>(
   return root;
 }
 
-export function collectProjectionNodes<TDataContent = never>(
+export function collectContributors<TDataContent = never>(
   root: Instance<TDataContent>,
-): ProjectionNode<TDataContent>[] {
-  const projectionNodes: ProjectionNode<TDataContent>[] = [];
-  collectInstanceNode(projectionNodes, root, undefined, undefined);
-  return projectionNodes;
+): Contributor<TDataContent>[] {
+  const contributors: Contributor<TDataContent>[] = [];
+  collectInstanceNode(contributors, root, undefined, undefined);
+  return contributors;
 }
 
-export function findProjectionNodeByRuntimeId<TDataContent = never>(
+export function findContributorById<TDataContent = never>(
   root: Instance<TDataContent>,
-  runtimeInstanceId: string,
-): ProjectionNode<TDataContent> | undefined {
-  return collectProjectionNodes(root).find(
-    (projectionNode) => projectionNode.runtimeInstanceId === runtimeInstanceId,
+  id: string,
+): Contributor<TDataContent> | undefined {
+  return collectContributors(root).find(
+    (contributor) => contributor.id === id,
   );
 }
 
-export function directProjectionNodeChildren<TDataContent = never>(
-  projectionNode: ProjectionNode<TDataContent>,
-): ProjectionNode<TDataContent>[] {
-  const children: ProjectionNode<TDataContent>[] = [];
+export function directContributorChildren<TDataContent = never>(
+  contributor: Contributor<TDataContent>,
+): Contributor<TDataContent>[] {
+  const children: Contributor<TDataContent>[] = [];
 
-  for (const member of projectionNode.node.members) {
-    const memberPath = [...projectionNode.memberPath, member.key];
-    const address: RuntimeAddress = {
+  for (const member of contributor.node.members) {
+    const memberPath = [...contributor.memberPath, member.key];
+    const address: ProjectionAddress = {
       type: "member",
-      ownerInstanceId: projectionNode.concreteInstance.id,
+      ownerInstanceId: contributor.concreteInstance.id,
       memberPath,
     };
-    const memberNode: ProjectionNode<TDataContent> = {
+    const memberNode: Contributor<TDataContent> = {
       node: member,
-      instance: projectionNode.concreteInstance,
-      concreteInstance: projectionNode.concreteInstance,
-      sourceInstance: projectionNode.sourceInstance,
+      instance: contributor.concreteInstance,
+      concreteInstance: contributor.concreteInstance,
+      sourceInstance: contributor.sourceInstance,
       address,
-      runtimeInstanceId: encodeRuntimeAddress(address),
+      id: encodeProjectionAddress(address),
       memberPath,
-      parent: projectionNode,
+      parent: contributor,
       isMember: true,
     };
     children.push(memberNode);
   }
 
-  if (!projectionNode.isMember) {
-    for (const child of projectionNode.instance.children ?? []) {
-      const childAddress: RuntimeAddress = { type: "instance", instanceId: child.id };
+  if (!contributor.isMember) {
+    for (const child of contributor.instance.children ?? []) {
+      const childAddress: ProjectionAddress = { type: "instance", instanceId: child.id };
       children.push({
         node: child.node,
         instance: child,
         concreteInstance: child,
-        sourceInstance: child.isSource ? child : projectionNode.sourceInstance,
+        sourceInstance: child.isSource ? child : contributor.sourceInstance,
         address: childAddress,
-        runtimeInstanceId: encodeRuntimeAddress(childAddress),
+        id: encodeProjectionAddress(childAddress),
         memberPath: [],
-        parent: projectionNode,
+        parent: contributor,
         isMember: false,
       });
     }
@@ -135,50 +138,50 @@ export function directProjectionNodeChildren<TDataContent = never>(
 }
 
 export function hoistStateInstance<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
 ): Instance<TDataContent> {
-  if (projectionNode.sourceInstance) {
-    return projectionNode.sourceInstance;
+  if (contributor.sourceInstance) {
+    return contributor.sourceInstance;
   }
 
-  if (projectionNode.concreteInstance.isSource) {
-    return projectionNode.concreteInstance;
+  if (contributor.concreteInstance.isSource) {
+    return contributor.concreteInstance;
   }
 
   throw new Error(
-    `Cannot resolve hoist state for instance "${projectionNode.concreteInstance.id}" without an ancestor source instance`,
+    `Cannot resolve hoist state for instance "${contributor.concreteInstance.id}" without an ancestor source instance`,
   );
 }
 
 function collectInstanceNode<TDataContent>(
-  projectionNodes: ProjectionNode<TDataContent>[],
+  contributors: Contributor<TDataContent>[],
   instance: Instance<TDataContent>,
-  parent: ProjectionNode<TDataContent> | undefined,
+  parent: Contributor<TDataContent> | undefined,
   sourceInstance: Instance<TDataContent> | undefined,
 ): void {
-  const address: RuntimeAddress = { type: "instance", instanceId: instance.id };
-  const projectionNode: ProjectionNode<TDataContent> = {
+  const address: ProjectionAddress = { type: "instance", instanceId: instance.id };
+  const contributor: Contributor<TDataContent> = {
     node: instance.node,
     instance,
     concreteInstance: instance,
     sourceInstance: instance.isSource ? instance : sourceInstance,
     address,
-    runtimeInstanceId: encodeRuntimeAddress(address),
+    id: encodeProjectionAddress(address),
     memberPath: [],
     parent,
     isMember: false,
   };
-  projectionNodes.push(projectionNode);
-  collectDescendants(projectionNodes, projectionNode);
+  contributors.push(contributor);
+  collectDescendants(contributors, contributor);
 }
 
 function collectDescendants<TDataContent>(
-  projectionNodes: ProjectionNode<TDataContent>[],
-  projectionNode: ProjectionNode<TDataContent>,
+  contributors: Contributor<TDataContent>[],
+  contributor: Contributor<TDataContent>,
 ): void {
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    projectionNodes.push(child);
-    collectDescendants(projectionNodes, child);
+  for (const child of directContributorChildren(contributor)) {
+    contributors.push(child);
+    collectDescendants(contributors, child);
   }
 }
 
@@ -188,6 +191,7 @@ export function assertUniqueInstanceIds(root: Instance<any>): void {
 }
 
 function visitInstanceIds(instance: Instance<any>, seen: Set<string>): void {
+  assertProjectorIdentifier(instance.id, "Instance id");
   if (seen.has(instance.id)) {
     throw new Error(`Duplicate instance id "${instance.id}"`);
   }

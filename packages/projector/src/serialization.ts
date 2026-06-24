@@ -1,19 +1,20 @@
 import * as z from "zod";
 import {
   createNode,
-  normalizeStaticBoundaryProjection,
   normalizeStateDescriptor,
 } from "./create.ts";
 import {
+  defaultProjection,
+  hiddenProjection,
   isHistoryProjectionFunction,
   isProjectionFunction,
 } from "./projection-functions.ts";
 import { hydrateNodeRef } from "./refs.ts";
 import type {
   ActionBindings,
+  ActionKind,
   ActorHistoryProjection,
   AnyAction,
-  BoundaryProjection,
   Charter,
   DryHistoryProjection,
   DryRuntime,
@@ -35,8 +36,6 @@ import type {
   SerializedInstance,
   SerializedStateDescriptor,
   StateContainer,
-  StaticBoundaryProjection,
-  StaticProjection,
 } from "./types.ts";
 
 export function serializeInstance<TDataContent>(
@@ -91,8 +90,8 @@ export function serializeNode<TDataContent>(
     state: node.state ? serializeStateDescriptor(node.state, charter) : undefined,
     members: node.members.map((member) => serializeNode(member, charter)),
     output: node.output ? serializeOutputConfig(node.output) : undefined,
-    projection: serializeProjection(node.projection, charter),
-    runtime: serializeRuntime(node.runtime, charter),
+    projection: serializeNodeProjection(node, charter, sourceNodeKey),
+    runtime: serializeRuntime(node.runtime, charter, sourceNodeKey),
   };
 }
 
@@ -121,8 +120,12 @@ export function hydrateNode<TDataContent = never>(
     output: serialized.output
       ? (hydrateOutputConfig(serialized.output) as OutputConfig<TDataContent>)
       : undefined,
-    projection: serialized.projection ? hydrateProjection(serialized.projection, charter) : undefined,
-    runtime: serialized.runtime ? hydrateRuntime(serialized.runtime, charter) : undefined,
+    projection: serialized.projection
+      ? hydrateNodeProjection(serialized.projection, charter, serialized.sourceNodeKey)
+      : undefined,
+    runtime: serialized.runtime
+      ? hydrateRuntime(serialized.runtime, charter, serialized.sourceNodeKey)
+      : undefined,
   });
 }
 
@@ -149,7 +152,7 @@ export function hydrateOutputConfig(output: SerializedOutputConfig): AnyOutputCo
 export function serializeProjection<TDataContent>(
   projection: Projection<TDataContent>,
   charter: Charter<TDataContent>,
-): StaticProjection | Ref {
+): Ref {
   if (isProjectionFunction<TDataContent>(projection)) {
     const registered = charter.projections[projection.name];
     if (registered !== projection) {
@@ -165,17 +168,13 @@ export function serializeProjection<TDataContent>(
     return projection;
   }
 
-  return projection;
+  throw new Error("Cannot serialize unknown projection");
 }
 
 export function hydrateProjection<TDataContent>(
-  projection: StaticProjection | Ref,
+  projection: Ref,
   charter: Charter<TDataContent>,
-): StaticProjection | ProjectionFunction<TDataContent> {
-  if (typeof projection !== "string") {
-    return projection;
-  }
-
+): ProjectionFunction<TDataContent> {
   const fn = charter.projections[projection];
   if (!fn) {
     throw new Error(`Unknown projection ref "${projection}"`);
@@ -183,41 +182,89 @@ export function hydrateProjection<TDataContent>(
   return fn;
 }
 
-export function serializeBoundaryProjection<TDataContent>(
-  projection: BoundaryProjection<TDataContent>,
+function serializeNodeProjection<TDataContent>(
+  node: Node<TDataContent>,
   charter: Charter<TDataContent>,
-): StaticBoundaryProjection | Ref {
-  if (isProjectionFunction<TDataContent>(projection)) {
-    const registered = charter.projections[projection.name];
-    if (registered !== projection) {
-      throw new Error(
-        `Cannot serialize unregistered projection function "${projection.name}"`,
-      );
-    }
+  sourceNodeKey: string | undefined,
+): Ref | undefined {
+  if (node.projection === defaultProjection) {
+    return undefined;
+  }
+  return serializeProjectionSlot(node.projection, charter, "projection", sourceNodeKey);
+}
+
+function hydrateNodeProjection<TDataContent>(
+  projection: Ref,
+  charter: Charter<TDataContent>,
+  sourceNodeKey: string | undefined,
+): ProjectionFunction<TDataContent> {
+  return hydrateProjectionSlot(projection, charter, "projection", sourceNodeKey);
+}
+
+function serializeProjectionSlot<TDataContent>(
+  projection: Projection<TDataContent>,
+  charter: Charter<TDataContent>,
+  slot: "projection" | "boundaryProjection",
+  sourceNodeKey: string | undefined,
+): Ref {
+  if (typeof projection === "string") {
+    assertProjectionSlotRef(projection, charter, slot, sourceNodeKey);
+    return projection;
+  }
+
+  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
+  if (sourceProjection === projection) {
     return projection.name;
   }
 
-  if (typeof projection === "string") {
-    assertProjectionRef(projection, charter);
-    return projection;
-  }
-
-  return normalizeStaticBoundaryProjection(projection);
+  return serializeProjection(projection, charter);
 }
 
-export function hydrateBoundaryProjection<TDataContent>(
-  projection: StaticBoundaryProjection | Ref,
+function hydrateProjectionSlot<TDataContent>(
+  projection: Ref,
   charter: Charter<TDataContent>,
-): StaticBoundaryProjection | ProjectionFunction<TDataContent> {
-  if (typeof projection !== "string") {
-    return normalizeStaticBoundaryProjection(projection);
+  slot: "projection" | "boundaryProjection",
+  sourceNodeKey: string | undefined,
+): ProjectionFunction<TDataContent> {
+  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
+  if (sourceProjection?.name === projection) {
+    return sourceProjection;
+  }
+  return hydrateProjection(projection, charter);
+}
+
+function assertProjectionSlotRef<TDataContent>(
+  projection: Ref,
+  charter: Charter<TDataContent>,
+  slot: "projection" | "boundaryProjection",
+  sourceNodeKey: string | undefined,
+): void {
+  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
+  if (sourceProjection?.name === projection) {
+    return;
+  }
+  assertProjectionRef(projection, charter);
+}
+
+function sourceNodeProjectionSlot<TDataContent>(
+  charter: Charter<TDataContent>,
+  slot: "projection" | "boundaryProjection",
+  sourceNodeKey: string | undefined,
+): ProjectionFunction<TDataContent> | undefined {
+  if (!sourceNodeKey) {
+    return undefined;
+  }
+  const sourceNode = charter.nodes[sourceNodeKey];
+  if (!sourceNode) {
+    return undefined;
   }
 
-  const fn = charter.projections[projection];
-  if (!fn) {
-    throw new Error(`Unknown projection ref "${projection}"`);
-  }
-  return fn;
+  const projection = slot === "projection"
+    ? sourceNode.projection
+    : sourceNode.runtime.type === "generator"
+      ? sourceNode.runtime.boundaryProjection
+      : undefined;
+  return isProjectionFunction<TDataContent>(projection) ? projection : undefined;
 }
 
 function assertProjectionRef<TDataContent>(
@@ -285,6 +332,7 @@ export function hydrateHistoryProjection<TDataContent>(
 function serializeRuntime<TDataContent>(
   runtime: Node<TDataContent>["runtime"],
   charter: Charter<TDataContent>,
+  sourceNodeKey: string | undefined,
 ): DryRuntime {
   if (runtime.type === "generator") {
     const { boundaryProjection, historyProjection, ...rest } = runtime;
@@ -293,9 +341,9 @@ function serializeRuntime<TDataContent>(
       : undefined;
     return {
       ...rest,
-      boundaryProjection: boundaryProjection
-        ? serializeBoundaryProjection(boundaryProjection, charter)
-        : undefined,
+      boundaryProjection: boundaryProjection === hiddenProjection
+        ? undefined
+        : serializeProjectionSlot(boundaryProjection, charter, "boundaryProjection", sourceNodeKey),
       ...(serializedHistoryProjection
         ? { historyProjection: serializedHistoryProjection }
         : {}),
@@ -308,12 +356,13 @@ function serializeRuntime<TDataContent>(
 function hydrateRuntime<TDataContent>(
   runtime: DryRuntime,
   charter: Charter<TDataContent>,
+  sourceNodeKey: string | undefined,
 ): Runtime<TDataContent> {
   if (runtime.type === "generator") {
     return {
       ...runtime,
       boundaryProjection: runtime.boundaryProjection
-        ? hydrateBoundaryProjection(runtime.boundaryProjection, charter)
+        ? hydrateProjectionSlot(runtime.boundaryProjection, charter, "boundaryProjection", sourceNodeKey)
         : undefined,
       historyProjection: runtime.historyProjection
         ? hydrateHistoryProjection(runtime.historyProjection, charter)
@@ -383,7 +432,7 @@ function serializeActionRefs<TDataContent>(
   refs: readonly string[],
   bindings: ActionBindings,
   charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: "tool" | "command",
+  kind: ActionKind,
   sourceNodeKey: string | undefined,
 ): DryAction[] {
   return refs.map((ref) =>
@@ -394,7 +443,7 @@ function serializeActionRefs<TDataContent>(
 function hydrateActionRefs<TDataContent>(
   refs: readonly DryAction[] | undefined,
   charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: "tool" | "command",
+  kind: ActionKind,
   sourceNodeKey: string | undefined,
 ): AnyAction[] | undefined {
   return refs?.map((ref) => hydrateActionRef(ref, charter, kind, sourceNodeKey));
@@ -403,7 +452,7 @@ function hydrateActionRefs<TDataContent>(
 function hydrateActionRef<TDataContent>(
   ref: DryAction,
   charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: "tool" | "command",
+  kind: ActionKind,
   sourceNodeKey: string | undefined,
 ): AnyAction {
   const sourceNode = sourceNodeKey ? charter.nodes[sourceNodeKey] : undefined;
@@ -425,7 +474,7 @@ function serializeActionRef<TDataContent>(
   ref: string,
   binding: AnyAction | undefined,
   charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: "tool" | "command",
+  kind: ActionKind,
   sourceNodeKey: string | undefined,
 ): DryAction {
   if (!binding) {
@@ -463,7 +512,7 @@ function sourceNodeKeyFor<TDataContent>(
 function actionBinding(
   node: Node<any>,
   ref: string,
-  kind: "tool" | "command",
+  kind: ActionKind,
 ): AnyAction | undefined {
   return kind === "tool" ? node.toolBindings[ref] : node.commandBindings[ref];
 }

@@ -49,7 +49,6 @@ describe("conformance: work scheduling", () => {
     expect(rootActivationMessage).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "instance:r",
       generatorId: "instance:r",
       sourceFrameId: userFrame.id,
       concurrencyKey: "instance:r",
@@ -58,7 +57,7 @@ describe("conformance: work scheduling", () => {
     expect(requests).toHaveLength(0);
 
     const rootCompletion = await iterator.next();
-    expect(requests.map((request) => request.runtimeInstanceId)).toEqual(["instance:r"]);
+    expect(requests.map((request) => request.generatorId)).toEqual(["instance:r"]);
     expect(rootCompletion.value?.messages[0]).toMatchObject({
       type: "work",
       kind: "completion",
@@ -72,7 +71,6 @@ describe("conformance: work scheduling", () => {
     expect(generatorActivationMessage).toMatchObject({
       type: "work",
       kind: "activation",
-      runtimeInstanceId: "member:r/memory",
       generatorId: "member:r/memory",
       sourceFrameId: rootCompletion.value?.id,
       concurrencyKey: "member:r/memory",
@@ -80,7 +78,7 @@ describe("conformance: work scheduling", () => {
     });
 
     const generatorCompletion = await iterator.next();
-    expect(requests.map((request) => request.runtimeInstanceId)).toEqual([
+    expect(requests.map((request) => request.generatorId)).toEqual([
       "instance:r",
       "member:r/memory",
     ]);
@@ -108,7 +106,6 @@ describe("conformance: work scheduling", () => {
     });
     const assistantFrame = machine.enqueueFrame({
       generatorId: "instance:r",
-      runtimeInstanceId: "instance:r",
       activationId: "activation-existing",
       messages: [{ ...textAssistantMessage("self output") }],
     });
@@ -119,7 +116,7 @@ describe("conformance: work scheduling", () => {
   it("marks implicit generator output as self-audience assistant messages", async () => {
     const { executor, requests } = createRecordingExecutor((request) => ({
       completionReason: "done",
-      ...(request.runtimeInstanceId === "member:r/memory" ? { value: "memory updated" } : {}),
+      ...(request.generatorId === "member:r/memory" ? { value: "memory updated" } : {}),
     }));
     const generator = createNode({
       key: "memory",
@@ -142,7 +139,7 @@ describe("conformance: work scheduling", () => {
     machine.enqueueFrame({ messages: [{ ...textUserMessage("remember my name") }] });
 
     const frames = await drain(runMachine(machine));
-    const generatorRequest = requests.find((request) => request.runtimeInstanceId === "member:r/memory");
+    const generatorRequest = requests.find((request) => request.generatorId === "member:r/memory");
     const assistantMessages = frames.flatMap((frame) =>
       frame.messages.filter((message) => message.type === "assistant"),
     );
@@ -158,7 +155,7 @@ describe("conformance: work scheduling", () => {
     ]);
   });
 
-  it("matches actor-frame triggers with default and explicit runtime address audiences", async () => {
+  it("matches actor-frame triggers with default and explicit projection address audiences", async () => {
     await expect(activationRuntimeIdsFor({ ...textUserMessage("broadcast") })).resolves.toEqual([
       "member:r/first",
       "member:r/second",
@@ -228,7 +225,6 @@ describe("conformance: work scheduling", () => {
           id: "root-activation-frame",
           ...createActivationFrame({
             activationId: "root-activation",
-            runtimeInstanceId: "instance:r",
             generatorId: "instance:r",
             sourceFrameId: "user-frame",
             concurrencyKey: "instance:r",
@@ -305,8 +301,8 @@ function workActivationRuntimeIds(frames: readonly Frame[]): string[] {
       const record = message as Record<string, unknown>;
       return record.type === "work" &&
         record.kind === "activation" &&
-        typeof record.runtimeInstanceId === "string"
-        ? [record.runtimeInstanceId]
+        typeof record.generatorId === "string"
+        ? [record.generatorId]
         : [];
     }),
   );

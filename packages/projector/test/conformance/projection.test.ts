@@ -23,9 +23,12 @@ describe("conformance: projection IR", () => {
     const exportRuntimeBoundary = createProjectionFunction({
       name: "exportRuntimeBoundary",
       method: (_ctx, draft, source) => {
-        const promptParts = [...source.systemParts, ...source.dynamicParts];
+        const promptParts = [
+          ...(source.ir?.systemParts ?? []),
+          ...(source.ir?.dynamicParts ?? []),
+        ];
         draft.dynamicParts.push(...promptParts);
-        draft.tools.push(...source.tools);
+        draft.tools.push(...(source.ir?.tools ?? []));
       },
     });
     const generator = createNode({
@@ -62,7 +65,6 @@ describe("conformance: projection IR", () => {
       {
         type: "work",
         kind: "activation",
-        runtimeInstanceId: "instance:r",
         generatorId: "instance:r",
         sourceFrameId: "frame-0",
       },
@@ -137,14 +139,14 @@ describe("conformance: projection IR", () => {
     expect(child.inference.systemParts).not.toContainEqual({ type: "text", text: "policy" });
   });
 
-  it("filters actor history by default, self, and explicit audiences", () => {
+  it("filters frame history by default, self, and explicit audiences", () => {
     const generator = createNode({
       key: "generator",
       runtime: { type: "generator", trigger: { type: "parent-completion" } },
     });
     const root = createNode({ key: "root", members: [generator] });
-    const runtimeInstanceId = "member:r/generator";
-    const generatorAddress = {
+    const generatorId = "member:r/generator";
+    const projectionAddress = {
       type: "member" as const,
       ownerInstanceId: "r",
       memberPath: ["generator"],
@@ -153,26 +155,29 @@ describe("conformance: projection IR", () => {
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: makeGenerator(runtimeInstanceId, "generator"),
+        targetGeneratorId: generatorId,
         frameHistory: [
           frame("user", [{ ...textUserMessage("default broadcast") }]),
           frame("other-self", [{ ...textAssistantMessage("hidden self") }]),
           frame(
             "generator-self",
             [{ ...textAssistantMessage("visible self") }],
-            { generatorId: runtimeInstanceId },
+            { generatorId: generatorId },
           ),
           frame("runtime-target", [
             {
-              type: "tool",
+              type: "action",
+              kind: "result",
+              action: "tool",
               name: "trace",
-              audience: generatorAddress,
+              callId: "trace-1",
+              success: true,
             },
           ]),
           frame("address-list-target", [
             {
               ...textAssistantMessage("visible address list target"),
-              audience: [generatorAddress],
+              audience: [projectionAddress],
             },
           ]),
           frame("other-runtime", [
@@ -189,13 +194,16 @@ describe("conformance: projection IR", () => {
       { ...textUserMessage("default broadcast") },
       { ...textAssistantMessage("visible self") },
       {
-        type: "tool",
+        type: "action",
+        kind: "result",
+        action: "tool",
         name: "trace",
-        audience: generatorAddress,
+        callId: "trace-1",
+        success: true,
       },
       {
         ...textAssistantMessage("visible address list target"),
-        audience: [generatorAddress],
+        audience: [projectionAddress],
       },
     ]);
   });
@@ -214,7 +222,7 @@ describe("conformance: projection IR", () => {
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: makeGenerator("instance:r", "generator"),
+        targetGeneratorId: "instance:r",
         activationId,
         frameHistory: [
           frame("before", [{ ...textUserMessage("queued before"), delivery: "queued" }]),
@@ -231,7 +239,6 @@ describe("conformance: projection IR", () => {
         type: "work",
         kind: "activation",
         activationId,
-        runtimeInstanceId: "instance:r",
         generatorId: "instance:r",
         sourceFrameId: "before",
         concurrencyKey: "instance:r",
@@ -255,7 +262,7 @@ describe("conformance: projection IR", () => {
     const compiled = compileProjection(
       { id: "r", isSource: true, node: root },
       {
-        targetGenerator: makeGenerator("instance:r", "generator"),
+        targetGeneratorId: "instance:r",
         activationId,
         frameHistory: [
           frame("before", [{ ...textUserMessage("before") }]),
@@ -266,7 +273,6 @@ describe("conformance: projection IR", () => {
             [{ ...textAssistantMessage("same activation") }],
             {
               generatorId: "instance:r",
-              runtimeInstanceId: "instance:r",
               activationId,
             },
           ),
@@ -280,7 +286,6 @@ describe("conformance: projection IR", () => {
         type: "work",
         kind: "activation",
         activationId,
-        runtimeInstanceId: "instance:r",
         generatorId: "instance:r",
         sourceFrameId: "before",
         concurrencyKey: "instance:r",
@@ -300,7 +305,7 @@ describe("conformance: projection IR", () => {
       compileProjection(
         { id: "r", isSource: true, node: root },
         {
-          targetGenerator: makeGenerator("instance:r", "generator"),
+          targetGeneratorId: "instance:r",
           activationId: "activation-missing",
         },
       ),
@@ -310,7 +315,7 @@ describe("conformance: projection IR", () => {
       compileProjection(
         { id: "r", isSource: true, node: root },
         {
-          targetGenerator: makeGenerator("instance:r", "generator"),
+          targetGeneratorId: "instance:r",
           activationId: "activation-missing",
           frameHistory: [frame("user", [{ ...textUserMessage("hi") }])],
         },
@@ -318,10 +323,6 @@ describe("conformance: projection IR", () => {
     ).toThrow(/activation work frame/);
   });
 });
-
-function makeGenerator(runtimeInstanceId: string, kind: "generator") {
-  return { id: runtimeInstanceId, kind, runtimeInstanceId };
-}
 
 function frame(
   id: string,
@@ -333,17 +334,16 @@ function frame(
 
 function activationFrame(
   activationId: string,
-  runtimeInstanceId: string,
+  generatorId: string,
   sourceFrameId: string,
 ): Frame {
   return {
     id: `work-${activationId}`,
     ...createActivationFrame({
       activationId,
-      runtimeInstanceId,
-      generatorId: runtimeInstanceId,
+      generatorId,
       sourceFrameId,
-      concurrencyKey: runtimeInstanceId,
+      concurrencyKey: generatorId,
       concurrency: "serial",
     }),
   };

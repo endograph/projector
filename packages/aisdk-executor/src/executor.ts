@@ -1,7 +1,15 @@
 import { Output, generateText, streamText, stepCountIs, tool, type ModelMessage, type ToolSet } from "ai";
-import { assistantMessageFromTextOutput, createUnboundActionContext, isActorMessage } from "@projectors/core";
+import {
+  assistantMessageFromTextOutput,
+  createToolActionRequest,
+  createUnboundActionContext,
+  executeActionInvocation,
+  hasActionOutputMessages,
+  isActorMessage,
+} from "@projectors/core";
 import type {
   ActionContext,
+  ActionResultMessage,
   ActorMessage,
   AnyActorMessage,
   AnyAction,
@@ -276,11 +284,13 @@ export function buildAiSdkMessages<TDataContent = never>(
   messageToModelMessage?: (message: ActorMessage<TDataContent>) => ModelMessage | undefined,
 ): ModelMessage[] {
   const entries = inference.history
-    .filter(isActorMessage<TDataContent>)
     .map((source) => ({
       source,
-      message: messageToModelMessage?.(source) ?? actorMessageToModelMessage(source),
-    }));
+      message: frameMessageToModelMessage(source, messageToModelMessage),
+    }))
+    .filter((entry): entry is { source: FrameMessage<TDataContent>; message: ModelMessage } =>
+      entry.message !== undefined
+    );
   const messages = entries.map((entry) => entry.message);
   const dynamicContext = renderDynamicContextMessage(inference.dynamicParts);
   if (!dynamicContext) {
@@ -288,7 +298,9 @@ export function buildAiSdkMessages<TDataContent = never>(
   }
 
   const lastUserIndex = findLastIndex(entries, (entry) =>
-    entry.source.type === "user" && entry.message.role === "user"
+    isActorMessage<TDataContent>(entry.source) &&
+      entry.source.type === "user" &&
+      entry.message.role === "user"
   );
   if (lastUserIndex === -1) {
     return [...messages, dynamicContext];
@@ -327,42 +339,29 @@ async function executeAction<TDataContent>(
   config: AiSdkExecutorConfig<TDataContent>,
   aiSdkContext: unknown,
 ): Promise<unknown> {
+  const toolCallId = readStringField(aiSdkContext, "toolCallId");
+  const callId = toolCallId ?? crypto.randomUUID();
+  const actionRequest = createToolActionRequest(action.name, input, callId);
   const context: ActionContext<unknown, TDataContent> =
     request.createActionContext?.(action) ??
     createUnboundActionContext() as ActionContext<unknown, TDataContent>;
-  let output: unknown;
-  if (config.runAction) {
-    output = await config.runAction({ action, input, context, request, aiSdkContext });
-  } else {
-    output = await action.run?.(input as never, context as never);
-  }
-  const messages = actionResultMessages<TDataContent>(output);
-  if (messages.length > 0) {
-    await request.enqueueFrame({
-      generatorId: request.generatorId,
-      runtimeInstanceId: request.runtimeInstanceId,
-      activationId: request.activationId,
-      messages,
-    });
-  }
-  return output;
-}
-
-function actionResultMessages<TDataContent>(
-  value: unknown,
-): FrameMessage<TDataContent>[] {
-  if (Array.isArray(value)) {
-    return value.filter(isFrameMessageLike) as FrameMessage<TDataContent>[];
-  }
-  return isFrameMessageLike(value) ? [value as FrameMessage<TDataContent>] : [];
-}
-
-function isFrameMessageLike(value: unknown): value is { type: string } {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      typeof (value as { type?: unknown }).type === "string",
-  );
+  const result = await executeActionInvocation({
+    request: actionRequest,
+    throwErrors: true,
+    enqueueMessages: (messages) => {
+      request.enqueueFrame({
+        generatorId: request.generatorId,
+        activationId: request.activationId,
+        ...(hasActionOutputMessages(messages, actionRequest) ? {} : { inert: true }),
+        messages,
+      });
+    },
+    run: () =>
+      config.runAction
+        ? config.runAction({ action, input, context, request, aiSdkContext })
+        : action.run?.(input as never, context as never),
+  });
+  return result.value;
 }
 
 function actorMessageToModelMessage(message: AnyActorMessage): ModelMessage {
@@ -372,7 +371,31 @@ function actorMessageToModelMessage(message: AnyActorMessage): ModelMessage {
   if (message.type === "assistant") {
     return { role: "assistant", content: renderAssistantContent(message) };
   }
-  return { role: "user", content: renderToolMessage(message) };
+  const unreachable: never = message;
+  return unreachable;
+}
+
+function frameMessageToModelMessage<TDataContent>(
+  message: FrameMessage<TDataContent>,
+  messageToModelMessage?: (message: ActorMessage<TDataContent>) => ModelMessage | undefined,
+): ModelMessage | undefined {
+  if (isActorMessage<TDataContent>(message)) {
+    return messageToModelMessage?.(message) ?? actorMessageToModelMessage(message);
+  }
+  if (message.type === "action" && message.kind === "result" && message.action === "tool") {
+    return { role: "user", content: renderToolResult(message.name, message) };
+  }
+  return undefined;
+}
+
+function renderToolResult(
+  name: string,
+  message: ActionResultMessage<any>,
+): string {
+  if (!message.success) {
+    return `Tool ${name} error: ${message.error}`;
+  }
+  return `Tool ${name}: ${stringifyValue(message.value)}`;
 }
 
 function renderUserContent(message: Extract<AnyActorMessage, { type: "user" }>): AiSdkUserContent {
@@ -412,14 +435,6 @@ function outputMessageFromText<TDataContent = never>(
     ...assistantMessageFromTextOutput(text, output),
     ...metadata,
   } as FrameMessage<TDataContent>;
-}
-
-function renderToolMessage(message: Extract<AnyActorMessage, { type: "tool" }>): string {
-  const renderedContent = message.content?.length
-    ? renderContentPartsForText(message.content)
-    : "";
-  const value = message.text ?? (renderedContent || stringifyValue(message.value));
-  return value ? `Tool ${message.name}: ${value}` : `Tool ${message.name}`;
 }
 
 function renderSection(title: string, parts: readonly ContentPart<any>[]): string {
@@ -498,6 +513,12 @@ function renderContentPartForText(part: ContentPart<any>): string {
     return `${label}${stringifyValue(part.data)}`;
   }
   return imageMetadataText(part);
+}
+
+function readStringField(value: unknown, field: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = (value as Record<string, unknown>)[field];
+  return typeof entry === "string" && entry ? entry : undefined;
 }
 
 function imageMetadataText(part: Extract<ContentPart<any>, { type: "image" }>): string {

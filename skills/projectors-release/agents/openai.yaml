@@ -1,0 +1,4 @@
+interface:
+  display_name: "Projectors Release"
+  short_description: "Run the Projectors npm release checklist and publish flow."
+  default_prompt: "Let's do a release for the Projectors repo."

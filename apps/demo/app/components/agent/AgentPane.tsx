@@ -8,11 +8,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { useAtom, useAtomValue } from "jotai";
 import type {
-  CompiledProjectionNodeView,
-  CompiledProjectionNode,
+  CompiledContributorView,
+  CompiledContributor,
   CompiledProjectionTree,
 } from "@projectors/core";
 import type { OptimisticEffigy } from "@projectors/core/client";
@@ -41,6 +41,7 @@ type AgentPaneProps = {
   onToggleDock: () => void;
   onResetSession: () => void;
   latestFrameId: Id<"frames"> | null;
+  currentContextEpoch: number | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
   onReturnToLatest: () => void;
@@ -60,6 +61,7 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
       onToggleDock,
       onResetSession,
       latestFrameId,
+      currentContextEpoch,
       timeTravelFrameId,
       onTimeTravelFrame,
       onReturnToLatest,
@@ -144,6 +146,7 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
               sessionId={sessionId}
               projectionTree={snapshot.projectionTree}
               latestFrameId={latestFrameId}
+              currentContextEpoch={currentContextEpoch}
               timeTravelFrameId={timeTravelFrameId}
               onTimeTravelFrame={onTimeTravelFrame}
               onReturnToLatest={onReturnToLatest}
@@ -218,7 +221,7 @@ function TreeTab({
       </div>
       {activeSubtab === "instance" && <InstanceTree instances={instances} />}
       {activeSubtab === "projection" && (
-        <ProjectionTree tree={projectionTree} />
+        <ContributorTree tree={projectionTree} />
       )}
       {activeSubtab === "ir" && <CompiledIrTree sessionId={sessionId} />}
       {activeSubtab === "realized" && (
@@ -237,7 +240,7 @@ function InstanceTree({ instances }: { instances: DemoClientInstance[] }) {
     <div className="space-y-2 text-xs">
       {instances.map((instance) => (
         <InstanceNode
-          key={instance.runtime.runtimeInstanceId}
+          key={instance.contributor.id}
           instance={instance}
           depth={0}
           defaultExpanded
@@ -247,17 +250,17 @@ function InstanceTree({ instances }: { instances: DemoClientInstance[] }) {
   );
 }
 
-function ProjectionTree({ tree }: { tree?: CompiledProjectionTree }) {
+function ContributorTree({ tree }: { tree?: CompiledProjectionTree }) {
   if (!tree) {
-    return <EmptyTree>No projection tree in snapshot</EmptyTree>;
+    return <EmptyTree>No contributor tree in snapshot</EmptyTree>;
   }
   if (tree.roots.length === 0) {
-    return <EmptyTree>No projection roots</EmptyTree>;
+    return <EmptyTree>No contributors</EmptyTree>;
   }
   return (
     <div className="space-y-2 text-xs">
       {tree.roots.map((node) => (
-        <ProjectionNode key={node.runtimeInstanceId} node={node} depth={0} />
+        <Contributor key={node.id} node={node} depth={0} />
       ))}
     </div>
   );
@@ -265,7 +268,6 @@ function ProjectionTree({ tree }: { tree?: CompiledProjectionTree }) {
 
 type RuntimeInspectionBase = {
   generatorId: string;
-  runtimeInstanceId: string;
   kind: "generator";
   nodeKey: string;
   name?: string;
@@ -310,7 +312,7 @@ function CompiledIrTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
     <div className="space-y-2 text-sm">
       {result.runtimes.map((runtime, index) => (
         <RuntimeInspectionBlock
-          key={runtime.runtimeInstanceId}
+          key={runtime.generatorId}
           runtime={runtime}
           defaultExpanded={index === 0}
           summary={`system ${runtime.inference.systemParts.length} / dynamic ${runtime.inference.dynamicParts.length} / tools ${runtime.inference.tools.length}`}
@@ -359,7 +361,7 @@ function RealizedPromptTree({
     <div className="space-y-2 text-sm">
       {result.runtimes.map((runtime, index) => (
         <RuntimeInspectionBlock
-          key={runtime.runtimeInstanceId}
+          key={runtime.generatorId}
           runtime={runtime}
           defaultExpanded={index === 0}
           summary={runtime.prompt.provider}
@@ -459,7 +461,7 @@ function RuntimeInspectionBlock({
           <span className="truncate text-terminal-cyan">{runtime.name}</span>
         )}
         <span className="truncate text-terminal-green-dim">
-          {runtime.runtimeInstanceId}
+          {runtime.generatorId}
         </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
           {summary}
@@ -470,7 +472,7 @@ function RuntimeInspectionBlock({
           <KeyValueRows
             rows={[
               ["generator", runtime.generatorId],
-              ["runtime", runtime.runtimeInstanceId],
+              ["runtime", runtime.generatorId],
             ]}
           />
           {children}
@@ -560,7 +562,9 @@ function NameList({ title, names }: { title: string; names: string[] }) {
   );
 }
 
-type FrameDoc = Doc<"frames">;
+type FrameDoc = Doc<"frames"> & {
+  contextEpoch?: number;
+};
 
 type FrameMessage = {
   type?: string;
@@ -592,6 +596,7 @@ function HistoryTab({
   sessionId,
   projectionTree,
   latestFrameId,
+  currentContextEpoch,
   timeTravelFrameId,
   onTimeTravelFrame,
   onReturnToLatest,
@@ -600,6 +605,7 @@ function HistoryTab({
   sessionId: Id<"sessions"> | null;
   projectionTree?: CompiledProjectionTree;
   latestFrameId: Id<"frames"> | null;
+  currentContextEpoch: number | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
   onReturnToLatest: () => void;
@@ -633,7 +639,7 @@ function HistoryTab({
         className="sticky -top-4 z-20 -mx-4 -mt-4 border-b border-terminal-green-dimmer bg-terminal-bg px-4 pt-4"
       >
         <div className="flex text-xs">
-          {(["frames", "messages", "branches"] as HistorySubtab[]).map(
+          {(["frames", "messages", "branches", "controls"] as HistorySubtab[]).map(
             (tab) => (
               <button
                 key={tab}
@@ -673,6 +679,7 @@ function HistoryTab({
             projectionTree={projectionTree}
             filterStickyTop={filterStickyTop}
             latestFrameId={latestFrameId}
+            currentContextEpoch={currentContextEpoch}
             timeTravelFrameId={timeTravelFrameId}
             onTimeTravelFrame={onTimeTravelFrame}
           />
@@ -694,7 +701,90 @@ function HistoryTab({
             onSwitchSession={onSwitchSession}
           />
         )}
+        {activeSubtab === "controls" && (
+          <HistoryControls
+            sessionId={sessionId}
+            timeTravelFrameId={timeTravelFrameId}
+            onReturnToLatest={onReturnToLatest}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+function HistoryControls({
+  sessionId,
+  timeTravelFrameId,
+  onReturnToLatest,
+}: {
+  sessionId: Id<"sessions"> | null;
+  timeTravelFrameId: Id<"frames"> | null;
+  onReturnToLatest: () => void;
+}) {
+  const incrementContextEpoch = useMutation(api.sessions.incrementContextEpoch);
+  const { effigy, readOnly } = useProjector();
+  const [isIncrementing, setIsIncrementing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const blockedByHistory = Boolean(timeTravelFrameId || readOnly);
+
+  if (!sessionId) return <EmptyHistory>No session</EmptyHistory>;
+
+  const handleIncrement = async () => {
+    if (blockedByHistory || isIncrementing) return;
+
+    setIsIncrementing(true);
+    setError(null);
+    try {
+      await incrementContextEpoch({ sessionId });
+      effigy.clearPending();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to increment epoch");
+    } finally {
+      setIsIncrementing(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3 text-xs">
+      {blockedByHistory && (
+        <section className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3">
+          <div className="mb-2 text-terminal-cyan">viewing historical frame</div>
+          <div className="mb-3 text-terminal-green-dim">
+            Return to latest before changing the machine context epoch.
+          </div>
+          <button
+            type="button"
+            onClick={onReturnToLatest}
+            className="rounded border border-terminal-green-dimmer bg-terminal-bg px-3 py-1 text-terminal-green hover:border-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green"
+          >
+            live latest
+          </button>
+        </section>
+      )}
+      <section className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-terminal-green">context epoch</div>
+            <div className="mt-1 text-terminal-green-dim">
+              future machine runs will ignore prior epoch frames
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={blockedByHistory || isIncrementing}
+            onClick={handleIncrement}
+            className="shrink-0 rounded border border-terminal-green-dimmer bg-terminal-bg px-3 py-1 text-terminal-green hover:border-terminal-green focus:outline-none focus:ring-1 focus:ring-terminal-green disabled:cursor-not-allowed disabled:text-terminal-green-dim disabled:hover:border-terminal-green-dimmer"
+          >
+            {isIncrementing ? "incrementing..." : "increment epoch"}
+          </button>
+        </div>
+        {error && (
+          <div className="rounded border border-terminal-yellow/60 bg-terminal-bg px-2 py-1 text-terminal-yellow">
+            {error}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -704,6 +794,7 @@ function FramesHistory({
   projectionTree,
   filterStickyTop,
   latestFrameId,
+  currentContextEpoch,
   timeTravelFrameId,
   onTimeTravelFrame,
 }: {
@@ -711,6 +802,7 @@ function FramesHistory({
   projectionTree?: CompiledProjectionTree;
   filterStickyTop: number;
   latestFrameId: Id<"frames"> | null;
+  currentContextEpoch: number | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrame: (frameId: Id<"frames">) => void;
 }) {
@@ -724,7 +816,7 @@ function FramesHistory({
   const [selectedFrameTypes, setSelectedFrameTypes] = useState<Set<string>>(
     () => new Set(),
   );
-  const [nodeRuntimeFilters, setNodeRuntimeFilters] = useState<Set<string>>(
+  const [nodeGeneratorFilters, setNodeRuntimeFilters] = useState<Set<string>>(
     () => new Set(),
   );
 
@@ -751,25 +843,25 @@ function FramesHistory({
       frameType: frameTypeForFrame(frame, messages),
     };
   });
-  const activationRuntimeIds = activationRuntimeIdsFromFrameViews(frameViews);
+  const activationGeneratorIds = activationGeneratorIdsFromFrameViews(frameViews);
   const frameTypeOptions = frameTypeFilterOptions(frameViews);
   const nodeOptions = nodeFilterOptions(
     projectionTree,
     frameViews,
-    activationRuntimeIds,
+    activationGeneratorIds,
   );
   const frameTypeValues = frameTypeOptions.map((option) => option.value);
   const nodeRuntimeValues = nodeOptions.map((option) => option.value);
   const filteredFrameViews = frameViews.filter(
     (view) =>
       (selectedFrameTypes.size === 0 || selectedFrameTypes.has(view.frameType)) &&
-      (nodeRuntimeFilters.size === 0 ||
-        Array.from(nodeRuntimeFilters).some((runtimeInstanceId) =>
+      (nodeGeneratorFilters.size === 0 ||
+        Array.from(nodeGeneratorFilters).some((generatorId) =>
           frameMatchesRuntime(
             view.frame,
             view.messages,
-            activationRuntimeIds,
-            runtimeInstanceId,
+            activationGeneratorIds,
+            generatorId,
           ),
         )),
   );
@@ -777,14 +869,14 @@ function FramesHistory({
     selectedFrameTypes.size === 0 ? frameTypeValues : selectedFrameTypes,
   );
   const selectedNodeRuntimeIds = new Set(
-    nodeRuntimeFilters.size === 0 ? nodeRuntimeValues : nodeRuntimeFilters,
+    nodeGeneratorFilters.size === 0 ? nodeRuntimeValues : nodeGeneratorFilters,
   );
   const activeFrameTypeFilters =
     selectedFrameTypes.size === 0
       ? []
       : frameTypeOptions.filter((option) => selectedFrameTypes.has(option.value));
   const activeNodeFilters =
-    nodeRuntimeFilters.size === 0 ? [] : nodeOptions.filter((option) => nodeRuntimeFilters.has(option.value));
+    nodeGeneratorFilters.size === 0 ? [] : nodeOptions.filter((option) => nodeGeneratorFilters.has(option.value));
   const activeFilterCount = activeFrameTypeFilters.length + activeNodeFilters.length;
   const toggleFrameTypeFilter = (value: string) => {
     setSelectedFrameTypes((current) =>
@@ -826,6 +918,12 @@ function FramesHistory({
             const expanded = expandedFrameIds.has(frame._id);
             const isLatest = frame._id === latestFrameId;
             const isSelected = frame._id === timeTravelFrameId && !isLatest;
+            const frameEpoch =
+              typeof frame.contextEpoch === "number" ? frame.contextEpoch : null;
+            const isBeforeCurrentEpoch =
+              currentContextEpoch !== null &&
+              frameEpoch !== null &&
+              frameEpoch < currentContextEpoch;
             return (
               <section
                 key={frame._id}
@@ -833,7 +931,7 @@ function FramesHistory({
                   isSelected
                     ? "border-terminal-cyan"
                     : "border-terminal-green-dimmer"
-                }`}
+                } ${isBeforeCurrentEpoch ? "opacity-50" : ""}`}
               >
                 <div className="flex items-stretch">
                   <button
@@ -861,6 +959,11 @@ function FramesHistory({
                           <span className="shrink-0 text-terminal-green">
                             {frameType}
                           </span>
+                          {frameEpoch !== null && (
+                            <span className="shrink-0 text-terminal-green-dim">
+                              epoch {frameEpoch}
+                            </span>
+                          )}
                           {isLatest && (
                             <span className="text-terminal-yellow">latest</span>
                           )}
@@ -1728,18 +1831,18 @@ function frameTypeFilterOptions(
 function nodeFilterOptions(
   projectionTree: CompiledProjectionTree | undefined,
   frameViews: FrameHistoryView[],
-  activationRuntimeIds: Map<string, string>,
+  activationGeneratorIds: Map<string, string>,
 ): HistoryFilterOption[] {
   if (!projectionTree) return [];
 
-  return collectProjectionNodeFilterOptions(projectionTree)
+  return collectContributorFilterOptions(projectionTree)
     .map((option) => ({
       ...option,
       count: frameViews.filter((view) =>
         frameMatchesRuntime(
           view.frame,
           view.messages,
-          activationRuntimeIds,
+          activationGeneratorIds,
           option.value,
         ),
       ).length,
@@ -1747,22 +1850,22 @@ function nodeFilterOptions(
     .filter((option) => option.count > 0);
 }
 
-function collectProjectionNodeFilterOptions(
+function collectContributorFilterOptions(
   tree: CompiledProjectionTree,
 ): HistoryFilterOption[] {
   const options: HistoryFilterOption[] = [];
   const seen = new Set<string>();
-  const visit = (node: CompiledProjectionNode) => {
-    if (!seen.has(node.runtimeInstanceId)) {
-      seen.add(node.runtimeInstanceId);
+  const visit = (node: CompiledContributor) => {
+    if (!seen.has(node.id)) {
+      seen.add(node.id);
       const label = node.name ?? node.nodeKey;
       const detailParts = [node.kind, node.runtime.concurrency].filter(Boolean);
       options.push({
-        value: node.runtimeInstanceId,
+        value: node.id,
         label,
         detail: detailParts.join(" "),
         count: 0,
-        title: `${label} ${node.runtimeInstanceId}`,
+        title: `${label} ${node.id}`,
       });
     }
     node.children.forEach(visit);
@@ -1771,23 +1874,23 @@ function collectProjectionNodeFilterOptions(
   return options;
 }
 
-function activationRuntimeIdsFromFrameViews(
+function activationGeneratorIdsFromFrameViews(
   frameViews: FrameHistoryView[],
 ): Map<string, string> {
   const runtimeIds = new Map<string, string>();
   for (const view of frameViews) {
     const frameActivationId = stringValue(view.frame.activationId);
-    const frameRuntimeInstanceId = stringValue(view.frame.runtimeInstanceId);
-    if (frameActivationId && frameRuntimeInstanceId) {
-      runtimeIds.set(frameActivationId, frameRuntimeInstanceId);
+    const frameGeneratorId = stringValue(view.frame.generatorId);
+    if (frameActivationId && frameGeneratorId) {
+      runtimeIds.set(frameActivationId, frameGeneratorId);
     }
 
     for (const message of view.messages) {
       if (message.type !== "work" || message.kind !== "activation") continue;
       const activationId = stringValue(message.activationId);
-      const runtimeInstanceId = stringValue(message.runtimeInstanceId);
-      if (activationId && runtimeInstanceId) {
-        runtimeIds.set(activationId, runtimeInstanceId);
+      const generatorId = stringValue(message.generatorId);
+      if (activationId && generatorId) {
+        runtimeIds.set(activationId, generatorId);
       }
     }
   }
@@ -1797,49 +1900,44 @@ function activationRuntimeIdsFromFrameViews(
 function frameMatchesRuntime(
   frame: FrameDoc,
   messages: FrameMessage[],
-  activationRuntimeIds: Map<string, string>,
-  runtimeInstanceId: string,
+  activationGeneratorIds: Map<string, string>,
+  generatorId: string,
 ): boolean {
-  if (stringValue(frame.runtimeInstanceId) === runtimeInstanceId) return true;
+  if (stringValue(frame.generatorId) === generatorId) return true;
   if (
-    generatorMatchesRuntime(stringValue(frame.generatorId), runtimeInstanceId)
+    generatorMatchesGenerator(stringValue(frame.generatorId), generatorId)
   )
     return true;
   const frameActivationId = stringValue(frame.activationId);
   if (
     frameActivationId &&
-    activationRuntimeIds.get(frameActivationId) === runtimeInstanceId
+    activationGeneratorIds.get(frameActivationId) === generatorId
   )
     return true;
 
   return messages.some((message) => {
-    if (stringValue(message.runtimeInstanceId) === runtimeInstanceId)
+    if (stringValue(message.generatorId) === generatorId)
       return true;
     if (
-      generatorMatchesRuntime(
+      generatorMatchesGenerator(
         stringValue(message.generatorId),
-        runtimeInstanceId,
+        generatorId,
       )
     )
       return true;
     const activationId = stringValue(message.activationId);
     return Boolean(
       activationId &&
-      activationRuntimeIds.get(activationId) === runtimeInstanceId,
+      activationGeneratorIds.get(activationId) === generatorId,
     );
   });
 }
 
-function generatorMatchesRuntime(
-  generatorId: string | undefined,
-  runtimeInstanceId: string,
+function generatorMatchesGenerator(
+  frameGeneratorId: string | undefined,
+  generatorId: string,
 ): boolean {
-  if (!generatorId) return false;
-  return (
-    generatorId === runtimeInstanceId ||
-    generatorId.startsWith(`generator:${runtimeInstanceId}:activation:`) ||
-    generatorId.startsWith(`generator:${runtimeInstanceId}:activation:`)
-  );
+  return frameGeneratorId === generatorId;
 }
 
 function frameTypeForFrame(frame: FrameDoc, messages: FrameMessage[]): FrameType {
@@ -1886,13 +1984,18 @@ function collapsedFrameMessagePreview(frame: FrameDoc, message: FrameMessage) {
     };
   }
 
-  if (message.type === "tool") {
+  if (message.type === "action") {
     const name = stringValue(message.name);
-    const result = truncatePreview(
-      renderUnknown(message.text ?? message.value),
-    );
+    const kind = stringValue(message.kind);
+    const action = stringValue(message.action);
+    const label = `${action ?? "action"} ${kind ?? "message"}`;
+    const payload =
+      kind === "request"
+        ? message.input
+        : message.error ?? message.value ?? message.outputMessageIndices;
+    const result = truncatePreview(renderUnknown(payload));
     return {
-      label: "tool result",
+      label,
       detail: [name, result].filter(Boolean).join(" "),
     };
   }
@@ -1952,9 +2055,9 @@ function renderInstanceMessage(message: FrameMessage) {
 
 function renderWorkMessage(frame: FrameDoc, message: FrameMessage) {
   const kind = stringValue(message.kind) ?? "work";
-  const runtimeInstanceId =
-    stringValue(message.runtimeInstanceId) ?? frame.runtimeInstanceId ?? "";
-  return [kind, runtimeInstanceId].filter(Boolean).join(" ");
+  const generatorId =
+    stringValue(message.generatorId) ?? frame.generatorId ?? "";
+  return [kind, generatorId].filter(Boolean).join(" ");
 }
 
 function formatKeyList(keys: string[], fallback?: string) {
@@ -2028,9 +2131,9 @@ function InstanceNode({
         {instance.name && (
           <span className="truncate text-terminal-cyan">{instance.name}</span>
         )}
-        <span className="text-terminal-yellow">{instance.runtime.type}</span>
+        <span className="text-terminal-yellow">{instance.contributor.runtimeType}</span>
         <span className="truncate text-terminal-green-dim">
-          {instance.runtime.runtimeInstanceId}
+          {instance.contributor.id}
         </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
           {details} meta / {childCount} child
@@ -2046,8 +2149,8 @@ function InstanceNode({
               plain
               rows={[
                 [
-                  "runtime address",
-                  addressLabel(instance.runtime.runtimeAddress),
+                  "projection address",
+                  addressLabel(instance.contributor.address),
                 ],
                 ...(instance.id
                   ? ([["instance id", instance.id]] as Array<
@@ -2063,7 +2166,7 @@ function InstanceNode({
             <TreeSection title={`members ${instance.members.length}`}>
               {instance.members.map((member) => (
                 <InstanceNode
-                  key={member.runtime.runtimeInstanceId}
+                  key={member.contributor.id}
                   instance={member}
                   depth={depth + 1}
                 />
@@ -2076,7 +2179,7 @@ function InstanceNode({
             <TreeSection title={`children ${instance.children.length}`}>
               {instance.children.map((child) => (
                 <InstanceNode
-                  key={child.runtime.runtimeInstanceId}
+                  key={child.contributor.id}
                   instance={child}
                   depth={depth + 1}
                 />
@@ -2091,11 +2194,11 @@ function InstanceNode({
   );
 }
 
-function ProjectionNode({
+function Contributor({
   node,
   depth,
 }: {
-  node: CompiledProjectionNode;
+  node: CompiledContributor;
   depth: number;
 }) {
   const [expanded, setExpanded] = useState(true);
@@ -2121,7 +2224,7 @@ function ProjectionNode({
           {node.runtime.trigger.type}
         </span>
         <span className="truncate text-terminal-green-dim">
-          {node.runtimeInstanceId}
+          {node.id}
         </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
           system {node.compiled.systemParts.length} / dynamic{" "}
@@ -2144,27 +2247,27 @@ function ProjectionNode({
                 "boundary projection",
                 projectionLabel(node.projection.boundary),
               ],
-              ...(node.parentRuntimeInstanceId
-                ? ([["parent runtime", node.parentRuntimeInstanceId]] as Array<
+              ...(node.parentId
+                ? ([["parent generator", node.parentId]] as Array<
                     [string, ReactNode]
                   >)
                 : []),
             ]}
           />
           <CompiledPayload node={node} />
-          <ProjectionNodeList projectionNodes={node.projectionNodes} />
+          <ContributorList contributors={node.contributors} />
           {node.children.length > 0 ? (
-            <TreeSection title={`child projections ${node.children.length}`}>
+            <TreeSection title={`child generators ${node.children.length}`}>
               {node.children.map((child) => (
-                <ProjectionNode
-                  key={child.runtimeInstanceId}
+                <Contributor
+                  key={child.id}
                   node={child}
                   depth={depth + 1}
                 />
               ))}
             </TreeSection>
           ) : (
-            <MutedLine>child projections empty</MutedLine>
+            <MutedLine>child generators empty</MutedLine>
           )}
         </div>
       )}
@@ -2172,7 +2275,7 @@ function ProjectionNode({
   );
 }
 
-function CompiledPayload({ node }: { node: CompiledProjectionNode }) {
+function CompiledPayload({ node }: { node: CompiledContributor }) {
   const empty =
     node.compiled.systemParts.length === 0 &&
     node.compiled.dynamicParts.length === 0 &&
@@ -2205,44 +2308,44 @@ function CompiledPayload({ node }: { node: CompiledProjectionNode }) {
   );
 }
 
-function ProjectionNodeList({
-  projectionNodes,
+function ContributorList({
+  contributors,
 }: {
-  projectionNodes: CompiledProjectionNodeView[];
+  contributors: CompiledContributorView[];
 }) {
-  if (projectionNodes.length === 0) {
-    return <MutedLine>projection nodes empty</MutedLine>;
+  if (contributors.length === 0) {
+    return <MutedLine>contributors empty</MutedLine>;
   }
 
   return (
-    <TreeSection title={`projection nodes ${projectionNodes.length}`}>
+    <TreeSection title={`contributors ${contributors.length}`}>
       <div className="space-y-2">
-        {projectionNodes.map((projectionNode) => (
+        {contributors.map((contributor) => (
           <div
-            key={projectionNode.runtimeInstanceId}
+            key={contributor.id}
             className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-2"
           >
             <div className="flex min-w-0 items-center gap-2">
-              <span className="text-terminal-green-dim">{projectionNode.kind}</span>
-              <span className="text-terminal-green">{projectionNode.nodeKey}</span>
-              {projectionNode.name && (
+              <span className="text-terminal-green-dim">{contributor.kind}</span>
+              <span className="text-terminal-green">{contributor.nodeKey}</span>
+              {contributor.name && (
                 <span className="truncate text-terminal-cyan">
-                  {projectionNode.name}
+                  {contributor.name}
                 </span>
               )}
               <span className="truncate text-terminal-green-dim">
-                {projectionNode.runtimeInstanceId}
+                {contributor.id}
               </span>
             </div>
             <KeyValueRows
               rows={[
-                ["address", addressLabel(projectionNode.address)],
-                ["projection", projectionLabel(projectionNode.projection)],
+                ["address", addressLabel(contributor.address)],
+                ["projection", projectionLabel(contributor.projection)],
               ]}
             />
-            <StateList states={projectionNode.states} />
-            <ActionList title="tools" actions={projectionNode.tools} />
-            <ActionList title="commands" actions={projectionNode.commands} />
+            <StateList states={contributor.states} />
+            <ActionList title="tools" actions={contributor.tools} />
+            <ActionList title="commands" actions={contributor.commands} />
           </div>
         ))}
       </div>
@@ -2627,11 +2730,15 @@ function CommandsTab({
           : {};
     const command = effigy.getCommand(name as never, {
       target: commandMeta.target,
-      optimistic: (ctx) => {
-        if (!demoAddress) return;
-        if (name === "setThemeHue" && "hue" in input)
-          ctx.patchAt(demoAddress, { themeHue: input.hue });
-      },
+      ...(name === "setThemeHue"
+        ? {
+            optimistic: (ctx) => {
+              if (demoAddress && "hue" in input) {
+                ctx.patchAt(demoAddress, { themeHue: input.hue });
+              }
+            },
+          }
+        : {}),
     });
     await command.run(input as never);
   };
@@ -2678,6 +2785,8 @@ function PlaygroundTab({
   const optimisticValue = optimisticControls?.testCounter ?? 0;
   const canonicalValue = canonicalControls?.testCounter ?? 0;
   const incrementCommand = findCommand(instances, "incrementTestCounter");
+  const recentCommandResidue = effigy.getRecentCommandResidue();
+  const pendingCommands = effigy.getPendingCommands();
 
   const increment = async () => {
     if (readOnly || !optimisticState || !incrementCommand) return;
@@ -2712,6 +2821,24 @@ function PlaygroundTab({
         >
           {readOnly ? "fork session to edit" : "increment counter"}
         </button>
+        <div className="grid gap-3 text-xs md:grid-cols-2">
+          <DebugList
+            label="recent command residue"
+            values={recentCommandResidue}
+          />
+          <DebugList
+            label="active optimistic commands"
+            values={pendingCommands.map((command) =>
+              [
+                command.name,
+                command.callId,
+                command.target ? addressLabel(command.target) : undefined,
+              ]
+                .filter(Boolean)
+                .join(" / "),
+            )}
+          />
+        </div>
       </section>
     </div>
   );
@@ -2722,6 +2849,25 @@ function Metric({ label, value }: { label: string; value: number }) {
     <div className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3">
       <div className="text-terminal-green-dim">{label}</div>
       <div className="mt-1 text-lg text-terminal-green">{value}</div>
+    </div>
+  );
+}
+
+function DebugList({ label, values }: { label: string; values: readonly string[] }) {
+  return (
+    <div className="rounded border border-terminal-green-dimmer bg-terminal-bg-lighter p-3">
+      <div className="text-terminal-green-dim">{label}</div>
+      {values.length > 0 ? (
+        <div className="mt-2 space-y-1">
+          {values.map((value) => (
+            <div key={value} className="break-all text-terminal-green">
+              {value}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-2 italic text-terminal-green-dim">empty</div>
+      )}
     </div>
   );
 }

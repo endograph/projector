@@ -15,7 +15,6 @@ export default defineSchema({
   frames: defineTable({
     referenceFrameId: v.optional(v.id("frames")),
     generatorId: v.optional(v.string()),
-    runtimeInstanceId: v.optional(v.string()),
     activationId: v.optional(v.string()),
     inert: v.optional(v.boolean()),
     metadata: v.optional(v.any()),

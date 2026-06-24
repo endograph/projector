@@ -1,39 +1,37 @@
-import type { ProjectionNode } from "./projection-nodes.ts";
-import type { AnyAction, Charter, Node } from "./types.ts";
-
-export type ActionKind = "tool" | "command";
+import type { Contributor } from "./contributors.ts";
+import type { ActionKind, AnyAction, Charter, Node } from "./types.ts";
 
 export function resolveFrameTools<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   charter: Charter<TDataContent> | undefined,
 ): AnyAction[] {
-  return projectionNode.node.toolRefs.map((name) =>
-    resolveScopedAction(projectionNode, name, "tool", charter)
+  return contributor.node.toolRefs.map((name) =>
+    resolveScopedAction(contributor, name, "tool", charter)
   );
 }
 
 export function resolveFrameCommands<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   charter: Charter<TDataContent> | undefined,
 ): AnyAction[] {
-  return projectionNode.node.commandRefs.map((name) =>
-    resolveScopedAction(projectionNode, name, "command", charter)
+  return contributor.node.commandRefs.map((name) =>
+    resolveScopedAction(contributor, name, "command", charter)
   );
 }
 
 export function resolveScopedAction<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   name: string,
   kind: ActionKind,
   charter: Charter<TDataContent> | undefined,
 ): AnyAction {
-  const selfBinding = actionBinding(projectionNode.node, name, kind);
+  const selfBinding = actionBinding(contributor.node, name, kind);
   if (selfBinding) {
     return selfBinding;
   }
 
-  const sourceNode = projectionNode.node.sourceNodeKey
-    ? charter?.nodes[projectionNode.node.sourceNodeKey]
+  const sourceNode = contributor.node.sourceNodeKey
+    ? charter?.nodes[contributor.node.sourceNodeKey]
     : undefined;
   const sourceBinding = sourceNode ? actionBinding(sourceNode, name, kind) : undefined;
   if (sourceBinding) {
@@ -45,7 +43,7 @@ export function resolveScopedAction<TDataContent>(
     return fallback;
   }
 
-  throw new Error(`Unknown ${kind} ref "${name}" for node "${projectionNode.node.key}"`);
+  throw new Error(`Unknown ${kind} ref "${name}" for node "${contributor.node.key}"`);
 }
 
 function actionBinding(

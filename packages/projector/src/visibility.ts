@@ -1,23 +1,17 @@
 import { isWorkActivationMessage } from "./history.ts";
-import { encodeRuntimeAddress } from "./runtime-address.ts";
+import { encodeProjectionAddress } from "./projection-address.ts";
 import type {
   ActorMessage,
   AnyActorMessage,
   Audience,
   AudienceTarget,
   Frame,
-  Generator,
   GeneratorId,
   GeneratorRuntime,
-  RuntimeInstanceId,
 } from "./types.ts";
 
-export type ResolveGeneratorRuntimeId = (
-  generatorId: GeneratorId,
-) => RuntimeInstanceId | undefined;
-
-export type RuntimeVisibilityTarget = {
-  runtimeInstanceId: RuntimeInstanceId;
+export type GeneratorVisibilityTarget = {
+  generatorId: GeneratorId;
 };
 
 export function isActorMessage<TDataContent = never>(
@@ -28,7 +22,7 @@ export function isActorMessage<TDataContent = never>(
   if (record.type === "user" || record.type === "assistant") {
     return true;
   }
-  return record.type === "tool" && typeof record.name === "string";
+  return false;
 }
 
 export function defaultAudienceForActorMessage(message: AnyActorMessage): Audience {
@@ -38,38 +32,34 @@ export function defaultAudienceForActorMessage(message: AnyActorMessage): Audien
 export function actorMessageVisibleToGenerator<TDataContent>(
   message: ActorMessage<TDataContent>,
   frame: Frame<TDataContent>,
-  target: Generator,
+  targetGeneratorId: GeneratorId,
 ): boolean {
   const audience = message.audience ?? defaultAudienceForActorMessage(message);
   if (audience === "broadcast") {
     return true;
   }
   if (audience === "self") {
-    return frame.generatorId === target.id;
+    return frame.generatorId === targetGeneratorId;
   }
   return audienceTargets(audience).some((entry) =>
-    encodeRuntimeAddress(entry) === target.runtimeInstanceId,
+    encodeProjectionAddress(entry) === targetGeneratorId,
   );
 }
 
-export function actorMessageVisibleToRuntime<TDataContent>(
+export function actorMessageVisibleToGeneratorId<TDataContent>(
   message: ActorMessage<TDataContent>,
   frame: Frame<TDataContent>,
-  target: RuntimeVisibilityTarget,
-  resolveGeneratorRuntimeId: ResolveGeneratorRuntimeId,
+  target: GeneratorVisibilityTarget,
 ): boolean {
   const audience = message.audience ?? defaultAudienceForActorMessage(message);
   if (audience === "broadcast") {
     return true;
   }
   if (audience === "self") {
-    return Boolean(
-      frame.generatorId &&
-        resolveGeneratorRuntimeId(frame.generatorId) === target.runtimeInstanceId,
-    );
+    return frame.generatorId === target.generatorId;
   }
   return audienceTargets(audience).some((entry) =>
-    encodeRuntimeAddress(entry) === target.runtimeInstanceId,
+    encodeProjectionAddress(entry) === target.generatorId,
   );
 }
 

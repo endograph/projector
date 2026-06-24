@@ -1,5 +1,5 @@
-import type { ProjectionNode } from "./projection-nodes.ts";
-import { hoistStateInstance, collectProjectionNodes } from "./projection-nodes.ts";
+import type { Contributor } from "./contributors.ts";
+import { hoistStateInstance, collectContributors } from "./contributors.ts";
 import type {
   Instance,
   NormalizedStateDescriptor,
@@ -13,7 +13,7 @@ export type ResolvedState<TDataContent = any> = {
   targetInstance: Instance<TDataContent>;
   descriptor: NormalizedStateDescriptor;
   container: StateContainer;
-  sourceProjectionNode: ProjectionNode<TDataContent>;
+  sourceContributor: Contributor<TDataContent>;
 };
 
 type StateGroup<TDataContent = any> = {
@@ -21,7 +21,7 @@ type StateGroup<TDataContent = any> = {
   stateKey: StateKey;
   entries: Array<{
     descriptor: NormalizedStateDescriptor;
-    projectionNode: ProjectionNode<TDataContent>;
+    contributor: Contributor<TDataContent>;
   }>;
 };
 
@@ -30,14 +30,14 @@ export function resolveStates<TDataContent>(
 ): ResolvedState<TDataContent>[] {
   const groups = new Map<string, StateGroup<TDataContent>>();
 
-  for (const projectionNode of collectProjectionNodes(root)) {
-    const descriptor = projectionNode.node.state;
+  for (const contributor of collectContributors(root)) {
+    const descriptor = contributor.node.state;
     if (!descriptor) {
       continue;
     }
 
     const targetInstance =
-      descriptor.scope === "local" ? projectionNode.concreteInstance : hoistStateInstance(projectionNode);
+      descriptor.scope === "local" ? contributor.concreteInstance : hoistStateInstance(contributor);
     const groupKey = `${targetInstance.id}\u0000${descriptor.key}`;
     const group =
       groups.get(groupKey) ??
@@ -46,7 +46,7 @@ export function resolveStates<TDataContent>(
         stateKey: descriptor.key,
         entries: [],
       } satisfies StateGroup<TDataContent>);
-    group.entries.push({ descriptor, projectionNode });
+    group.entries.push({ descriptor, contributor });
     groups.set(groupKey, group);
   }
 
@@ -76,9 +76,9 @@ function resolveStateGroup<TDataContent>(
 
   const existing = group.targetInstance.states?.[group.stateKey];
   const effectiveDescriptor = mergeDescriptors(group.entries.map((entry) => entry.descriptor));
-  const sourceProjectionNode = group.entries[group.entries.length - 1]?.projectionNode;
-  if (!sourceProjectionNode) {
-    throw new Error("State group has no source projection node");
+  const sourceContributor = group.entries[group.entries.length - 1]?.contributor;
+  if (!sourceContributor) {
+    throw new Error("State group has no source contributor");
   }
 
   if (existing) {
@@ -88,7 +88,7 @@ function resolveStateGroup<TDataContent>(
         targetInstance: group.targetInstance,
         descriptor: effectiveDescriptor,
         container: existing,
-        sourceProjectionNode,
+        sourceContributor,
       };
     }
 
@@ -104,7 +104,7 @@ function resolveStateGroup<TDataContent>(
       targetInstance: group.targetInstance,
       descriptor: effectiveDescriptor,
       container: existing,
-      sourceProjectionNode,
+      sourceContributor,
     };
   }
 
@@ -119,7 +119,7 @@ function resolveStateGroup<TDataContent>(
     targetInstance: group.targetInstance,
     descriptor: effectiveDescriptor,
     container,
-    sourceProjectionNode,
+    sourceContributor,
   };
 }
 

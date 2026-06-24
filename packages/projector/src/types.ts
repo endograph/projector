@@ -2,15 +2,13 @@ import type { z } from "zod";
 
 export type ProjectionMode = "hidden" | "augment" | "replace";
 
-export type StaticProjection = {
+export type StandardProjectionConfig = {
   mode?: ProjectionMode;
   instructions?: "system" | "dynamic" | "hidden";
   tools?: "provider-static" | "hidden";
 };
 
-export type StaticBoundaryProjection = {
-  mode?: ProjectionMode;
-};
+export type ResolvedStandardProjectionConfig = Required<StandardProjectionConfig>;
 
 export type Ref = string;
 export type ProjectionFunctionRef = Ref;
@@ -52,35 +50,40 @@ export type ProjectionPart<TDataContent = never> =
   | ContentPart<TDataContent>
   | ProjectionStatePart;
 
-export type ProjectionDraft<TDataContent = never> = {
+export type ProjectionIR<TDataContent = never> = {
   systemParts: ProjectionPart<TDataContent>[];
   dynamicParts: ProjectionPart<TDataContent>[];
   tools: AnyAction[];
   states: ProjectionStatePart[];
 };
 
-export type ProjectionSource<TDataContent = never> = {
-  readonly instructions?: string;
+export type ReadonlyProjectionIR<TDataContent = never> = {
   readonly systemParts: readonly ProjectionPart<TDataContent>[];
   readonly dynamicParts: readonly ProjectionPart<TDataContent>[];
   readonly tools: readonly AnyAction[];
   readonly states: readonly ProjectionStatePart[];
 };
 
+export type ProjectionSource<TDataContent = never> = {
+  readonly node?: Node<TDataContent>;
+  readonly ir?: ReadonlyProjectionIR<TDataContent>;
+};
+
 export type ProjectionCallSite = "node" | "boundary";
 
 export type ProjectionContext<TDataContent = never> = {
   callSite: ProjectionCallSite;
-  runtimeInstanceId: RuntimeInstanceId;
-  address: RuntimeAddress;
-  target?: Generator;
-  node: Node<TDataContent>;
+  generatorId: GeneratorId;
+  address: ProjectionAddress;
+  targetGeneratorId?: GeneratorId;
+  originNode: Node<TDataContent>;
+  createNodeIR(): ProjectionIR<TDataContent>;
 };
 
 export type ProjectionFunctionMethod<TDataContent = never> = {
   bivarianceHack(
     ctx: ProjectionContext<TDataContent>,
-    draft: ProjectionDraft<TDataContent>,
+    draft: ProjectionIR<TDataContent>,
     source: ProjectionSource<TDataContent>,
   ): void;
 }["bivarianceHack"];
@@ -88,24 +91,18 @@ export type ProjectionFunctionMethod<TDataContent = never> = {
 export type ProjectionFunction<TDataContent = never> = {
   kind: "projection";
   name: string;
+  standard?: ResolvedStandardProjectionConfig;
   method: ProjectionFunctionMethod<TDataContent>;
 };
 
 export type Projection<TDataContent = never> =
-  | StaticProjection
-  | ProjectionFunctionRef
-  | ProjectionFunction<TDataContent>;
-
-export type BoundaryProjection<TDataContent = never> =
-  | StaticBoundaryProjection
   | ProjectionFunctionRef
   | ProjectionFunction<TDataContent>;
 
 export type HistoryProjectionFunctionRef = Ref;
 
 export type HistoryProjectionContext<TDataContent = never> = {
-  target: Generator;
-  runtimeInstanceId: RuntimeInstanceId;
+  generatorId: GeneratorId;
   activationId: string;
   trigger: RuntimeTrigger;
   history: Frame<TDataContent>[];
@@ -132,8 +129,8 @@ export type HistoryProjection<TDataContent = never> =
   | HistoryProjectionFunctionRef
   | HistoryProjectionFunction<TDataContent>;
 
-export type GeneratorId = string;
-export type RuntimeInstanceId = string;
+export type ContributorId = string;
+export type GeneratorId = ContributorId;
 export type InstanceId = string;
 export type StateKey = string;
 
@@ -149,7 +146,7 @@ export type RetrievableState = {
   target: StateAddress;
 };
 
-export type AudienceTarget = RuntimeAddress;
+export type AudienceTarget = ProjectionAddress;
 
 export type Audience = "self" | "broadcast" | AudienceTarget | AudienceTarget[];
 
@@ -171,20 +168,9 @@ export type AssistantMessage<TDataContent = never> = {
   delivery?: MessageDelivery;
 };
 
-export type ToolMessage<TDataContent = never> = {
-  type: "tool";
-  name: string;
-  text?: string;
-  content?: ContentPart<TDataContent>[];
-  value?: unknown;
-  audience?: Audience;
-  delivery?: MessageDelivery;
-};
-
 export type ActorMessage<TDataContent = never> =
   | UserMessage<TDataContent>
-  | AssistantMessage<TDataContent>
-  | ToolMessage<TDataContent>;
+  | AssistantMessage<TDataContent>;
 
 export type AnyActorMessage = ActorMessage<any>;
 
@@ -202,14 +188,14 @@ export type TriggeredRuntimeOptions<TDataContent = never> = {
   concurrency?: RuntimeConcurrency;
   activationHistory?: ActivationHistory;
   historyProjection?: HistoryProjection<TDataContent>;
-  boundaryProjection?: BoundaryProjection<TDataContent>;
+  boundaryProjection?: Projection<TDataContent>;
   outputAudienceDefault?: "self" | "broadcast";
 };
 
 export type ComponentRuntime = { type: "component" };
 export type GeneratorRuntime<TDataContent = never> = {
   type: "generator";
-  boundaryProjection: BoundaryProjection<TDataContent>;
+  boundaryProjection: Projection<TDataContent>;
 } & TriggeredRuntimeOptions<TDataContent>;
 
 export type Runtime<TDataContent = never> =
@@ -224,13 +210,10 @@ export type NormalizedRuntime<TDataContent = never> =
 
 type DryTriggeredRuntimeOptions = Omit<
   TriggeredRuntimeOptions,
-  "historyProjection"
+  "boundaryProjection" | "historyProjection"
 > & {
   historyProjection?: DryHistoryProjection;
 };
-
-export type DryProjection = StaticProjection | Ref;
-export type DryBoundaryProjection = StaticBoundaryProjection | Ref;
 
 export type DryHistoryProjection = ActorHistoryProjection | MessageHistoryProjection | Ref;
 
@@ -238,7 +221,7 @@ export type DryRuntime =
   | { type?: "component" }
   | ({
       type: "generator";
-      boundaryProjection?: DryBoundaryProjection;
+      boundaryProjection?: Ref;
       outputAudienceDefault?: "self" | "broadcast";
     } & DryTriggeredRuntimeOptions);
 
@@ -291,10 +274,14 @@ export type StateUpdate<S = unknown> =
       values: unknown[];
     };
 
+export type StateUpdateInput<S = unknown> =
+  | StateUpdate<S>
+  | ((state: S) => StateUpdate<S>);
+
 type ActionStateContext<S> = IsAny<S> extends true
   ? {
       state?: S;
-      updateState?(update: StateUpdate<S>): void;
+      updateState?(update: StateUpdateInput<S>): void;
     }
   : [S] extends [undefined]
   ? {
@@ -303,12 +290,12 @@ type ActionStateContext<S> = IsAny<S> extends true
     }
   : {
       state?: S;
-      updateState?(update: StateUpdate<S>): void;
+      updateState?(update: StateUpdateInput<S>): void;
     };
 
 export type ActionInstanceContext<TDataContent = never> = {
-  runtimeInstanceId: RuntimeInstanceId;
-  address: RuntimeAddress;
+  generatorId: GeneratorId;
+  address: ProjectionAddress;
   ownerInstanceId: InstanceId;
   spawn(
     node: Node<TDataContent>,
@@ -404,7 +391,6 @@ export type WorkActivationMessage = {
   type: "work";
   kind: "activation";
   activationId: string;
-  runtimeInstanceId: RuntimeInstanceId;
   generatorId: GeneratorId;
   sourceFrameId: string;
   concurrencyKey: string;
@@ -470,29 +456,49 @@ export type InstanceMessage<TDataContent = never> =
       reason?: "removed" | "cede" | "cancelled";
     };
 
-export type CommandMessage = {
-  type: "command";
+export type ActionKind = "command" | "tool";
+
+export type ActionRequestMessage = {
+  type: "action";
+  kind: "request";
+  action: ActionKind;
   name: string;
   input: unknown;
-  target?: RuntimeAddress;
-  clientId?: string;
+  target?: ProjectionAddress;
+  callId: string;
 };
 
-export type ExecuteCommandResult<T = unknown> =
-  | { success: true; value?: T; clientId?: string }
-  | { success: false; error: string; clientId?: string };
+export type ActionResultMessage<TDataContent = never> = {
+  type: "action";
+  kind: "result";
+  action: ActionKind;
+  name: string;
+  callId: string;
+  target?: ProjectionAddress;
+  success: boolean;
+  value?: unknown;
+  error?: string;
+  outputMessageIndices?: number[];
+};
+
+export type ActionMessage<TDataContent = never> =
+  | ActionRequestMessage
+  | ActionResultMessage<TDataContent>;
+
+export type ExecuteActionResult<T = unknown, TDataContent = never> =
+  | { success: true; value?: T; messages?: FrameMessage<TDataContent>[]; callId: string }
+  | { success: false; error: string; value?: T; messages?: FrameMessage<TDataContent>[]; callId: string };
 
 export type FrameMessage<TDataContent = never> = (
   | ActorMessage<TDataContent>
-  | CommandMessage
+  | ActionMessage<TDataContent>
   | InstanceMessage<TDataContent>
   | WorkMessage
 ) &
   Record<string, unknown>;
 
 export type FrameDraft<TDataContent = never> = {
-  generatorId?: string;
-  runtimeInstanceId?: RuntimeInstanceId;
+  generatorId?: GeneratorId;
   activationId?: string;
   inert?: boolean;
   messages: FrameMessage<TDataContent>[];
@@ -517,12 +523,11 @@ export type AnyOutputConfig = OutputConfig<any>;
 
 export type EnqueueFrame<TDataContent = never> = (
   frame: FrameDraft<TDataContent>,
-) => Frame<TDataContent> | Promise<Frame<TDataContent>>;
+) => Frame<TDataContent>;
 
 export type ExecutorRunRequest<TDataContent = never> = {
-  generatorId: string;
   activationId: string;
-  runtimeInstanceId: RuntimeInstanceId;
+  generatorId: GeneratorId;
   inference: CompiledInference<TDataContent>;
   enqueueFrame: EnqueueFrame<TDataContent>;
   createActionContext?: (action: AnyAction) => ActionContext<unknown, TDataContent>;
@@ -538,7 +543,7 @@ export type ExecutorRunResult<TDataContent = never> = {
 
 export type ExecutorRealizePromptRequest<TDataContent = never> = Pick<
   ExecutorRunRequest<TDataContent>,
-  "generatorId" | "activationId" | "runtimeInstanceId" | "inference" | "output"
+  "generatorId" | "activationId" | "inference" | "output"
 >;
 
 export type ExecutorRealizedPrompt = {
@@ -590,17 +595,9 @@ export type CompiledInference<TDataContent = never> = {
   retrievableStates: RetrievableState[];
 };
 
-export type RuntimeAddress =
+export type ProjectionAddress =
   | { type: "instance"; instanceId: string }
   | { type: "member"; ownerInstanceId: string; memberPath: string[] };
-
-export type GeneratorKind = "generator";
-
-export type Generator = {
-  id: GeneratorId;
-  kind: GeneratorKind;
-  runtimeInstanceId: RuntimeInstanceId;
-};
 
 export type SerializedStateDescriptor = {
   key: string;
@@ -623,7 +620,7 @@ export type DryNode<TDataContent = never> = {
   state?: SerializedStateDescriptor | Ref;
   members?: Array<DryNode<TDataContent> | Ref>;
   output?: SerializedOutputConfig;
-  projection?: DryProjection;
+  projection?: Ref;
   runtime?: DryRuntime;
 };
 

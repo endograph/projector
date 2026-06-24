@@ -54,11 +54,11 @@ export async function drain(run: MachineRun): Promise<Frame[]> {
 
 export function requestForRuntime(
   requests: readonly ExecutorRunRequest[],
-  runtimeInstanceId: string,
+  generatorId: string,
 ): ExecutorRunRequest {
-  const request = requests.find((item) => item.runtimeInstanceId === runtimeInstanceId);
+  const request = requests.find((item) => item.generatorId === generatorId);
   if (!request) {
-    throw new Error(`No executor request for runtime "${runtimeInstanceId}"`);
+    throw new Error(`No executor request for runtime "${generatorId}"`);
   }
   return request;
 }

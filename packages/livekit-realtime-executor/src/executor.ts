@@ -1,15 +1,19 @@
 import { llm } from "@livekit/agents";
 import { createHash } from "node:crypto";
 import {
+  createToolActionRequest,
   createUnboundActionContext,
+  executeActionInvocation,
   GET_STATE_ACTION_NAME,
-  ROOT_RUNTIME_INSTANCE_ID,
+  hasActionOutputMessages,
+  ROOT_GENERATOR_ID,
   createRuntimeTurnFrame,
   isActorMessage,
   textContent,
 } from "@projectors/core";
 import type {
   ActionContext,
+  ActionResultMessage,
   ActorMessage,
   AnyAction,
   CompiledInference,
@@ -39,7 +43,7 @@ import type {
   RunActionInput,
 } from "./types.ts";
 
-export const REALTIME_GENERATOR_ID = ROOT_RUNTIME_INSTANCE_ID;
+export const REALTIME_GENERATOR_ID = ROOT_GENERATOR_ID;
 
 const ASSISTANT_TRANSCRIPT_OUTPUT_OWNER = Symbol("liveKitRealtimeExecutorAssistantTranscriptOutputOwner");
 const DYNAMIC_CONTEXT_TAG = "dynamic-context";
@@ -139,7 +143,7 @@ export class LiveKitRealtimeExecutor<
   }
 
   async run(request: ExecutorRunRequest<TDataContent>): Promise<ExecutorRunResult<TDataContent>> {
-    if (request.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) {
+    if (request.generatorId !== this.realtimeGeneratorId()) {
       return this.config.discreteExecutor.run(request);
     }
 
@@ -153,7 +157,7 @@ export class LiveKitRealtimeExecutor<
   async realizePrompt(
     request: ExecutorRealizePromptRequest<TDataContent>,
   ): Promise<ExecutorRealizedPrompt> {
-    if (request.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) {
+    if (request.generatorId !== this.realtimeGeneratorId()) {
       return await this.config.discreteExecutor.realizePrompt(request);
     }
 
@@ -165,12 +169,12 @@ export class LiveKitRealtimeExecutor<
   }
 
   async syncRuntime(context: RuntimeSyncContext<TDataContent>): Promise<void> {
-    if (context.runtimeInstanceId !== this.realtimeRuntimeInstanceId()) return;
+    if (context.generatorId !== this.realtimeGeneratorId()) return;
     await this.connection.syncRuntime(context);
   }
 
-  realtimeRuntimeInstanceId(): string {
-    return this.config.realtimeRuntimeInstanceId ?? ROOT_RUNTIME_INSTANCE_ID;
+  realtimeGeneratorId(): string {
+    return this.config.realtimeGeneratorId ?? ROOT_GENERATOR_ID;
   }
 
   getTool(name: string): AnyAction | undefined {
@@ -297,7 +301,11 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       throw new Error(`No LiveKit tool named "${name}" is registered in the current projection`);
     }
 
-    await this.enqueueToolFrame(name, { phase: "call", input });
+    const callId = crypto.randomUUID();
+    const actionRequest = {
+      ...createToolActionRequest(name, input, callId),
+      source: { external: true },
+    };
     const context: ActionContext<unknown, TDataContent> =
       this.currentSyncContext?.createActionContext(action) ??
       createUnboundActionContext() as ActionContext<unknown, TDataContent>;
@@ -306,14 +314,24 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     }
     const runAction = this.config.runAction;
     const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
-    const value = runAction
-      ? await runAction(runInput)
-      : action.run
-        ? await action.run(input, context)
-        : undefined;
-    await this.enqueueToolFrame(name, { phase: "result", value });
-    await this.enqueueActionResultMessages(value);
-    return value;
+    const result = await executeActionInvocation({
+      request: actionRequest,
+      throwErrors: true,
+      enqueueMessages: (messages) => {
+        this.enqueueFrame({
+          generatorId: this.executor.realtimeGeneratorId(),
+          ...(hasActionOutputMessages(messages, actionRequest) ? {} : { inert: true }),
+          messages,
+        });
+      },
+      run: () =>
+        runAction
+          ? runAction(runInput)
+          : action.run
+            ? action.run(input, context)
+            : undefined,
+    });
+    return result.value;
   }
 
   private async getRetrievableState(address: string): Promise<unknown> {
@@ -337,8 +355,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     metadata: Record<string, unknown> = {},
   ): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      generatorId: this.executor.realtimeRuntimeInstanceId(),
-      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
+      generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
       metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
@@ -359,8 +376,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     metadata: Record<string, unknown> = {},
   ): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      generatorId: this.executor.realtimeRuntimeInstanceId(),
-      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
+      generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
       metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
@@ -382,11 +398,10 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   ): Promise<Frame<TDataContent> | undefined> {
     if (!this.isRealtimeActive()) return undefined;
 
-    const runtimeInstanceId = this.executor.realtimeRuntimeInstanceId();
+    const generatorId = this.executor.realtimeGeneratorId();
     const activationId = realtimeTurnActivationId(sourceFrame.id);
     return this.enqueueFrame(createRuntimeTurnFrame({
-      generatorId: runtimeInstanceId,
-      runtimeInstanceId,
+      generatorId,
       activationId,
       sourceFrameId: sourceFrame.id,
       reason: "end-turn",
@@ -963,60 +978,13 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     });
   }
 
-  private async enqueueToolFrame(name: string, value: unknown): Promise<Frame<TDataContent>> {
-    return this.enqueueFrame({
-      generatorId: this.executor.realtimeRuntimeInstanceId(),
-      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
-      inert: true,
-      messages: [
-        {
-          type: "tool",
-          name,
-          value,
-          audience: "self",
-          source: { external: true },
-        } as FrameMessage<TDataContent>,
-      ],
-    });
-  }
-
-  private async enqueueActionResultMessages(value: unknown): Promise<void> {
-    const messages = actionResultMessages<TDataContent>(value);
-    if (messages.length === 0) return;
-
-    await this.enqueueFrame({
-      generatorId: this.executor.realtimeRuntimeInstanceId(),
-      runtimeInstanceId: this.executor.realtimeRuntimeInstanceId(),
-      inert: true,
-      metadata: { transport: "livekit", actionResult: true },
-      messages,
-    });
-  }
-
-  private async enqueueFrame(frame: FrameDraft<TDataContent>): Promise<Frame<TDataContent>> {
+  private enqueueFrame(frame: FrameDraft<TDataContent>): Frame<TDataContent> {
     const result = this.currentSyncContext?.machine.enqueueFrame(frame);
     if (!result) {
       throw new Error("LiveKitRealtimeConnection cannot enqueue a frame before runtime sync");
     }
     return result;
   }
-}
-
-function actionResultMessages<TDataContent>(
-  value: unknown,
-): FrameMessage<TDataContent>[] {
-  if (Array.isArray(value)) {
-    return value.filter(isFrameMessageLike) as FrameMessage<TDataContent>[];
-  }
-  return isFrameMessageLike(value) ? [value as FrameMessage<TDataContent>] : [];
-}
-
-function isFrameMessageLike(value: unknown): value is { type: string } {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      typeof (value as { type?: unknown }).type === "string",
-  );
 }
 
 class AssistantTranscriptStream<TDataContent> {
@@ -1340,10 +1308,6 @@ function actorMessageToLiveKitContent<TDataContent>(
   messageToText: LiveKitRealtimeExecutorConfig<TDataContent>["messageToText"],
   options: { allowImages: boolean },
 ): llm.ChatContent[] {
-  if (message.type === "tool") {
-    return [renderActorText(message, messageToText)];
-  }
-
   if (message.content?.length) {
     return contentPartsToLiveKitContent(message.content, options);
   }
@@ -1406,10 +1370,6 @@ function actorMessageToRealtimeContent<TDataContent>(
   messageToText: LiveKitRealtimeExecutorConfig<TDataContent>["messageToText"],
   options: { allowImages: boolean; role: "user" | "assistant" | "system" },
 ): RealtimeContent[] {
-  if (message.type === "tool") {
-    return [realtimeTextContent(options.role, renderActorText(message, messageToText))];
-  }
-
   if (message.content?.length) {
     return contentPartsToRealtimeContent(message.content, options);
   }
@@ -1594,7 +1554,6 @@ function actorMessageFingerprint<TDataContent>(
 ): string {
   return hashStableJson({
     type: message.type,
-    name: message.type === "tool" ? message.name : undefined,
     content: chatContentDescriptor(actorMessageToLiveKitContent(message, messageToText, { allowImages: true })),
   });
 }
@@ -1676,20 +1635,33 @@ function renderHistory<TDataContent>(
   messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
 ): string {
   const lines = history
-    .filter(isActorMessage<TDataContent>)
     .map((message) => renderHistoryMessage(message, messageToText))
     .filter(Boolean);
   return lines.length > 0 ? `## Conversation\n\n${lines.join("\n")}` : "";
 }
 
 function renderHistoryMessage<TDataContent>(
-  message: ActorMessage<TDataContent>,
+  message: FrameMessage<TDataContent>,
   messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
+): string | undefined {
+  if (isActorMessage<TDataContent>(message)) {
+    if (message.type === "user") return `User: ${renderActorText(message, messageToText)}`;
+    if (message.type === "assistant") return `Assistant: ${renderActorText(message, messageToText)}`;
+  }
+  if (message.type === "action" && message.kind === "result" && message.action === "tool") {
+    return renderToolResult(message.name, message);
+  }
+  return undefined;
+}
+
+function renderToolResult(
+  name: string,
+  message: ActionResultMessage<any>,
 ): string {
-  if (message.type === "user") return `User: ${renderActorText(message, messageToText)}`;
-  if (message.type === "assistant") return `Assistant: ${renderActorText(message, messageToText)}`;
-  const value = message.text ?? stringifyValue(message.value);
-  return value ? `Tool ${message.name}: ${value}` : "";
+  if (!message.success) {
+    return `Tool ${name} error: ${message.error}`;
+  }
+  return `Tool ${name}: ${stringifyValue(message.value)}`;
 }
 
 function userTextsFromFrames<TDataContent>(
@@ -1714,13 +1686,6 @@ function renderActorText<TDataContent>(
 ): string {
   const rendered = messageToText?.(message);
   if (rendered !== undefined) return rendered;
-  if (message.type === "tool") {
-    const renderedContent = message.content?.length
-      ? renderContentPartsForText(message.content)
-      : "";
-    const value = message.text ?? (renderedContent || stringifyValue(message.value));
-    return value ? `Tool ${message.name}: ${value}` : `Tool ${message.name}`;
-  }
   if (message.content?.length) {
     return renderContentPartsForText(message.content);
   }

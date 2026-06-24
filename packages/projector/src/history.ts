@@ -14,7 +14,6 @@ import type {
   MessageDelivery,
   OutputConfig,
   RuntimeConcurrency,
-  RuntimeInstanceId,
   TextContentPart,
   WorkActivationMessage,
   WorkCompletionMessage,
@@ -24,14 +23,14 @@ import type {
 
 export type RuntimeCompletionFrameMetadata = {
   type: "projector.runtime-completion";
-  runtimeInstanceId: RuntimeInstanceId;
+  generatorId: GeneratorId;
   activationId: string;
   completionReason: CompletionReason;
 };
 
 export type RuntimeTurnFrameMetadata = {
   type: "projector.runtime-turn";
-  runtimeInstanceId: RuntimeInstanceId;
+  generatorId: GeneratorId;
   activationId: string;
   sourceFrameId: string;
   completionReason: WorkCompletionReason;
@@ -41,26 +40,23 @@ export function createRuntimeCompletionFrame<
   TDataContent = never,
 >({
   generatorId,
-  runtimeInstanceId,
   activationId,
   completionReason,
   metadata,
 }: {
   generatorId: GeneratorId;
-  runtimeInstanceId: RuntimeInstanceId;
   activationId: string;
   completionReason: CompletionReason;
   metadata?: Record<string, unknown>;
 }): FrameDraft<TDataContent> {
   return {
     generatorId,
-    runtimeInstanceId,
     activationId,
     messages: [],
     metadata: {
       ...metadata,
       type: "projector.runtime-completion",
-      runtimeInstanceId,
+      generatorId,
       activationId,
       completionReason,
     } satisfies RuntimeCompletionFrameMetadata & Record<string, unknown>,
@@ -71,16 +67,14 @@ export function createRuntimeTurnFrame<
   TDataContent = never,
 >({
   generatorId,
-  runtimeInstanceId,
   activationId,
   sourceFrameId,
   reason = "end-turn",
-  concurrencyKey = runtimeInstanceId,
+  concurrencyKey = generatorId,
   concurrency = "serial",
   metadata,
 }: {
   generatorId: GeneratorId;
-  runtimeInstanceId: RuntimeInstanceId;
   activationId: string;
   sourceFrameId: string;
   reason?: WorkCompletionReason;
@@ -90,14 +84,12 @@ export function createRuntimeTurnFrame<
 }): FrameDraft<TDataContent> {
   return {
     generatorId,
-    runtimeInstanceId,
     activationId,
     messages: [
       ({
         type: "work",
         kind: "activation",
         activationId,
-        runtimeInstanceId,
         generatorId,
         sourceFrameId,
         concurrencyKey,
@@ -114,7 +106,7 @@ export function createRuntimeTurnFrame<
     metadata: {
       ...metadata,
       type: "projector.runtime-turn",
-      runtimeInstanceId,
+      generatorId,
       activationId,
       sourceFrameId,
       completionReason: reason,
@@ -132,14 +124,12 @@ export function createActivationFrame<
   TDataContent = never,
 >({
   activationId,
-  runtimeInstanceId,
   generatorId,
   sourceFrameId,
   concurrencyKey,
   concurrency,
 }: {
   activationId: string;
-  runtimeInstanceId: RuntimeInstanceId;
   generatorId: GeneratorId;
   sourceFrameId: string;
   concurrencyKey: string;
@@ -151,7 +141,6 @@ export function createActivationFrame<
         type: "work",
         kind: "activation",
         activationId,
-        runtimeInstanceId,
         generatorId,
         sourceFrameId,
         concurrencyKey,
@@ -196,7 +185,6 @@ export function isWorkActivationMessage(message: unknown): message is WorkActiva
     record.type === "work" &&
     record.kind === "activation" &&
     typeof record.activationId === "string" &&
-    typeof record.runtimeInstanceId === "string" &&
     typeof record.generatorId === "string" &&
     typeof record.sourceFrameId === "string" &&
     typeof record.concurrencyKey === "string" &&
@@ -340,7 +328,7 @@ export function messagesSinceLastCompletion<
 >(
   ctx: HistoryProjectionContext<TDataContent>,
 ): ActorMessage<TDataContent>[] {
-  const index = lastCompletionIndex(ctx.history, ctx.runtimeInstanceId);
+  const index = lastCompletionIndex(ctx.history, ctx.generatorId);
   return actorMessagesFromFrames<TDataContent>(index === -1 ? ctx.history : ctx.history.slice(index + 1));
 }
 
@@ -349,7 +337,7 @@ export function messagesBeforeLastCompletion<
 >(
   ctx: HistoryProjectionContext<TDataContent>,
 ): ActorMessage<TDataContent>[] {
-  const index = lastCompletionIndex(ctx.history, ctx.runtimeInstanceId);
+  const index = lastCompletionIndex(ctx.history, ctx.generatorId);
   return index === -1 ? [] : actorMessagesFromFrames<TDataContent>(ctx.history.slice(0, index));
 }
 
@@ -369,23 +357,23 @@ export function messagesFromFrames<TDataContent = never>(
 
 function lastCompletionIndex<TDataContent>(
   frames: readonly Frame<TDataContent>[],
-  runtimeInstanceId: RuntimeInstanceId,
+  generatorId: GeneratorId,
 ): number {
-  const activationRuntimeIds = new Map<string, RuntimeInstanceId>();
+  const activationGeneratorIds = new Map<string, GeneratorId>();
   let lastIndex = -1;
   for (let index = 0; index < frames.length; index += 1) {
     const frame = frames[index];
     if (!frame) continue;
-    if (readCompletionMetadata(frame, runtimeInstanceId)) {
+    if (readCompletionMetadata(frame, generatorId)) {
       lastIndex = index;
     }
     for (const message of frame.messages) {
       if (isWorkActivationMessage(message)) {
-        activationRuntimeIds.set(message.activationId, message.runtimeInstanceId);
+        activationGeneratorIds.set(message.activationId, message.generatorId);
       }
       if (
         isWorkCompletionMessage(message) &&
-        activationRuntimeIds.get(message.activationId) === runtimeInstanceId
+        activationGeneratorIds.get(message.activationId) === generatorId
       ) {
         lastIndex = index;
       }
@@ -396,7 +384,7 @@ function lastCompletionIndex<TDataContent>(
 
 function readCompletionMetadata(
   frame: Pick<Frame<any>, "metadata"> | undefined,
-  runtimeInstanceId: RuntimeInstanceId | undefined,
+  generatorId: GeneratorId | undefined,
 ): RuntimeCompletionFrameMetadata | undefined {
   const metadata = frame?.metadata;
   if (!metadata || typeof metadata !== "object") {
@@ -408,13 +396,13 @@ function readCompletionMetadata(
     return undefined;
   }
   if (
-    runtimeInstanceId !== undefined &&
-    record.runtimeInstanceId !== runtimeInstanceId
+    generatorId !== undefined &&
+    record.generatorId !== generatorId
   ) {
     return undefined;
   }
   if (
-    typeof record.runtimeInstanceId !== "string" ||
+    typeof record.generatorId !== "string" ||
     typeof record.activationId !== "string" ||
     !isCompletionReason(record.completionReason)
   ) {
@@ -423,7 +411,7 @@ function readCompletionMetadata(
 
   return {
     type: "projector.runtime-completion",
-    runtimeInstanceId: record.runtimeInstanceId,
+    generatorId: record.generatorId,
     activationId: record.activationId,
     completionReason: record.completionReason,
   };
@@ -443,10 +431,6 @@ function actorMessageFromUnknown<TDataContent>(
   if (record.type === "assistant") {
     return [{ ...record, type: "assistant" } as ActorMessage<TDataContent>];
   }
-  if (record.type === "tool" && typeof record.name === "string") {
-    return [{ ...record, type: "tool", name: record.name } as ActorMessage<TDataContent>];
-  }
-
   return [];
 }
 

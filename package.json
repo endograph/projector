@@ -12,6 +12,8 @@
   ],
   "scripts": {
     "claude": "claude --plugin-dir ./.claude/plugins/jj",
+    "release": "bun run scripts/release.ts",
+    "release:dry-run": "bun run scripts/release.ts --dry-run",
     "typecheck": "tsgo"
   },
   "devDependencies": {

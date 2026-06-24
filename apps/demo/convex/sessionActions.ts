@@ -8,8 +8,9 @@ import type { Id } from "./_generated/dataModel";
 import { openai as aiSdkOpenAI } from "@ai-sdk/openai";
 import { AiSdkExecutor } from "@projectors/aisdk-executor";
 import {
-  ROOT_RUNTIME_INSTANCE_ID,
+  ROOT_GENERATOR_ID,
   createMachine,
+  executeCommand,
   runMachine,
   textContent,
   type Executor,
@@ -90,7 +91,7 @@ export const sendMessage = action({
     }
 
     const durableFrames = producedFrames.map((frame) =>
-      prepareMachineFrame(frame, ROOT_RUNTIME_INSTANCE_ID)
+      prepareMachineFrame(frame, ROOT_GENERATOR_ID)
     );
     const frameIds = await ctx.runMutation(api.sessions.appendMachineFrameSequence, {
       sessionId,
@@ -105,7 +106,7 @@ export const sendMessage = action({
         sessionId,
         frame,
         frameId,
-        rootRuntimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+        rootGeneratorId: ROOT_GENERATOR_ID,
       });
     }
 
@@ -124,22 +125,42 @@ export const sendClientMessage = action({
       throw new Error("Session not found");
     }
 
-    if ((message as ClientMachineMessage).name === "incrementTestCounter") {
-      await delay(4000);
+    const rootInstance = hydrateDemoInstance(session.instance);
+    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame[];
+    const machine = createMachine({
+      id: sessionId,
+      root: rootInstance,
+      charter: createDemoCharter(),
+      frames: contextFrames,
+    });
+    const command = message as ClientMachineMessage;
+    const result = await executeCommand(machine, command);
+
+    const producedFrames: Frame[] = [];
+    for await (const frame of runMachine(machine, { scheduleWork: false })) {
+      producedFrames.push(frame);
     }
 
-    return await ctx.runMutation(api.sessions.applyClientMessage, {
+    const frameIds = await ctx.runMutation(api.sessions.appendMachineFrameSequence, {
       sessionId,
-      message: message as ClientMachineMessage,
+      referenceFrameId: session.frameId,
+      frames: producedFrames,
+    }) as Id<"frames">[];
+    await persistClientCommandAssistantMessages(ctx, {
+      sessionId,
+      message: command,
+      frames: producedFrames,
+      frameIds,
     });
+    return result;
   },
 });
 
 export const createSessionAtFoo = createSession;
 
-function prepareMachineFrame(frame: Frame, rootRuntimeInstanceId: string): Frame {
+function prepareMachineFrame(frame: Frame, rootGeneratorId: string): Frame {
   const mode =
-    frame.metadata?.mode === "text" || frame.runtimeInstanceId === rootRuntimeInstanceId
+    frame.metadata?.mode === "text" || frame.generatorId === rootGeneratorId
       ? "text"
       : "memory";
   return {
@@ -158,12 +179,12 @@ async function persistFrameMessages(
     sessionId,
     frame,
     frameId,
-    rootRuntimeInstanceId,
+    rootGeneratorId,
   }: {
     sessionId: Id<"sessions">;
     frame: Frame;
     frameId: Id<"frames">;
-    rootRuntimeInstanceId: string;
+    rootGeneratorId: string;
   },
 ): Promise<void> {
   for (const message of frame.messages) {
@@ -181,7 +202,7 @@ async function persistFrameMessages(
 
     if (
       message.type === "assistant" &&
-      shouldPersistAssistantMessage(frame, message, rootRuntimeInstanceId) &&
+      shouldPersistAssistantMessage(frame, message, rootGeneratorId) &&
       text.trim()
     ) {
       await ctx.runMutation(api.messages.add, {
@@ -199,10 +220,47 @@ async function persistFrameMessages(
 function shouldPersistAssistantMessage(
   frame: Frame,
   message: Frame["messages"][number],
-  rootRuntimeInstanceId: string,
+  rootGeneratorId: string,
 ): boolean {
   if (message.audience === "self") return false;
-  return frame.runtimeInstanceId === rootRuntimeInstanceId;
+  return frame.generatorId === rootGeneratorId;
+}
+
+async function persistClientCommandAssistantMessages(
+  ctx: ActionCtx,
+  {
+    sessionId,
+    message,
+    frames,
+    frameIds,
+  }: {
+    sessionId: Id<"sessions">;
+    message: ClientMachineMessage;
+    frames: Frame[];
+    frameIds: Id<"frames">[];
+  },
+): Promise<void> {
+  for (const [frameIndex, frame] of frames.entries()) {
+    const frameId = frameIds[frameIndex];
+    if (!frameId) continue;
+
+    for (const [messageIndex, frameMessage] of frame.messages.entries()) {
+      if (frameMessage.type !== "assistant") continue;
+      const text = typeof frameMessage.text === "string" ? frameMessage.text.trim() : "";
+      if (!text) continue;
+
+      await ctx.runMutation(api.messages.add, {
+        sessionId,
+        role: "assistant",
+        content: text,
+        frameId,
+        mode: "text",
+        idempotencyKey: message.callId
+          ? `command:${message.callId}:assistant:${frameIndex}:${messageIndex}`
+          : undefined,
+      });
+    }
+  }
 }
 
 function idempotencyKey(prefix: string, source: unknown): string {
@@ -215,8 +273,4 @@ function idempotencyKey(prefix: string, source: unknown): string {
     if (createdAt !== undefined && typeof text === "string") return `${prefix}:${createdAt}:${text}`;
   }
   return `${prefix}:${crypto.randomUUID()}`;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

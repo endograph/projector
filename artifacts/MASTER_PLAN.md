@@ -3,6 +3,8 @@
 This is a breaking rewrite of `@projectors/core`. There is no backwards
 compatibility requirement.
 
+Future work is tracked separately in [`FUTURE_WORK.md`](./FUTURE_WORK.md).
+
 - Remove packs entirely.
 - Replace contexts with states.
 - Rewrite public API and internal types as needed.
@@ -21,17 +23,37 @@ type ProjectionFunctionRef = Ref;
 type StateDescriptorRef = Ref;
 type HistoryProjectionFunctionRef = Ref;
 
-type StaticProjection = {
+type StandardProjectionConfig = {
   mode?: ProjectionMode;
   instructions?: "system" | "dynamic" | "hidden";
   tools?: "provider-static" | "hidden";
 };
 
-type StaticBoundaryProjection = {
-  mode?: ProjectionMode;
+type ResolvedStandardProjectionConfig = Required<StandardProjectionConfig>;
+
+type TextContentPart = { type: "text"; text: string };
+
+type ImageContentPart = {
+  type: "image";
+  data: string | Uint8Array | ArrayBuffer | URL;
+  mediaType: string;
+  label?: string;
 };
 
-type ProjectionTextPart = { type: "text"; value: string };
+type DataContentPart<TDataContent = never> = {
+  type: "data";
+  data: TDataContent;
+  label?: string;
+};
+
+type ContentPart<TDataContent = never> =
+  | TextContentPart
+  | ImageContentPart
+  | DataContentPart<TDataContent>;
+
+type ProjectionTextPart = TextContentPart;
+type ProjectionImagePart = ImageContentPart;
+type ProjectionDataPart<TDataContent = never> = DataContentPart<TDataContent>;
 
 type ProjectionStatePart = {
   type: "state";
@@ -41,90 +63,100 @@ type ProjectionStatePart = {
   value: unknown;
 };
 
-type ProjectionPart = ProjectionTextPart | ProjectionStatePart;
+type ProjectionPart<TDataContent = never> =
+  | ContentPart<TDataContent>
+  | ProjectionStatePart;
 
-type ProjectionDraft = {
-  systemParts: ProjectionPart[];
-  dynamicParts: ProjectionPart[];
+type ProjectionIR<TDataContent = never> = {
+  systemParts: ProjectionPart<TDataContent>[];
+  dynamicParts: ProjectionPart<TDataContent>[];
   tools: Action[];
   states: ProjectionStatePart[];
 };
 
-type ProjectionSource = {
-  readonly instructions?: string;
-  readonly systemParts: readonly ProjectionPart[];
-  readonly dynamicParts: readonly ProjectionPart[];
+type ReadonlyProjectionIR<TDataContent = never> = {
+  readonly systemParts: readonly ProjectionPart<TDataContent>[];
+  readonly dynamicParts: readonly ProjectionPart<TDataContent>[];
   readonly tools: readonly Action[];
   readonly states: readonly ProjectionStatePart[];
 };
 
+type ProjectionSource<TDataContent = never> = {
+  readonly node?: Node<TDataContent>;
+  readonly ir?: ReadonlyProjectionIR<TDataContent>;
+};
+
 type ProjectionCallSite = "node" | "boundary";
 
-type ProjectionContext<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type ProjectionContext<TDataContent = never> = {
   callSite: ProjectionCallSite;
-  runtimeInstanceId: RuntimeInstanceId;
-  address: RuntimeAddress;
-  target?: Generator;
-  node: Node<TActorMessage>;
+  generatorId: GeneratorId;
+  address: ProjectionAddress;
+  targetGeneratorId?: GeneratorId;
+  originNode: Node<TDataContent>;
+  createNodeIR(): ProjectionIR<TDataContent>;
 };
 
-type ProjectionFunctionMethod<TActorMessage extends AnyActorMessage = DefaultActorMessage> = (
-  ctx: ProjectionContext<TActorMessage>,
-  draft: ProjectionDraft,
-  source: ProjectionSource,
+type ProjectionFunctionMethod<TDataContent = never> = (
+  ctx: ProjectionContext<TDataContent>,
+  draft: ProjectionIR<TDataContent>,
+  source: ProjectionSource<TDataContent>,
 ) => void;
 
-type ProjectionFunction<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type ProjectionFunction<TDataContent = never> = {
   kind: "projection";
   name: string;
-  method: ProjectionFunctionMethod<TActorMessage>;
+  standard?: ResolvedStandardProjectionConfig;
+  method: ProjectionFunctionMethod<TDataContent>;
 };
 
-type Projection =
-  | StaticProjection
+type Projection<TDataContent = never> =
   | ProjectionFunctionRef
-  | ProjectionFunction;
-
-type BoundaryProjection =
-  | StaticBoundaryProjection
-  | ProjectionFunctionRef
-  | ProjectionFunction;
+  | ProjectionFunction<TDataContent>;
 ```
 
 Projection defaults:
 
-- `node.projection` defaults to
-  `{ mode: "augment", instructions: "system", tools: "provider-static" }`.
-- `runtime.boundaryProjection` defaults to `{ mode: "hidden" }` for generator
+- `node.projection` defaults to `defaultProjection`.
+- `runtime.boundaryProjection` defaults to `hiddenProjection` for generator
   runtimes.
 - `StateDescriptor.projection` defaults to `"hidden"`.
 
-Static node projection controls node-local instructions, projected state, and
-node tools. Static boundary projection intentionally supports only `mode`:
-`hidden`, `augment`, or `replace`. A static boundary `augment` or `replace`
-exports the child runtime aggregate as compiled, preserving system parts,
-dynamic parts, tools, and retrievable state metadata. Selective boundary export
-belongs in a projection function.
+Projection policy is always executable. `defaultProjection`, `hiddenProjection`,
+`augmentProjection`, and `replaceProjection` are ordinary projection functions
+exported by the library. `createStandardProjectionFunction({ name, ... })`
+builds the same standard behavior from `StandardProjectionConfig`; the `name`
+is required because projection functions are ref-addressable executable values.
 
 Projection functions are low-level compile-time hooks. They receive the current
-destination draft and a normalized source, then mutate the draft directly. The
-draft intentionally exposes the projection IR instead of flattened strings so
-state metadata can survive until final render and retrieval alias generation.
+destination IR and a source that may contain a node, an IR aggregate, or both,
+then mutate the destination IR directly. The IR intentionally exposes projection
+parts instead of flattened strings so state metadata can survive until final
+render and retrieval alias generation.
 Finalization treats state parts in `systemParts` and `dynamicParts` as projected
 state metadata, so projection functions can move prompt parts between sections
 without separately maintaining `draft.states`. A function may still push directly
 to `draft.states` for metadata-only retrieval exposure.
 
+In the current framework:
+
+- node projection calls receive `source.node` and no `source.ir`;
+- boundary projection calls receive `source.ir` and no `source.node`;
+- projection functions should still tolerate both fields being present.
+
+Conceptually, standard projection starts from the source IR when provided,
+materializes source node content when provided, then merges the resulting IR into
+the destination IR according to `mode`.
+
 Projection functions follow the same charter ref rules as other registered
-objects. If registered in `charter.projections`, they serialize by ref. Inline
-projection functions are executable in memory but are not serializable;
-serialization should throw if an unregistered projection function is encountered.
-Static boundary projections with `instructions` or `tools` must be rejected
-during construction or hydration.
+objects. Standard functions have no reserved refs: if registered in
+`charter.projections`, or available through the source node slot, they serialize
+by ref. Inline projection functions are executable in memory but are not
+serializable; serialization should throw if an unregistered projection function
+is encountered.
 
 ```ts
 type GeneratorId = string;
-type RuntimeInstanceId = string; // encoded RuntimeAddress
 type InstanceId = string;
 type StateKey = string;
 
@@ -140,52 +172,69 @@ type RetrievableState = {
   target: StateAddress;
 };
 
-type AudienceTarget = RuntimeAddress;
+type ProjectionAddress =
+  | { type: "instance"; instanceId: string }
+  | { type: "member"; ownerInstanceId: string; memberPath: string[] };
+
+type AudienceTarget = ProjectionAddress;
 
 type Audience = "self" | "broadcast" | AudienceTarget | AudienceTarget[];
 
-type UserMessage<TContent = string> = {
+type UserMessage<TDataContent = never> = {
   type: "user";
-  content?: TContent;
+  content?: ContentPart<TDataContent>[];
   text?: string;
   audience?: Audience;
   delivery?: MessageDelivery;
 };
 
-type AssistantMessage<TContent = string> = {
+type AssistantMessage<TDataContent = never> = {
   type: "assistant";
-  content?: TContent;
+  content?: ContentPart<TDataContent>[];
   text?: string;
   audience?: Audience;
   delivery?: MessageDelivery;
 };
 
-type ToolMessage = {
-  type: "tool";
+type ActionKind = "command" | "tool";
+
+type ActionRequestMessage = {
+  type: "action";
+  kind: "request";
+  action: ActionKind;
   name: string;
-  text?: string;
-  value?: unknown;
-  audience?: Audience;
-  delivery?: MessageDelivery;
+  input: unknown;
+  target?: ProjectionAddress;
+  callId: string;
 };
 
-type ActorMessage<
-  TAssistantContent = string,
-  TUserContent = string,
-> = UserMessage<TUserContent> | AssistantMessage<TAssistantContent> | ToolMessage;
+type ActionResultMessage<TDataContent = never> = {
+  type: "action";
+  kind: "result";
+  action: ActionKind;
+  name: string;
+  callId: string;
+  target?: ProjectionAddress;
+  success: boolean;
+  value?: unknown;
+  error?: string;
+  outputMessageIndices?: number[];
+};
 
-type AnyActorMessage = ActorMessage<any, any>;
-type DefaultActorMessage = ActorMessage<string>;
+type ActorMessage<TDataContent = never> =
+  | UserMessage<TDataContent>
+  | AssistantMessage<TDataContent>;
 
-type AssistantContentOf<TActorMessage> =
-  Extract<TActorMessage, { type: "assistant" }> extends { content?: infer C }
-    ? C
-    : never;
+type ActionMessage<TDataContent = never> =
+  | ActionRequestMessage
+  | ActionResultMessage<TDataContent>;
 
-type OutputConfig<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type AnyActorMessage = ActorMessage<any>;
+
+type OutputConfig<TDataContent = never> = {
   audience?: Audience;
-  schema?: z.ZodType<AssistantContentOf<TActorMessage>>;
-  mapTextBlock?: (text: string) => AssistantContentOf<TActorMessage>;
+  schema?: z.ZodType<TDataContent>;
+  mapTextBlock?: (text: string) => TDataContent;
 };
 
 type RuntimeTrigger =
@@ -200,61 +249,63 @@ type ActivationHistory = "live" | "snapshot";
 type ActorHistoryProjection = { type: "actor" };
 type MessageHistoryProjection = { type: "messages" };
 
-type HistoryProjection<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
+type HistoryProjection<TDataContent = never> =
   | ActorHistoryProjection
   | MessageHistoryProjection // default
   | HistoryProjectionFunctionRef
-  | HistoryProjectionFunction<TActorMessage>;
+  | HistoryProjectionFunction<TDataContent>;
 
-type HistoryProjectionContext<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type HistoryProjectionContext<TDataContent = never> = {
   target: Generator;
-  runtimeInstanceId: RuntimeInstanceId;
+  generatorId: GeneratorId;
   activationId: string;
   trigger: RuntimeTrigger;
-  history: Frame<TActorMessage>[];
+  history: Frame<TDataContent>[];
   states: Record<StateKey, unknown>;
 };
 
-type HistoryProjectionFunctionMethod<TActorMessage extends AnyActorMessage = DefaultActorMessage> = (
-  ctx: HistoryProjectionContext<TActorMessage>,
-) => FrameMessage<TActorMessage>[];
+type HistoryProjectionFunctionMethod<TDataContent = never> = (
+  ctx: HistoryProjectionContext<TDataContent>,
+) => FrameMessage<TDataContent>[];
 
-type HistoryProjectionFunction<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type HistoryProjectionFunction<TDataContent = never> = {
   kind: "historyProjection";
   name: string;
-  method: HistoryProjectionFunctionMethod<TActorMessage>;
+  method: HistoryProjectionFunctionMethod<TDataContent>;
 };
 
-type TriggeredRuntimeOptions<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type TriggeredRuntimeOptions<TDataContent = never> = {
   trigger: RuntimeTrigger;
   concurrency?: RuntimeConcurrency; // default "serial"
   activationHistory?: ActivationHistory; // default "live"
-  historyProjection?: HistoryProjection<TActorMessage>; // default { type: "messages" }
-  boundaryProjection?: BoundaryProjection<TActorMessage>; // default { mode: "hidden" }
+  historyProjection?: HistoryProjection<TDataContent>; // default { type: "messages" }
+  boundaryProjection?: Projection<TDataContent>; // default hiddenProjection
   outputAudienceDefault?: "self" | "broadcast";
 };
 
-type Runtime<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
+type Runtime<TDataContent = never> =
   | { type?: "component" } // default
   | ({
       type?: "generator";
-    } & TriggeredRuntimeOptions<TActorMessage>);
+    } & TriggeredRuntimeOptions<TDataContent>);
 ```
 
-App-supplied user and assistant actor messages may be text-only, content-only,
-or both. `text` is the portable rendering fallback. `content` is app-owned rich
-message content and is optional even when the content type parameter is
-specified.
+App-supplied actor messages may be text-only, content-part-only, or both.
+`text` is the portable rendering fallback. `content` is app-owned rich message
+content represented as `ContentPart<TDataContent>[]`. The single
+`TDataContent` type parameter describes the app-owned `data` content payload
+used in user, assistant, tool, projection, history, executor, charter, node, and
+machine types.
 
 `node.output` controls how implicit LLM text output is shaped after executor
 completion. `output.schema`, when present, is passed to the executor as the
-runtime's structured-output schema and is type-checked against the configured
-assistant content type. `output.mapTextBlock`, when present, maps the executor's
-returned text block into that assistant content type before schema validation. If
-no mapper is provided, returned text becomes the assistant content. The framework
-then wraps the content in an `AssistantMessage` with `content` set and `text`
-preserved as the raw LLM text. `output.audience` is applied when the implicit
-assistant message does not already carry an explicit audience.
+runtime's structured-output schema and is type-checked against `TDataContent`.
+`output.mapTextBlock`, when present, maps the executor's returned text block
+into `TDataContent` before schema validation. If no mapper or schema is
+provided, returned text becomes a text content part. The framework then wraps the
+content in an `AssistantMessage` with `content` set and `text` preserved as the
+raw LLM text. `output.audience` is applied when the implicit assistant message
+does not already carry an explicit audience.
 
 `runtime.outputAudienceDefault` optionally supplies the audience for implicit
 assistant messages produced from executor text output when `node.output.audience`
@@ -304,12 +355,12 @@ type StateContainer<S = unknown> = {
   value: S;
 };
 
-type Instance<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type Instance<TDataContent = never> = {
   id: string;
-  node: Node<TActorMessage>;
+  node: Node<TDataContent>;
   isSource?: boolean;
   states?: Record<string, StateContainer>;
-  children?: Instance<TActorMessage>[]; // removable runtime children
+  children?: Instance<TDataContent>[]; // removable runtime children
 };
 ```
 
@@ -367,7 +418,7 @@ type ActionRef = string;
 type ActionConfigEntry = Action | ActionRef;
 type ActionBindings = Record<string, Action>;
 
-type NodeConfig<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
@@ -375,13 +426,13 @@ type NodeConfig<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   tools?: ActionConfigEntry[];
   commands?: ActionConfigEntry[];
   state?: StateDescriptor;
-  members?: Node<TActorMessage>[]; // required/static compositional members
-  output?: OutputConfig<TActorMessage>;
-  projection?: Projection;
-  runtime?: Runtime<TActorMessage>;
+  members?: Node<TDataContent>[]; // required/static compositional members
+  output?: OutputConfig<TDataContent>;
+  projection?: Projection<TDataContent>;
+  runtime?: Runtime<TDataContent>;
 };
 
-type Node<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type Node<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
@@ -391,10 +442,10 @@ type Node<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   commandBindings: ActionBindings;
   commandRefs: ActionRef[];
   state?: StateDescriptor;
-  members: Node<TActorMessage>[];
-  output?: OutputConfig<TActorMessage>;
-  projection: Projection;
-  runtime: Runtime<TActorMessage>;
+  members: Node<TDataContent>[];
+  output?: OutputConfig<TDataContent>;
+  projection: Projection<TDataContent>;
+  runtime: Runtime<TDataContent>;
 };
 ```
 
@@ -411,11 +462,11 @@ duplicate sibling member keys are an error. If an app needs the same logical
 node twice under one parent, it should create distinct wrapper nodes with unique
 keys.
 
-Only keep `createNode<TActorMessage>(config)` for the first pass. A node may
+Only keep `createNode<TDataContent>(config)` for the first pass. A node may
 attach at most one state descriptor through `config.state`. Do not add
 `createSkillNode`, `createWorkerNode`, or `createPrimaryNode` initially. Most
-apps should anchor the actor message type at `createCharter<TActorMessage>()`;
-`createNode<TActorMessage>()` is available when a node is authored away from that
+apps should anchor the data content type at `createCharter<TDataContent>()`;
+`createNode<TDataContent>()` is available when a node is authored away from that
 charter context or needs its `output.schema` checked locally.
 
 ## Charter
@@ -424,39 +475,37 @@ The charter is the executable registry for all ref-addressable runtime values.
 Refs are dry, stable identifiers that hydrate through a compatible charter.
 
 ```ts
-type Charter<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type Charter<TDataContent = never> = {
   key?: string;
   version?: string;
-  executor: Executor<TActorMessage>;
-  nodes: Record<string, Node<TActorMessage>>;
+  executor: Executor<TDataContent>;
+  nodes: Record<string, Node<TDataContent>>;
   tools: Record<string, Action>;
   commands: Record<string, Action>;
   states: Record<string, StateDescriptor>;
-  projections: Record<string, ProjectionFunction<TActorMessage>>;
-  historyProjections: Record<string, HistoryProjectionFunction<TActorMessage>>;
+  projections: Record<string, ProjectionFunction<TDataContent>>;
+  historyProjections: Record<string, HistoryProjectionFunction<TDataContent>>;
 };
 
-type CharterConfig<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type CharterConfig<TDataContent = never> = {
   key?: string;
   version?: string;
-  executor: Executor<TActorMessage>;
-  nodes: readonly Node<TActorMessage>[];
+  executor: Executor<TDataContent>;
+  nodes: readonly Node<TDataContent>[];
   tools: readonly Action[];
   commands: readonly Action[];
   states: readonly StateDescriptor[];
-  projections: readonly ProjectionFunction<TActorMessage>[];
-  historyProjections?: readonly HistoryProjectionFunction<TActorMessage>[];
+  projections: readonly ProjectionFunction<TDataContent>[];
+  historyProjections?: readonly HistoryProjectionFunction<TDataContent>[];
 };
 ```
 
-`createCharter<TActorMessage>()` is the primary type anchor for an application.
-The charter's actor message type flows into registered nodes, runtime history
-projections, executor requests, output configuration, frames, and machine
-instances. Apps that only need structured assistant output can use
-`ActorMessage<TAssistantContent>`, which leaves user content as `string`.
-Apps that need rich user and assistant content can use
-`ActorMessage<TAssistantContent, TUserContent>` or define a full actor-message
-union and pass that as `TActorMessage`.
+`createCharter<TDataContent>()` is the primary type anchor for an application.
+The charter's data content type flows into registered nodes, runtime history
+projections, executor requests, output configuration, frame messages, and
+machine instances. Apps that only need text can omit the type parameter. Apps
+that need structured content should pass the app-owned data payload type and use
+`ContentPart<TDataContent>[]` in actor messages.
 
 `createCharter(config)` accepts array inputs for executable registries, validates
 unique names/keys, and normalizes the hydrated charter to record registries for
@@ -563,22 +612,20 @@ durable conversation state and should preserve the exact children that were
 spawned or attached during execution.
 
 Members can still have generator runtimes. The runtime gives each
-member projection node a virtual runtime address derived from the nearest
+member projection node a projection address derived from the nearest
 concrete owner instance and the stable member node key path:
 
 ```ts
-type RuntimeAddress =
+type ProjectionAddress =
   | { type: "instance"; instanceId: string }
   | { type: "member"; ownerInstanceId: string; memberPath: string[] };
 ```
 
-The encoded runtime address is usable anywhere the work model needs runtime
-identity, including `runtimeInstanceId`, generator IDs, activation IDs,
-concurrency keys, explicit audience targets, and parent-generator lookup. In the
-rest of this document, `runtimeInstanceId` may refer either to a concrete
-`Instance.id` or to an encoded virtual member runtime address.
+The encoded projection address is the stable `GeneratorId` used anywhere the work
+model needs generator identity, including activation scheduling, concurrency
+keys, explicit audience targets, and parent-generator lookup.
 
-Example virtual addresses:
+Example generator IDs:
 
 ```txt
 instance:abc
@@ -586,9 +633,9 @@ member:abc/critic
 member:abc/research/retriever
 ```
 
-Virtual member addresses are recomputed from current registered node definitions
-on load. They are not serialized as durable children. Reordering members does
-not change a virtual address as long as member node keys stay the same.
+Virtual member projection addresses are recomputed from current registered node
+definitions on load. They are not serialized as durable children. Reordering
+members does not change a generator ID as long as member node keys stay the same.
 Duplicate sibling member node keys are an error.
 
 Runtime `Frame`s must be stored and supplied to the runtime in stable durable
@@ -599,10 +646,10 @@ append order. The core framework does not require a dense global sequence field.
 The projection compiler produces an executor-neutral shape:
 
 ```ts
-type CompiledInference<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
-  systemParts: string[];
-  history: FrameMessage<TActorMessage>[];
-  dynamicParts: string[];
+type CompiledInference<TDataContent = never> = {
+  systemParts: ContentPart<TDataContent>[];
+  history: FrameMessage<TDataContent>[];
+  dynamicParts: ContentPart<TDataContent>[];
   tools: Action[];
   retrievableStates: RetrievableState[];
 };
@@ -626,7 +673,7 @@ must not be rendered into prompts or provider tool schemas. The runtime treats
 aliases as exact map keys; it does not parse arbitrary model-supplied strings
 into state targets. If generated aliases collide, projection compilation throws.
 
-Projection compilation uses an internal `ProjectionDraft` IR. `CompiledInference`
+Projection compilation uses an internal `ProjectionIR`. `CompiledInference`
 still renders executor-facing prompt parts to `string[]` after aliases and
 retrievable states are finalized.
 
@@ -634,73 +681,69 @@ Compilation rule for projection-owned sections:
 
 ```ts
 const history = compileVisibleHistory(frames, targetGenerator);
-const rootProjectionNode = collectProjectionNodes(root)[0];
-const sectionRoot =
-  targetGenerator
-    ? findProjectionNodeByRuntimeId(root, targetGenerator.runtimeInstanceId) ?? rootProjectionNode
-    : rootProjectionNode;
+const rootContributor = directRootContributor(root);
+const sectionRoot = targetGeneratorId
+  ? findContributorById(root, targetGeneratorId) ?? rootContributor
+  : rootContributor;
 const draft =
-  targetGenerator && isGeneratorBoundary(sectionRoot)
-    ? compileTargetGeneratorProjection(sectionRoot, targetGenerator)
+  targetGeneratorId && isGeneratorBoundary(sectionRoot)
+    ? compileTargetGeneratorProjection(sectionRoot, targetGeneratorId)
     : compileProjectionSubtree(sectionRoot, targetGenerator);
 
-return finalizeProjectionDraft(draft, history);
+return finalizeSections(draft, history);
 
-function compileTargetGeneratorProjection(projectionNode, targetGenerator) {
-  return compileOwnedGeneratorProjection(projectionNode, targetGenerator);
+function compileTargetGeneratorProjection(contributor, targetGeneratorId) {
+  return compileOwnedGeneratorProjection(contributor, targetGeneratorId);
 }
 
-function compileBoundaryGeneratorProjection(projectionNode) {
-  return compileOwnedGeneratorProjection(
-    projectionNode,
-    generatorForProjectionNode(projectionNode),
-  );
+function compileBoundaryGeneratorProjection(contributor) {
+  return compileOwnedGeneratorProjection(contributor, contributor.id);
 }
 
-function compileOwnedGeneratorProjection(projectionNode, targetGenerator) {
-  const draft = emptyProjectionDraft();
+function compileOwnedGeneratorProjection(contributor, targetGeneratorId) {
+  const draft = emptyProjectionIR();
   applyProjection(
     draft,
-    compileNodeProjectionSource(projectionNode),
-    projectionNode.node.projection,
-    projectionContext(projectionNode, "node", targetGenerator),
+    { node: contributor.node },
+    contributor.node.projection,
+    projectionContext(contributor, "node", targetGeneratorId),
   );
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    visitProjectionNode(draft, child, targetGenerator);
+  for (const child of directContributorChildren(contributor)) {
+    visitContributor(draft, child, targetGeneratorId);
   }
   return draft;
 }
 
-function compileProjectionSubtree(projectionNode, targetGenerator) {
-  const draft = emptyProjectionDraft();
-  visitProjectionNode(draft, projectionNode, targetGenerator);
+function compileProjectionSubtree(contributor, targetGeneratorId) {
+  const draft = emptyProjectionIR();
+  visitContributor(draft, contributor, targetGeneratorId);
   return draft;
 }
 
-function visitProjectionNode(draft, projectionNode, targetGenerator) {
+function visitContributor(draft, contributor, targetGeneratorId) {
   if (
-    isGeneratorBoundary(projectionNode) &&
-    !belongsToGenerator(projectionNode, targetGenerator)
+    isGeneratorBoundary(contributor) &&
+    !belongsToGenerator(contributor, targetGeneratorId)
   ) {
-    const exported = compileBoundaryGeneratorProjection(projectionNode);
-    applyBoundaryProjection(
+    const exported = compileBoundaryGeneratorProjection(contributor);
+    applyProjection(
       draft,
-      readonlyProjectionSource(exported),
-      projectionNode.node.runtime.boundaryProjection ?? { mode: "hidden" },
-      projectionContext(projectionNode, "boundary"),
+      { ir: readonlyProjectionIR(exported) },
+      contributor.node.runtime.boundaryProjection,
+      projectionContext(contributor, "boundary"),
     );
     return; // do not directly traverse descendants across a runtime boundary
   }
 
   applyProjection(
     draft,
-    compileNodeProjectionSource(projectionNode),
-    projectionNode.node.projection,
-    projectionContext(projectionNode, "node"),
+    { node: contributor.node },
+    contributor.node.projection,
+    projectionContext(contributor, "node", targetGeneratorId),
   );
 
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    visitProjectionNode(draft, child, targetGenerator);
+  for (const child of directContributorChildren(contributor)) {
+    visitContributor(draft, child, targetGeneratorId);
   }
 }
 ```
@@ -718,9 +761,9 @@ returned root instance.
 Generator runtimes are projection boundaries. When compiling a generator outside
 that runtime boundary, the compiler must not traverse the boundary's descendants
 directly. It first compiles the boundary's owned projection using that runtime's
-own `node.projection`, then applies
-`runtime.boundaryProjection ?? { mode: "hidden" }` to the resulting aggregate
-before adding it to the parent compilation.
+own `node.projection`, then calls `runtime.boundaryProjection` with
+`source.ir` set to the resulting aggregate before adding it to the parent
+compilation.
 
 When compiling a specific target generator, that runtime's projection node is
 the root of the projection section pass. Ancestor runtime
@@ -743,12 +786,12 @@ without exporting the generator runtime's aggregate. Hidden boundaries still
 hide the generator's own instructions, tools, local state, and descendant
 aggregate.
 
-Static node projection applies to a node source: node instructions, projected
-state parts, and node tools. Static boundary projection applies to a child
-runtime source that has already been compiled. Boundary static policy therefore
-supports only `mode`. `mode: "hidden"` drops the child runtime aggregate.
-`mode: "augment"` merges it as compiled. `mode: "replace"` clears the parent
-draft before merging it as compiled. Child system parts remain system parts,
+Standard node projection materializes a node source into IR: node instructions,
+projected state parts, and node tools. Standard boundary projection receives a
+child runtime source that has already been compiled into IR. `hiddenProjection`
+drops the child runtime aggregate. `augmentProjection` merges it as compiled.
+`replaceProjection` clears the parent
+IR before merging it as compiled. Child system parts remain system parts,
 child dynamic parts remain dynamic parts, and child tools/retrievable state
 metadata are exported. If a boundary needs to export prompt without tools,
 re-channel system parts to dynamic, filter retrieval metadata, summarize, or
@@ -758,7 +801,7 @@ otherwise transform the aggregate, use a projection function.
 rendered states, and retrievable states at that call site. Projection traversal
 is still node-before-children, so a node `replace` clears projections accumulated
 before that node and then that node's children still apply afterward. A boundary
-`replace` clears the parent draft accumulated before that child boundary and
+`replace` clears the parent IR accumulated before that child boundary and
 later siblings still apply afterward. `replace` does not delete, hide, reorder,
 or otherwise affect history. History is compiled independently from durable
 frames by the generator history policy.
@@ -771,7 +814,7 @@ const history = applyHistoryProjection(
   targetRuntime.historyProjection ?? { type: "messages" },
   {
     target: targetGenerator,
-    runtimeInstanceId: targetRuntimeInstanceId,
+    generatorId: targetGenerator.id,
     activationId,
     trigger: targetRuntime.trigger,
     history: visibleFrames,
@@ -802,7 +845,7 @@ Runtime projection resolution:
 - `component`: use `node.projection`.
 - `generator` when compiling parent inference: compile the runtime's owned
   projection aggregate, then export it through
-  `runtime.boundaryProjection ?? { mode: "hidden" }`.
+  `runtime.boundaryProjection`.
 - `generator` when compiling its own inference: use `node.projection`.
 
 All generator inference points are equal and can receive input when their
@@ -838,30 +881,29 @@ policy is designed.
 Executor output returns through the normal frame path:
 
 ```ts
-type EnqueueFrame<TActorMessage extends AnyActorMessage = DefaultActorMessage> = (
-  frame: FrameDraft<TActorMessage>,
-) => Frame<TActorMessage> | Promise<Frame<TActorMessage>>;
+type EnqueueFrame<TDataContent = never> = (
+  frame: FrameDraft<TDataContent>,
+) => Frame<TDataContent> | Promise<Frame<TDataContent>>;
 
-type ExecutorRunRequest<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type ExecutorRunRequest<TDataContent = never> = {
   generatorId: GeneratorId;
   activationId: string;
-  runtimeInstanceId: RuntimeInstanceId;
-  inference: CompiledInference<TActorMessage>;
-  enqueueFrame: EnqueueFrame<TActorMessage>;
-  createActionContext?: (action: AnyAction) => ActionContext<unknown, TActorMessage>;
-  output?: OutputConfig<TActorMessage>;
+  inference: CompiledInference<TDataContent>;
+  enqueueFrame: EnqueueFrame<TDataContent>;
+  createActionContext?: (action: AnyAction) => ActionContext<unknown, TDataContent>;
+  output?: OutputConfig<TDataContent>;
   signal?: AbortSignal;
 };
 
-type ExecutorRunResult<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type ExecutorRunResult<TDataContent = never> = {
   completionReason: CompletionReason;
   value?: string; // implicit LLM text output
-  frames?: Array<FrameDraft<TActorMessage> | Frame<TActorMessage>>; // fully formed executor-produced frames
+  frames?: Array<FrameDraft<TDataContent> | Frame<TDataContent>>; // fully formed executor-produced frames
 };
 
-type ExecutorRealizePromptRequest<TActorMessage extends AnyActorMessage = DefaultActorMessage> = Pick<
-  ExecutorRunRequest<TActorMessage>,
-  "generatorId" | "activationId" | "runtimeInstanceId" | "inference" | "output"
+type ExecutorRealizePromptRequest<TDataContent = never> = Pick<
+  ExecutorRunRequest<TDataContent>,
+  "generatorId" | "activationId" | "inference" | "output"
 >;
 
 type ExecutorRealizedPrompt = {
@@ -869,18 +911,18 @@ type ExecutorRealizedPrompt = {
   input: unknown;
 };
 
-type Executor<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type Executor<TDataContent = never> = {
   run(
-    request: ExecutorRunRequest<TActorMessage>,
-  ): ExecutorRunResult<TActorMessage> | Promise<ExecutorRunResult<TActorMessage>>;
+    request: ExecutorRunRequest<TDataContent>,
+  ): ExecutorRunResult<TDataContent> | Promise<ExecutorRunResult<TDataContent>>;
   realizePrompt(
-    request: ExecutorRealizePromptRequest<TActorMessage>,
+    request: ExecutorRealizePromptRequest<TDataContent>,
   ): ExecutorRealizedPrompt | Promise<ExecutorRealizedPrompt>;
 };
 ```
 
 When an executor returns `frames`, the framework enqueues them in result order,
-applying the current generator, runtime, and activation metadata where omitted.
+applying the current generator and activation metadata where omitted.
 When an executor returns `value`, the framework maps that text through
 `node.output.mapTextBlock` if present; otherwise the raw text is used as
 assistant content. If `node.output.schema` is present, the assistant content is
@@ -957,52 +999,71 @@ their explicit audience, or their message-type default if omitted.
 
 ### Commands
 
-Commands are app-executed, not `runMachine`-executed. A command message is a
-durable FYI/event frame that records an accepted command request. It is not a
+Commands are app-executed, not `runMachine`-executed. A command action request
+is a durable event frame that records an accepted command request. It is not a
 replay instruction, and folding or replaying a frame log must not execute command
 code.
 
 ```ts
-type CommandMessage = {
-  type: "command";
+type ActionRequestMessage = {
+  type: "action";
+  kind: "request";
+  action: "command" | "tool";
   name: string;
   input: unknown;
-  target?: RuntimeAddress;
-  clientId?: string;
+  target?: ProjectionAddress;
+  callId: string;
 };
 
-type ClientMachineMessage = CommandMessage; // first pass
+type ActionResultMessage<TDataContent = never> = {
+  type: "action";
+  kind: "result";
+  action: "command" | "tool";
+  name: string;
+  callId: string;
+  target?: ProjectionAddress;
+  success: boolean;
+  value?: unknown;
+  error?: string;
+  outputMessageIndices?: number[];
+};
 
-type ExecuteCommandResult<T = unknown> =
+type ClientMachineMessage = ActionRequestMessage & { action: "command" };
+
+type ExecuteActionResult<T = unknown, TDataContent = never> =
   | {
       success: true;
       value?: T;
-      clientId?: string;
+      messages?: FrameMessage<TDataContent>[];
+      callId: string;
     }
   | {
       success: false;
       error: string;
-      clientId?: string;
+      value?: T;
+      messages?: FrameMessage<TDataContent>[];
+      callId: string;
     };
 
 function executeCommand<T = unknown>(
   machine: Machine,
-  message: CommandMessage,
-): Promise<ExecuteCommandResult<T>>;
+  message: ActionRequestMessage & { action: "command" },
+): Promise<ExecuteActionResult<T>>;
 ```
 
 The app owns receiving command requests from clients or hosts and calling
-`executeCommand(machine, commandMessage)` explicitly. The helper owns command
-message passing:
+`executeCommand(machine, actionRequest)` explicitly. The helper owns command
+request/result framing:
 
 1. Resolve the command against the hydrated machine.
 2. Validate command input.
-3. Enqueue a frame containing the `CommandMessage`.
+3. Enqueue a frame containing the command `ActionRequestMessage`.
 4. Execute the command with the same action context semantics as tools.
 5. Synchronously enqueue and fold any frames produced by context helpers such as
    `ctx.updateState(...)` as those helpers are called.
-6. When the command returns, enqueue any returned actor or instance messages as
-   frame(s), preserving result order.
+6. When the command returns, enqueue an `ActionResultMessage` and then spread
+   any returned output messages into the same terminal frame, with
+   `outputMessageIndices` pointing at those frame positions.
 7. Return a structured success or failure result to the app.
 
 `executeCommand` uses the same synchronous `machine.enqueueFrame` path as
@@ -1014,40 +1075,34 @@ remain in the machine's in-memory frame log until a later run drains them. Apps
 should not persist command-produced frames through a separate per-command
 result path in the normal case.
 
-If `target` is omitted, command resolution scans visible commands in
-`ProjectionNode` traversal order and picks the last command with the requested
-name. This gives duplicate command names the same override shape as projection
-sections and provider tool definitions: later/rightmost/deeper entries win. If
-`target` is provided, resolution is restricted to that runtime address and the
-command name is still read from the top-level `CommandMessage.name`.
+If `target` is omitted, command resolution scans visible commands in traversal
+order and picks the last command with the requested name. This gives duplicate
+command names the same override shape as projection sections and provider tool
+definitions: later/rightmost/deeper entries win. If `target` is provided,
+resolution is restricted to that projection address and the command name is still
+read from the top-level `ActionRequestMessage.name`.
 
 If target resolution or input validation fails before the command is accepted,
-`executeCommand` returns `success: false` and does not enqueue the command FYI
+`executeCommand` returns `success: false` and enqueues an immediate request/result
 frame. If execution throws after the command has been accepted, the helper
 returns `success: false`; any frames already enqueued by synchronous context
-helpers remain in the frame log. Durable command-error frames are out of scope
-for the first pass; apps can report the returned error through their own
-transport.
+helpers remain in the frame log. Failed actions may return output messages by
+using `actionResult({ success: false, error, messages })`; thrown errors cannot
+carry messages.
 
-`runMachine` should ignore `CommandMessage`s for execution. Command messages are
-also not executor-visible actor history. They may be exposed through client or
-inspection read models as command residue/audit metadata.
+`runMachine` should ignore command action messages for execution. Action messages
+are also not actor messages, though tool result messages may be rendered into
+executor-visible prompt history by the executor adapter.
 
 ## Generators, Work, And Frames
 
 The runtime may contain multiple independent inference points. Call each
 inference point a generator.
 
-Generators are created by:
-
-- Serial activations created from runtime addresses whose node runtime is
-  `{ type: "generator" }`.
-- Parallel activations created from runtime addresses whose node runtime is
-  `{ type: "generator" }`.
-
-Generator runtime addresses define work that can be triggered by frames. The
-address may point to a concrete durable instance or to a virtual member runtime
-address. The trigger creates an activation. A runtime's
+Generators are discovered from projection addresses whose node runtime is
+`{ type: "generator" }`. A projection address may point to a concrete durable
+instance or to a virtual member generator. Matching triggers create activations.
+A runtime's
 `concurrency` policy controls whether activations for that runtime are processed
 serially or in parallel:
 
@@ -1055,14 +1110,14 @@ serially or in parallel:
   incomplete activation for that key is runnable.
 - `parallel`: each incomplete activation is independently runnable.
 
-For serial runtimes, `concurrencyKey` defaults to the encoded runtime address.
+For serial runtimes, `concurrencyKey` defaults to the encoded projection address.
 For parallel runtimes, `concurrencyKey` defaults to the activation ID.
 
-Serial generator IDs are stable and tied to their runtime address. The root
-generator created by `createRoot(...)` uses the same normal address encoding as
-every other instance runtime: `instance:root`. Parallel activations should use
-activation-specific generator IDs derived from the runtime address and
-activation ID.
+Generator IDs are stable and tied to projection addresses. The root generator
+created by `createRoot(...)` uses the same normal address encoding as every
+other instance generator: `instance:root`. Parallelism is activation-level state;
+parallel activations of the same generator share the same `generatorId` and have
+distinct `activationId`s and concurrency keys.
 
 Activation IDs distinguish individual durable units of work for generator
 runtimes.
@@ -1072,39 +1127,34 @@ advances independently and emits durable frames. A frame is the unit of runtime
 work that is enqueued back onto the machine.
 
 ```ts
-type GeneratorKind = "generator";
-
 type Generator = {
   id: GeneratorId;
-  kind: GeneratorKind;
-  runtimeInstanceId: RuntimeInstanceId;
 };
 
-type FrameDraft<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type FrameDraft<TDataContent = never> = {
   generatorId?: GeneratorId;
-  runtimeInstanceId?: RuntimeInstanceId;
   activationId?: string;
   inert?: boolean; // default false
-  messages: FrameMessage<TActorMessage>[];
+  messages: FrameMessage<TDataContent>[];
   metadata?: Record<string, unknown>;
 };
 
-type Frame<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  FrameDraft<TActorMessage> & { id: string };
+type Frame<TDataContent = never> =
+  FrameDraft<TDataContent> & { id: string };
 
 type MessageDelivery = "immediate" | "queued";
 
-type FrameMessage<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  | TActorMessage
-  | CommandMessage
-  | InstanceMessage<TActorMessage>
+type FrameMessage<TDataContent = never> =
+  | ActorMessage<TDataContent>
+  | ActionMessage<TDataContent>
+  | InstanceMessage<TDataContent>
   | WorkMessage;
 
-type PublicNodeRef<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  | Node<TActorMessage>
+type PublicNodeRef<TDataContent = never> =
+  | Node<TDataContent>
   | Ref;
-type SerializedNodeRef<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  | DryNode<TActorMessage>
+type SerializedNodeRef<TDataContent = never> =
+  | DryNode<TDataContent>
   | Ref;
 
 type StatePath = readonly (string | number)[];
@@ -1125,7 +1175,7 @@ type StateUpdate<S = unknown> =
       values: unknown[];
     };
 
-type InstanceMessage<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
+type InstanceMessage<TDataContent = never> =
   | {
       type: "instance";
       kind: "state.update";
@@ -1137,20 +1187,20 @@ type InstanceMessage<TActorMessage extends AnyActorMessage = DefaultActorMessage
       type: "instance";
       kind: "transition";
       instanceId: InstanceId;
-      node: SerializedNodeRef<TActorMessage>;
+      node: SerializedNodeRef<TDataContent>;
       states?: Record<StateKey, unknown>;
     }
   | {
       type: "instance";
       kind: "spawn";
       parentInstanceId: InstanceId;
-      children: SpawnChild<TActorMessage>[];
+      children: SpawnChild<TDataContent>[];
     }
   | {
       type: "instance";
       kind: "attach";
       parentInstanceId: InstanceId;
-      children: SerializedInstance<TActorMessage>[];
+      children: SerializedInstance<TDataContent>[];
     }
   | {
       type: "instance";
@@ -1159,19 +1209,19 @@ type InstanceMessage<TActorMessage extends AnyActorMessage = DefaultActorMessage
       reason?: "removed" | "cede" | "cancelled";
     };
 
-type SpawnChild<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type SpawnChild<TDataContent = never> = {
   id?: InstanceId;
-  node: SerializedNodeRef<TActorMessage>;
+  node: SerializedNodeRef<TDataContent>;
   states?: Record<StateKey, unknown>;
-  children?: SpawnChild<TActorMessage>[];
+  children?: SpawnChild<TDataContent>[];
 };
 
-type SerializedInstance<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type SerializedInstance<TDataContent = never> = {
   id: InstanceId;
-  node: SerializedNodeRef<TActorMessage>;
+  node: SerializedNodeRef<TDataContent>;
   isSource?: boolean;
   states?: Record<StateKey, StateContainer>;
-  children?: SerializedInstance<TActorMessage>[];
+  children?: SerializedInstance<TDataContent>[];
 };
 
 type WorkMessage =
@@ -1179,7 +1229,6 @@ type WorkMessage =
       type: "work";
       kind: "activation";
       activationId: string;
-      runtimeInstanceId: RuntimeInstanceId;
       generatorId: GeneratorId;
       sourceFrameId: string;
       concurrencyKey: string;
@@ -1236,7 +1285,7 @@ children, and is intended for imports, replication, or host-provided subtrees
 rather than ordinary tool-created children.
 
 `kind: "remove"` removes the target instance subtree. If open activations belong
-to removed runtime addresses, reconciliation should append completion work frames
+to removed projection addresses, reconciliation should append completion work frames
 with `reason: "cancelled"` for those activations. `reason: "cede"` is just a
 removal reason; any content returned to a parent or user should be emitted as a
 separate actor message with an explicit audience.
@@ -1271,36 +1320,33 @@ Audience semantics:
 
 - `"self"`: visible to the generator that produced the frame.
 - `"broadcast"`: visible to all generators.
-- `AudienceTarget` or `AudienceTarget[]`: visible to the listed runtime
-  addresses. A runtime address target is visible to every generator owned by
-  that runtime address, including serial generators and activation-specific
-  parallel generators that may not exist yet when the message is enqueued.
+- `AudienceTarget` or `AudienceTarget[]`: visible to the listed generator
+  addresses.
 
 If `audience` is omitted, the default depends on the message type:
 
 - `UserMessage`: defaults to `"broadcast"`.
-- `AssistantMessage` and `ToolMessage`: default to `"self"`.
-- `CommandMessage`, `InstanceMessage`, and `WorkMessage`: have no audience.
+- `AssistantMessage`: defaults to `"self"`.
+- `ActionMessage`, `InstanceMessage`, and `WorkMessage`: have no audience.
 
 A generator's audience can see a message when:
 
 - The resolved message audience is `"broadcast"`.
-- The resolved message audience includes a runtime address target matching the
-  generator's owning runtime address.
+- The resolved message audience includes a projection address target matching the
+  generator's address.
 - The resolved message audience is `"self"` and the message is in a frame
   produced by that generator.
 
 `"self"` resolves to the `generatorId` on the frame containing the message. A
 message with audience `"self"` in a frame without a `generatorId` has no
 generator-visible audience. User messages avoid this by defaulting to
-`"broadcast"`. For parallel generator activations, `"self"` resolves to
-the activation-specific generator ID that produced the frame.
+`"broadcast"`.
 
 Audience does not imply activation. It only controls which messages are visible
 to a generator before delivery and activation-history policy are applied. Runtime
 triggers decide which generators receive new activations.
 
-Helpers may be added to compute common audiences, such as a parent runtime
+Helpers may be added to compute common audiences, such as a parent generator
 address, but persisted messages should contain explicit audience targets. The
 framework should not store symbolic audiences like `"parent"` in the frame log.
 
@@ -1407,11 +1453,11 @@ separate non-terminal work message with deterministic wake conditions.
 
 Activation IDs must be deterministic. Activation messages are emitted in their
 own frames, but each activation records the source frame that triggered it. A
-typical activation ID should be derived from the machine identity, runtime
-instance identity, trigger identity, and source frame identity.
+typical activation ID should be derived from the machine identity, generator
+identity, trigger identity, and source frame identity.
 
 ```ts
-activationId = hash(machineId, runtimeInstanceId, triggerKey, sourceFrameId)
+activationId = hash(machineId, generatorId, triggerKey, sourceFrameId)
 ```
 
 Work frames are appended by framework reconciliation, not by mutating the frame
@@ -1490,7 +1536,7 @@ runtime projection node. Within any section pass, if a
 `ProjectionNode` belongs to the target generator, the compiler uses that
 projection node's `node.projection`; if a non-target projection node is a
 generator runtime, the compiler compiles that runtime's generator projection and
-exports it through `runtime.boundaryProjection ?? { mode: "hidden" }`.
+exports it through `runtime.boundaryProjection`.
 
 For the first pass, every generator receives the frame log filtered by message
 audience, message delivery, runtime activation history, and runtime metadata
@@ -1510,33 +1556,27 @@ node with an explicit actor-frame trigger.
 Generator runtimes are triggered only by scoped runtime events:
 
 - `spawn`: activates once when an `InstanceMessage` frame creates or attaches
-  the runtime address through `kind: "spawn"` or `kind: "attach"`. Static
+  the projection address through `kind: "spawn"` or `kind: "attach"`. Static
   runtime members present at machine bootstrap do not trigger `spawn`.
 - `actor-frame`: activates when any frame contains at least one actor message
-  whose audience is visible to the runtime address. Broadcast messages and
-  explicit runtime address targets can trigger parallel runtimes before an
-  activation-specific generator exists. Message `delivery` does not affect
-  trigger matching; it affects only whether the actor message is eligible
-  history for a particular activation.
+  whose audience is visible to the projection address. Message `delivery` does
+  not affect trigger matching; it affects only whether the actor message is
+  eligible history for a particular activation.
 - `parent-activation`: activates when a work `activation` message opens work for
   the runtime's nearest ancestor generator.
 - `parent-completion`: activates when a work `completion` message closes work
   for the runtime's nearest ancestor generator, regardless of completion reason.
 
 For `parent-activation` and `parent-completion`, the nearest ancestor generator
-is the closest generator above the runtime address in the ProjectionNode tree.
+is the closest generator above the projection address in the ProjectionNode tree.
 Those triggers do not observe unrelated generators by default.
 
 ### Self-Trigger Exclusion
 
-Triggers never match frames produced by the triggered runtime's own generators.
-A frame does not trigger a runtime if the frame's `generatorId` resolves to a
-generator owned by that runtime's address. The exclusion is keyed by runtime
-address, not exact generator ID: it covers serial generators with stable IDs and
-activation-specific parallel generator IDs alike, so a parallel activation's
-output cannot spawn fresh activations of its own runtime. Generator IDs must
-remain resolvable to their owning runtime address through the work log's
-activation messages.
+Triggers never match frames produced by the triggered generator. A frame does
+not trigger a generator if the frame's `generatorId` equals that generator's
+stable ID, so a generator's own output cannot spawn fresh activations of that
+same generator.
 
 Without this rule, default `"self"`-audience assistant and tool output would be
 visible to its producing generator, match that runtime's `actor-frame` trigger,
@@ -1579,17 +1619,17 @@ type RunMachineOptions = {
   scheduleWork?: boolean; // default true
 };
 
-type MachineRun<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  AsyncIterable<Frame<TActorMessage>> & {
+type MachineRun<TDataContent = never> =
+  AsyncIterable<Frame<TDataContent>> & {
     stopSchedulingWork(): void;
     hasStarted(): boolean;
     isDraining(): boolean;
   };
 
-function runMachine<TActorMessage extends AnyActorMessage = DefaultActorMessage>(
-  machine: Machine<TActorMessage>,
+function runMachine<TDataContent = never>(
+  machine: Machine<TDataContent>,
   options?: RunMachineOptions,
-): MachineRun<TActorMessage>;
+): MachineRun<TDataContent>;
 ```
 
 `scheduleWork: true` schedules runnable activations in parallel subject to each
@@ -1882,15 +1922,15 @@ A client instance should include, where applicable:
 - concrete instance IDs;
 - node keys, names, and runtime metadata safe for display;
 - durable children;
-- public member/projection children with stable runtime addresses;
+- public member/projection children with stable projection addresses;
 - visible state values and their state addresses;
 - state schema metadata for visible or form-bindable states;
-- command metadata, command input schemas, and optional runtime target addresses.
+- command metadata, command input schemas, and optional projection target addresses.
 
-The exact client instance shape may evolve, but it must preserve stable runtime
+The exact client instance shape may evolve, but it must preserve stable projection
 addresses for optional command targeting and stable `StateAddress` values for
 state operations. Member projection nodes should be addressable through
-`RuntimeAddress` without being serialized as durable child instances.
+`ProjectionAddress` without being serialized as durable child instances.
 
 The server remains authoritative. Client-side validation and optimistic updates
 are convenience behavior; every command and state mutation produced by a command
@@ -2001,39 +2041,39 @@ getCommand<TName extends ClientCommandName<TInstances>>(
 When multiple visible commands share a name, unqualified lookup uses the same
 last-wins rule as server command execution. Static types may fall back to a union
 when client instance ordering is not known precisely enough to infer the last
-matching command. Targeted lookup can narrow by `RuntimeAddress` when the target
+matching command. Targeted lookup can narrow by `ProjectionAddress` when the target
 is known in the client instance type.
 
-### Lightweight Typed Command Messages
+### Lightweight Typed Command Action Requests
 
 The effigy APIs are the ergonomic integration path for subscribed clients, but
-they should not be required just to create a typed command message. The client
+they should not be required just to create a typed command action request. The client
 package should also expose a small helper for applications that already know
 which command they want to send and own their transport directly:
 
 ```ts
 import type { SetLiveModeCommand } from "./agent";
-import { createCommandMessage } from "@projectors/core/client";
+import { createCommandActionRequest } from "@projectors/core/client";
 
-const message = createCommandMessage<SetLiveModeCommand>(
+const request = createCommandActionRequest<SetLiveModeCommand>(
   "setLiveMode",
   { enabled: true },
 );
 
-await sendMessage(message);
+await sendMessage(request);
 ```
 
 The helper should type-check the command name and input from the imported
-command type, generate a `clientId` by default, and return the same
+command type, generate a `callId` by default, and return the same
 transport-ready `ClientMachineMessage` shape used by effigy command handles.
 
 ```ts
-function createCommandMessage<TCommand extends AnyCommandDefinition>(
+function createCommandActionRequest<TCommand extends AnyCommandDefinition>(
   name: ClientCommandDefinitionName<TCommand>,
   input: ClientCommandDefinitionInput<TCommand>,
   options?: {
-    target?: RuntimeAddress;
-    clientId?: string;
+    target?: ProjectionAddress;
+    callId?: string;
   },
 ): ClientMachineMessage;
 ```
@@ -2067,7 +2107,7 @@ type OptimisticEffigy<TInstances = unknown> = MachineEffigy<TInstances> & {
   getCommand<TName extends ClientCommandName<TInstances>>(
     name: TName,
     options?: {
-      target?: RuntimeAddress;
+      target?: ProjectionAddress;
       optimistic?: (
         ctx: OptimisticContext<TInstances>,
         input: ClientCommandInput<TInstances, TName>,
@@ -2083,8 +2123,8 @@ function createOptimisticEffigy<TInstances>(
 
 The optimistic wrapper should:
 
-- generate a local command ID for every command message;
-- include that ID in the outbound command message as `clientId`;
+- generate a local call ID for every command action request;
+- include that ID in the outbound action request as `callId`;
 - apply the command's client-provided optimistic updater, if present;
 - expose `getInstances()` as the authoritative instances plus pending optimistic
   overlays;
@@ -2126,7 +2166,7 @@ type MachineSyncState = {
 ```
 
 When a client command is accepted and its immediate authoritative effects are
-reflected in the client snapshot, the server includes the command's `clientId`
+reflected in the client snapshot, the server includes the command's `callId`
 in `recentCommandResidue`. The optimistic client retires the matching pending
 overlay when it observes that ID.
 
@@ -2225,11 +2265,11 @@ spawn({ node });
 Durable frames and instance snapshots must store only dry values:
 
 ```ts
-type PublicNodeRef<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  | Node<TActorMessage>
+type PublicNodeRef<TDataContent = never> =
+  | Node<TDataContent>
   | Ref;
-type SerializedNodeRef<TActorMessage extends AnyActorMessage = DefaultActorMessage> =
-  | DryNode<TActorMessage>
+type SerializedNodeRef<TDataContent = never> =
+  | DryNode<TDataContent>
   | Ref;
 ```
 
@@ -2259,18 +2299,15 @@ inline node may contain serial data directly, but executable children must be
 refs.
 
 ```ts
-type DryProjection = StaticProjection | Ref;
-type DryBoundaryProjection = StaticBoundaryProjection | Ref;
-
 type DryRuntime =
   | { type?: "component" }
   | ({
       type: "generator";
-      boundaryProjection?: DryBoundaryProjection;
+      boundaryProjection?: Ref;
       outputAudienceDefault?: "self" | "broadcast";
     } & DryTriggeredRuntimeOptions);
 
-type DryNode<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
+type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
@@ -2278,9 +2315,9 @@ type DryNode<TActorMessage extends AnyActorMessage = DefaultActorMessage> = {
   tools?: Ref[];
   commands?: Ref[];
   state?: DryStateDescriptor | Ref;
-  members?: Array<DryNode<TActorMessage> | Ref>;
+  members?: Array<DryNode<TDataContent> | Ref>;
   output?: SerializedOutputConfig;
-  projection?: DryProjection;
+  projection?: Ref;
   runtime?: DryRuntime;
 };
 ```
@@ -2337,9 +2374,14 @@ State descriptors follow the same rule as nodes:
 Projection functions are executable values. Registered projection functions
 serialize by ref from both `projection` and `boundaryProjection` fields. Inline
 projection functions may execute in memory, but machine serialization must throw
-if one is encountered. Static `boundaryProjection` values serialize as
-`StaticBoundaryProjection`; hydration must reject static boundary projections
-that contain `instructions` or `tools`.
+if one is encountered. Default `node.projection` and default
+`runtime.boundaryProjection` serialize by omission.
+
+Projection refs resolve from the source node slot first, then from
+`charter.projections`. This lets an inline node keep compact projection refs
+when it was derived from a registered source node with local projection
+functions. Standard projection functions follow the same rule as every other
+projection function; they have no reserved refs.
 
 History projection functions follow the same executable-value rule. Registered
 history projection functions serialize by bare string ref. Inline history
@@ -2386,8 +2428,9 @@ Add focused tests for:
   node's children to project afterward.
 - Runtime projection boundaries: generator runtimes default
   `boundaryProjection` to hidden, hidden boundaries prevent descendant leakage,
-  static boundary projection only supports `mode`, and an explicit static
-  boundary projection exports the runtime's whole owned aggregate as compiled.
+  standard boundary projection exports the runtime's whole owned aggregate as
+  compiled, and custom projection functions can selectively transform that
+  aggregate.
 - State projection ownership: hoisted state contributed behind a runtime
   boundary projects from the nearest source instance without exporting the hidden
   runtime aggregate, while local state remains behind that boundary.
@@ -2396,13 +2439,12 @@ Add focused tests for:
   ownership anchor, hoisted state below each direct source instance is owned by
   that source instance, and hoisted state resolution throws when no source
   instance is available.
-- Projection functions: node and boundary projection functions receive
-  `(ctx, draft, source)`, can mutate the IR draft directly, can append dynamic
-  text parts from closure state, and can selectively export child runtime prompt
-  while filtering tools.
+- Projection functions: node projection receives `source.node`, boundary
+  projection receives `source.ir`, both use the same `(ctx, draft, source)`
+  signature, and functions can mutate the destination IR directly.
 - Member semantics: members are not serialized as durable children, reload uses
   current registered member definitions, member node keys produce deterministic
-  virtual runtime addresses, duplicate sibling member node keys throw, member
+  virtual projection addresses, duplicate sibling member node keys throw, member
   runtimes create work identities from those addresses, and member state or spawn
   operations resolve to the nearest concrete owner instance.
 - State descriptor resolution and conflicts: `hoist` state resolves to the
@@ -2417,11 +2459,10 @@ Add focused tests for:
   operations shallow-merge and validate the full result, and append operations
   append to arrays and validate the full result.
 - Command execution: `executeCommand` resolves and validates commands explicitly
-  at the app boundary, enqueues an accepted `CommandMessage` FYI frame, executes
-  the command once, enqueues returned actor and instance messages, does not
-  return command frames as a separate persistence path, returns structured errors
-  without requiring durable error frames, and `runMachine` ignores
-  `CommandMessage`s for execution and executor-visible history.
+  at the app boundary, enqueues an accepted command `ActionRequestMessage`,
+  executes the command once, enqueues an `ActionResultMessage` plus returned
+  output messages, does not return command frames as a separate persistence path,
+  and `runMachine` ignores command action messages for execution.
 - Durable instance mutation behavior: related mutations apply in
   `Frame.messages` order, `transition` preserves the target instance ID and
   durable children, `spawn` initializes child state from descriptors plus
@@ -2459,7 +2500,7 @@ Add focused tests for:
   nearest-ancestor rules apply to parent activation/completion triggers, a serial
   runtime's own assistant and tool frames derive no new activations for that
   runtime, a parallel activation's output derives no new activations for the
-  same runtime address, the first durable terminal completion wins, and removed
+  same projection address, the first durable terminal completion wins, and removed
   instances cancel open activations.
 - Concurrency and dispatch: serial generator runtimes expose only the
   earliest incomplete activation per concurrency key, parallel runtimes expose
@@ -2482,38 +2523,3 @@ Add focused tests for:
   machine-level sync metadata, optimistic overlays retire and rebase by residue,
   and typed command helpers are covered by compile-time type tests rather than
   runtime shape assertions.
-
-## Future Work
-
-- Discoverable tools: support tools that are not sent as provider-static tool
-  definitions and must be discovered through a catalog/search mechanism.
-- Polymorphic tool invocation: support a stable invoker tool that can dispatch
-  to hidden node tools by name or namespace.
-- Richer projection policies for commands if the model or client needs explicit
-  awareness of command availability.
-- State bindings: support per-attachment state options or projection overrides
-  when a descriptor's global defaults are not enough.
-- Additional generator history policies beyond runtime `historyProjection` if
-  generators need declarative scoped or summarized history instead of custom
-  projection functions.
-- User-input routing for multiple generators, including explicit
-  broadcast.
-- Opt-in state conflict handling beyond last-write-wins shallow merge patching.
-- Non-terminal blocked/retry work messages with deterministic wake conditions.
-- An explicit self-wake mechanism for runtimes that need to schedule their own
-  future activations. The self-trigger exclusion means self-addressed messages,
-  including `delivery: "queued"` ones, never create activations on their own.
-- Activation identity for multiple same-runtime trigger events within one source
-  frame. The first pass may treat activations as at most one per runtime,
-  trigger, and source frame, but a future design should add a per-trigger-event
-  semantic key if multiple actor/work messages in one frame need to create
-  distinct activations for the same runtime.
-- Optional host-side indexes or work-state caches for applications that do not
-  want to fold the full frame log.
-- Persisted runtime sync cursors for long-lived realtime executors. The first
-  LiveKit pass can keep this simple and drop old visible messages on reconnect,
-  but a future design should track which frame IDs have already been forwarded
-  to an external realtime session so reconnects can update instructions/tools
-  without replaying or losing unsent user input.
-- First-class distributed leases are out of scope for the core framework; if
-  needed later, design them as an optional layer over deterministic activations.

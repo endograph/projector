@@ -144,7 +144,7 @@ export type LiveKitCascadeExecutorConfig<TDataContent = never> = {
   agent?: LiveKitAgentLike;
   room?: LiveKitRoomLike;
   discreteExecutor: ProjectorExecutor<TDataContent>;
-  realtimeRuntimeInstanceId?: string;
+  realtimeGeneratorId?: string;
   messageToText?: (message: ActorMessage<TDataContent>) => string | undefined;
   realtime?: {
     enabled?: boolean | ((context: RuntimeSyncContext<TDataContent>) => boolean);

@@ -121,6 +121,7 @@ export function HomeClient({ initialSessionId }: { initialSessionId: Id<"session
         connectionError={connectionError}
         onConnectionErrorChange={setConnectionError}
         latestFrameId={latestFrameId}
+        currentContextEpoch={session?.contextEpoch ?? null}
         timeTravelFrameId={timeTravelFrameId}
         onTimeTravelFrameChange={setTimeTravelFrameId}
       />
@@ -141,6 +142,7 @@ function HomeClientContent({
   connectionError,
   onConnectionErrorChange,
   latestFrameId,
+  currentContextEpoch,
   timeTravelFrameId,
   onTimeTravelFrameChange,
 }: {
@@ -171,6 +173,7 @@ function HomeClientContent({
   connectionError: string | null;
   onConnectionErrorChange: (error: string | null) => void;
   latestFrameId: Id<"frames"> | null;
+  currentContextEpoch: number | null;
   timeTravelFrameId: Id<"frames"> | null;
   onTimeTravelFrameChange: (frameId: Id<"frames"> | null) => void;
 }) {
@@ -356,6 +359,7 @@ function HomeClientContent({
       onToggleDock={toggleAgentDock}
       onResetSession={handleReset}
       latestFrameId={latestFrameId}
+      currentContextEpoch={currentContextEpoch}
       timeTravelFrameId={timeTravelFrameId}
       onTimeTravelFrame={handleTimeTravelFrame}
       onReturnToLatest={handleReturnToLatest}

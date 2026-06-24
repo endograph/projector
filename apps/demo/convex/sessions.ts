@@ -15,22 +15,18 @@ import {
   applyInstanceMessage,
   compileProjection,
   createMachine,
-  executeCommand,
   inspectCompiledProjectionTree,
-  runMachine,
   type Charter,
   type CompiledInference,
-  type CompiledProjectionNode,
+  type CompiledContributor,
   type Executor,
   type ExecutorRealizedPrompt,
   type Frame,
   type FrameDraft,
-  type Generator,
   type InstanceMessage,
 } from "@projectors/core";
 import {
   recordCommandResidue,
-  type ClientMachineMessage,
   type MachineSyncState,
 } from "@projectors/core/client";
 import {
@@ -174,7 +170,6 @@ export const getRealizedPrompts = query({
         try {
           prompt = await state.executor.realizePrompt({
             generatorId: runtime.generatorId,
-            runtimeInstanceId: runtime.runtimeInstanceId,
             activationId: "",
             inference,
           });
@@ -198,8 +193,7 @@ export const getRealizedPrompts = query({
 
 type RuntimeInspectionTarget = {
   generatorId: string;
-  runtimeInstanceId: string;
-  kind: Generator["kind"];
+  kind: "generator";
   nodeKey: string;
   name?: string;
 };
@@ -243,13 +237,12 @@ async function getObservabilityState(
 }
 
 function collectRuntimeInspectionTargets(
-  nodes: CompiledProjectionNode[],
+  nodes: CompiledContributor[],
 ): RuntimeInspectionTarget[] {
   const targets: RuntimeInspectionTarget[] = [];
-  const visit = (node: CompiledProjectionNode) => {
+  const visit = (node: CompiledContributor) => {
     targets.push({
-      generatorId: node.runtimeInstanceId,
-      runtimeInstanceId: node.runtimeInstanceId,
+      generatorId: node.id,
       kind: node.kind,
       nodeKey: node.nodeKey,
       ...(node.name ? { name: node.name } : {}),
@@ -266,11 +259,7 @@ function compileRuntimeInference(
 ): CompiledInference {
   return compileProjection(state.root, {
     charter: state.charter,
-    targetGenerator: {
-      id: runtime.generatorId,
-      kind: runtime.kind,
-      runtimeInstanceId: runtime.runtimeInstanceId,
-    },
+    targetGeneratorId: runtime.generatorId,
     frameHistory: state.frames,
   });
 }
@@ -303,60 +292,6 @@ function modelRef(modelId: string): never {
     modelId,
   } as never;
 }
-
-export const applyClientMessage = mutation({
-  args: {
-    sessionId: v.id("sessions"),
-    message: v.any(),
-  },
-  handler: async (ctx, { sessionId, message }) => {
-    const { session, latestFrame, instance } = await getCurrentSessionState(ctx, sessionId);
-    const syncState = restoreConvexJson(
-      session.syncState ?? { recentCommandResidue: [] },
-    ) as MachineSyncState;
-    const root = hydrateDemoInstance(instance);
-    const frames = await getMachineContextFrames(ctx, session);
-    const machine = createMachine({
-      id: sessionId,
-      root,
-      charter: createDemoCharter(),
-      frames,
-    });
-    const result = await executeCommand(machine, message as ClientMachineMessage);
-
-    if (!result.success) {
-      return {
-        success: false,
-        error: result.error,
-        clientId: (message as ClientMachineMessage).clientId,
-      };
-    }
-
-    const producedFrames: Frame[] = [];
-    for await (const frame of runMachine(machine, { scheduleWork: false })) {
-      producedFrames.push(frame);
-    }
-
-    const frameIds = await appendMachineFrameSequenceInternal(ctx, {
-      sessionId,
-      session,
-      referenceFrameId: latestFrame._id,
-      frames: producedFrames,
-    });
-    await persistClientCommandAssistantMessages(ctx, {
-      sessionId,
-      message: message as ClientMachineMessage,
-      frames: producedFrames,
-      frameIds,
-    });
-    const nextSyncState = recordCommandResidue(syncState, result.clientId, { limit: 20 });
-    await ctx.db.patch(sessionId, {
-      syncState: escapeConvexJson(nextSyncState),
-    });
-
-    return { success: true, clientId: result.clientId };
-  },
-});
 
 export const getFamilyTimeline = query({
   args: { sessionId: v.id("sessions") },
@@ -407,6 +342,29 @@ export const listMachineContextFrames = query({
     const session = await ctx.db.get(sessionId);
     if (!session) return [];
     return await getMachineContextFrames(ctx, session);
+  },
+});
+
+export const incrementContextEpoch = mutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) => {
+    const session = await getSessionOrThrow(ctx, sessionId);
+    const nextEpoch = session.contextEpoch + 1;
+    await ctx.db.patch(sessionId, { contextEpoch: nextEpoch });
+    const workerRoom = await ctx.db
+      .query("agentWorkerRooms")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .first();
+    if (workerRoom) {
+      await ctx.db.patch(workerRoom._id, {
+        agentWorkerId: undefined,
+        agentWorkerLeaseToken: undefined,
+        agentWorkerLeaseExpiresAt: 0,
+        agentWorkerHeartbeatAt: Date.now(),
+        agentLastStatusAt: Date.now(),
+      });
+    }
+    return { contextEpoch: nextEpoch };
   },
 });
 
@@ -520,19 +478,6 @@ async function getSessionOrThrow(ctx: MutationCtx, sessionId: Id<"sessions">) {
   return session;
 }
 
-async function getCurrentSessionState(ctx: MutationCtx, sessionId: Id<"sessions">) {
-  const session = await getSessionOrThrow(ctx, sessionId);
-  const latestFrame = await getLatestSessionFrameDoc(ctx, sessionId);
-  if (!latestFrame) {
-    throw new Error("Session has no frames");
-  }
-  const instance = await getInstanceForFramePath(ctx, session, latestFrame._id);
-  if (!instance) {
-    throw new Error("Session has no instance log");
-  }
-  return { session, latestFrame, instance };
-}
-
 async function appendMachineFrameInternal(
   ctx: MutationCtx,
   {
@@ -559,7 +504,6 @@ async function appendMachineFrameInternal(
   const frameId = await ctx.db.insert("frames", {
     referenceFrameId: effectiveReferenceFrameId,
     ...(frame.generatorId !== undefined ? { generatorId: frame.generatorId } : {}),
-    ...(frame.runtimeInstanceId !== undefined ? { runtimeInstanceId: frame.runtimeInstanceId } : {}),
     ...(frame.activationId !== undefined ? { activationId: frame.activationId } : {}),
     ...(frame.inert !== undefined ? { inert: frame.inert } : {}),
     ...(metadata !== undefined ? { metadata: escapeConvexJson(metadata) } : {}),
@@ -572,7 +516,40 @@ async function appendMachineFrameInternal(
     contextEpoch: session.contextEpoch,
   });
   await applyFrameInstanceMessages(ctx, sessionId, frameId, frame.messages);
+  await recordFrameCommandResidue(ctx, sessionId, frame.messages);
   return frameId;
+}
+
+async function recordFrameCommandResidue(
+  ctx: MutationCtx,
+  sessionId: Id<"sessions">,
+  messages: readonly FrameDraft["messages"][number][],
+): Promise<void> {
+  const callIds = messages
+    .filter(
+      (message) =>
+        message.type === "action" &&
+        message.kind === "result" &&
+        message.action === "command" &&
+        typeof message.callId === "string" &&
+        message.callId.length > 0,
+    )
+    .map((message) => message.callId as string);
+  if (callIds.length === 0) return;
+
+  const session = await ctx.db.get(sessionId);
+  if (!session) return;
+
+  const syncState = restoreConvexJson(
+    session.syncState ?? { recentCommandResidue: [] },
+  ) as MachineSyncState;
+  const nextSyncState = callIds.reduce(
+    (state, callId) => recordCommandResidue(state, callId, { limit: 20 }),
+    syncState,
+  );
+  await ctx.db.patch(sessionId, {
+    syncState: escapeConvexJson(nextSyncState),
+  });
 }
 
 async function appendMachineFrameSequenceInternal(
@@ -604,59 +581,6 @@ async function appendMachineFrameSequenceInternal(
   }
 
   return frameIds;
-}
-
-async function persistClientCommandAssistantMessages(
-  ctx: MutationCtx,
-  {
-    sessionId,
-    message,
-    frames,
-    frameIds,
-  }: {
-    sessionId: Id<"sessions">;
-    message: ClientMachineMessage;
-    frames: Frame[];
-    frameIds: Id<"frames">[];
-  },
-): Promise<void> {
-  for (const [frameIndex, frame] of frames.entries()) {
-    const frameId = frameIds[frameIndex];
-    if (!frameId) continue;
-
-    for (const [messageIndex, frameMessage] of frame.messages.entries()) {
-      if (frameMessage.type !== "assistant") continue;
-      const text = typeof frameMessage.text === "string" ? frameMessage.text.trim() : "";
-      if (!text) continue;
-
-      const idempotencyKey = message.clientId
-        ? `command:${message.clientId}:assistant:${frameIndex}:${messageIndex}`
-        : undefined;
-      if (idempotencyKey) {
-        const existing = await ctx.db
-          .query("messageIndex")
-          .withIndex("by_session_idempotency_key", (q) =>
-            q.eq("sessionId", sessionId).eq("idempotencyKey", idempotencyKey),
-          )
-          .first();
-        if (existing) continue;
-      }
-
-      const messageId = await ctx.db.insert("messages", {
-        role: "assistant",
-        content: text,
-        frameId,
-        mode: "text",
-        idempotencyKey,
-        createdAt: Date.now(),
-      });
-      await ctx.db.insert("messageIndex", {
-        sessionId,
-        messageId,
-        idempotencyKey,
-      });
-    }
-  }
 }
 
 async function applyFrameInstanceMessages(

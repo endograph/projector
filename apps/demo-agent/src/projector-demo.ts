@@ -1,8 +1,10 @@
 import { z } from "zod";
 import {
-  ROOT_RUNTIME_INSTANCE_ID,
+  ROOT_GENERATOR_ID,
+  actionResult,
   appendState,
-  applyStaticProjection,
+  applyStandardProjection,
+  createStandardProjectionFunction,
   createAction,
   createCharter,
   createHistoryProjectionFunction,
@@ -15,6 +17,7 @@ import {
   imageContent,
   messagesBeforeLastCompletion,
   messagesSinceLastCompletion,
+  replaceProjection,
   patchState,
   resolveStates,
   serializeInstance,
@@ -23,7 +26,7 @@ import {
   type CompiledProjectionTree,
   type Charter,
   type Executor,
-  type Generator,
+  type GeneratorId,
   type Instance,
   type SerializedInstance,
 } from "@projectors/core";
@@ -130,10 +133,24 @@ export const setVoiceEnabled = createAction({
   },
 });
 
+export const enableLiveMode = createAction({
+  state: agentControlsState,
+  name: "enableLiveMode",
+  description: "Enable live voice mode for the demo session.",
+  inputSchema: z.object({}),
+  run: (_input, ctx) => {
+    const state = agentControlsStateSchema.parse(ctx.state);
+    if (!state.liveMode) {
+      ctx.updateState?.(patchState({ liveMode: true }));
+    }
+    return state.liveMode ? "Live mode is already enabled." : "Live mode enabled.";
+  },
+});
+
 export const projectCameraSensorData = createProjectionFunction({
   name: "projectCameraSensorData",
-  method: (_ctx, draft, source) => {
-    applyStaticProjection(draft, source, {
+  method: (ctx, draft, source) => {
+    applyStandardProjection(ctx, draft, source, {
       mode: "augment",
       instructions: "dynamic",
       tools: "hidden",
@@ -181,6 +198,22 @@ export const setCameraEnabled = createAction({
   },
 });
 
+export const enableCamera = createAction({
+  state: agentControlsState,
+  name: "enableCamera",
+  description: "Enable camera sampling for the demo session.",
+  inputSchema: z.object({}),
+  run: (_input, ctx) => {
+    const state = agentControlsStateSchema.parse(ctx.state);
+    if (!state.cameraEnabled) {
+      ctx.updateState?.(patchState({ cameraEnabled: true }));
+    }
+    ctx.instance.cede(cameraSensorNode);
+    ctx.instance.spawn(cameraSensorNode);
+    return state.cameraEnabled ? "Camera is already enabled." : "Camera enabled.";
+  },
+});
+
 export const setMemoryEnabled = createAction({
   state: agentControlsState,
   name: "setMemoryEnabled",
@@ -215,9 +248,12 @@ export const incrementTestCounter = createAction({
   name: "incrementTestCounter",
   description: "Increment the agent controls test counter.",
   inputSchema: z.object({ amount: z.number().default(1) }),
-  run: ({ amount }, ctx) => {
-    const state = agentControlsStateSchema.parse(ctx.state);
-    ctx.updateState?.(patchState({ testCounter: state.testCounter + amount }));
+  run: async ({ amount }, ctx) => {
+    await delay(3000);
+    ctx.updateState?.((current) => {
+      const state = agentControlsStateSchema.parse(current);
+      return patchState({ testCounter: state.testCounter + amount });
+    });
   },
 });
 
@@ -244,7 +280,10 @@ export const pingCommand = createAction({
   name: "ping",
   description: "Respond with pong.",
   inputSchema: z.object({}),
-  run: () => pongAssistantMessage(),
+  run: (): unknown => {
+    const message = pongAssistantMessage();
+    return actionResult({ value: message, messages: [message] });
+  },
 });
 
 export const saveMemories = createAction({
@@ -314,7 +353,7 @@ export const memoryMemberNode = createNode({
     "Maintain durable user memories. Save only concise, stable, generally useful user facts. Do not create a memory for every message.",
   state: memoriesState,
   tools: [saveMemories],
-  projection: { mode: "replace" },
+  projection: replaceProjection,
   runtime: {
     type: "generator",
     trigger: { type: "parent-completion" },
@@ -331,6 +370,7 @@ export const agentControlsMemberNode = createNode({
   instructions:
     "Expose client commands for voice, camera, streaming, memory, and test controls.",
   state: agentControlsState,
+  tools: [enableLiveMode, enableCamera],
   commands: [
     setVoiceEnabled,
     setCameraEnabled,
@@ -338,23 +378,22 @@ export const agentControlsMemberNode = createNode({
     setStreamingEnabled,
     incrementTestCounter,
   ],
-  projection: { instructions: "hidden", tools: "hidden" },
+  projection: createStandardProjectionFunction({
+    name: "agentControlsProjection",
+    instructions: "hidden",
+    tools: "provider-static",
+  }),
 });
 
 export const demoBaseNode = createNode({
   key: "demoBase",
   name: "Projector Demo Agent",
   instructions:
-    "You are a compact demo assistant. Be direct, remember small facts, and explain what changed in state.",
+    "You are a friendly conversation buddy. Be natural, concise, and curious. Do not volunteer internal state, tools, framework details, or state changes during ordinary conversation. If the user asks about your internals, capabilities, memory, tools, state, or how you work, answer directly and transparently with the information available to you.",
   state: demoState,
   tools: [pingTool],
   commands: [pingCommand, setThemeHue],
   members: [agentControlsMemberNode],
-  projection: {
-    mode: "augment",
-    instructions: "system",
-    tools: "provider-static",
-  },
 });
 
 const executor: Executor = {
@@ -378,7 +417,7 @@ export function createDemoCharter(
       agentControlsMemberNode,
       cameraSensorNode,
     ],
-    tools: [pingTool, saveMemories],
+    tools: [pingTool, saveMemories, enableLiveMode, enableCamera],
     commands: [
       pingCommand,
       setVoiceEnabled,
@@ -449,13 +488,8 @@ export function serializeDemoInstance(instance: Instance): SerializedInstance {
   return serializeDemoSourceInstance(source);
 }
 
-export function getDemoRootGenerator(_instance: Instance): Generator {
-  const runtimeInstanceId = ROOT_RUNTIME_INSTANCE_ID;
-  return {
-    id: runtimeInstanceId,
-    kind: "generator",
-    runtimeInstanceId,
-  };
+export function getDemoRootGenerator(_instance: Instance): GeneratorId {
+  return ROOT_GENERATOR_ID;
 }
 
 export function createDemoClientSnapshot(
@@ -622,7 +656,7 @@ function renderCameraSensorImage(image: CameraSensorImage): string {
 }
 
 function renderActorMessages(
-  messages: Array<{
+  messages: Array<Record<string, unknown> & {
     type: string;
     text?: string;
     name?: string;
@@ -637,8 +671,8 @@ function renderActorMessages(
       if (message.type === "user") return `User: ${message.text ?? ""}`;
       if (message.type === "assistant")
         return `Assistant: ${message.text ?? ""}`;
-      if (message.type === "tool")
-        return `Tool ${message.name ?? "unknown"}: ${message.text ?? stringifyValue(message.value)}`;
+      if (message.type === "action")
+        return `Action ${message.action ?? "unknown"} ${message.kind ?? "message"} ${message.name ?? "unknown"}: ${stringifyValue(message.value ?? message.error ?? message.input)}`;
       return `${message.type}: ${stringifyValue(message)}`;
     })
     .join("\n");
@@ -652,4 +686,8 @@ function stringifyValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

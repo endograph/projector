@@ -6,23 +6,21 @@ import {
   GET_STATE_ACTION_NAME,
 } from "./actions.ts";
 import {
-  normalizeStaticBoundaryProjection,
-  normalizeStaticProjection,
-} from "./create.ts";
-import {
-  collectProjectionNodes,
+  collectContributors,
   createRoot,
-  directProjectionNodeChildren,
-  findProjectionNodeByRuntimeId,
+  directContributorChildren,
+  findContributorById,
   hoistStateInstance,
-  type ProjectionNode,
-} from "./projection-nodes.ts";
+  type Contributor,
+} from "./contributors.ts";
 import { actorMessages, messages } from "./history.ts";
 import {
+  addProjectionStatePart,
+  emptyProjectionIR,
   isHistoryProjectionFunction,
   isProjectionFunction,
 } from "./projection-functions.ts";
-import { encodeRuntimeAddress } from "./runtime-address.ts";
+import { encodeProjectionAddress } from "./projection-address.ts";
 import { resolveFrameCommands, resolveFrameTools } from "./scoped-actions.ts";
 import { resolveStates, type ResolvedState } from "./state.ts";
 import {
@@ -37,13 +35,12 @@ import type {
   ActivationHistory,
   ActorHistoryProjection,
   Audience,
-  BoundaryProjection,
   Charter,
   CompiledInference,
   ContentPart,
   Frame,
   FrameMessage,
-  Generator,
+  GeneratorId,
   HistoryProjection,
   HistoryProjectionContext,
   HistoryProjectionFunction,
@@ -51,27 +48,24 @@ import type {
   MessageHistoryProjection,
   Projection,
   ProjectionContext,
-  ProjectionDraft,
   ProjectionFunction,
+  ProjectionIR,
   ProjectionPart,
   ProjectionSource,
   ProjectionStatePart,
-  ProjectionTextPart,
   RetrievableState,
-  RuntimeAddress,
+  ProjectionAddress,
   RuntimeConcurrency,
   RuntimeTrigger,
   StateAddress,
   StateProjection,
-  StaticBoundaryProjection,
-  StaticProjection,
   GeneratorRuntime,
 } from "./types.ts";
 
 export type CompileProjectionOptions<
   TDataContent = never,
 > = {
-  targetGenerator?: Generator;
+  targetGeneratorId?: GeneratorId;
   history?: FrameMessage<TDataContent>[];
   frameHistory?: Frame<TDataContent>[];
   activationId?: string;
@@ -79,11 +73,17 @@ export type CompileProjectionOptions<
 };
 
 export type CompiledProjectionTree<TDataContent = never> = {
-  roots: CompiledProjectionNode<TDataContent>[];
+  roots: CompiledContributor<TDataContent>[];
 };
 
 export type CompiledProjectionPolicy =
-  | Required<StaticProjection>
+  | {
+      type: "standard";
+      name: string;
+      mode: "hidden" | "augment" | "replace";
+      instructions: "system" | "dynamic" | "hidden";
+      tools: "provider-static" | "hidden";
+    }
   | {
       type: "function";
       name: string;
@@ -99,27 +99,13 @@ export type CompiledProjectionPolicy =
       tools: "ref";
     };
 
-export type CompiledBoundaryProjectionPolicy =
-  | Required<StaticBoundaryProjection>
-  | {
-      type: "function";
-      name: string;
-      mode: "function";
-    }
-  | {
-      type: "ref";
-      ref: string;
-      mode: "ref";
-    };
-
-export type CompiledProjectionNode<TDataContent = never> = {
+export type CompiledContributor<TDataContent = never> = {
   id: string;
   kind: "generator";
-  runtimeInstanceId: string;
   nodeKey: string;
   name?: string;
-  address: RuntimeAddress;
-  parentRuntimeInstanceId?: string;
+  address: ProjectionAddress;
+  parentId?: GeneratorId;
   runtime: {
     type: "generator";
     trigger: RuntimeTrigger;
@@ -129,7 +115,7 @@ export type CompiledProjectionNode<TDataContent = never> = {
   output?: OutputMeta;
   projection: {
     own: CompiledProjectionPolicy;
-    boundary: CompiledBoundaryProjectionPolicy;
+    boundary: CompiledProjectionPolicy;
   };
   compiled: {
     systemParts: ContentPart<TDataContent>[];
@@ -137,16 +123,16 @@ export type CompiledProjectionNode<TDataContent = never> = {
     tools: ActionMeta[];
     retrievableStates: RetrievableState[];
   };
-  projectionNodes: CompiledProjectionNodeView[];
-  children: CompiledProjectionNode<TDataContent>[];
+  contributors: CompiledContributorView[];
+  children: CompiledContributor<TDataContent>[];
 };
 
-export type CompiledProjectionNodeView = {
-  runtimeInstanceId: string;
+export type CompiledContributorView = {
+  id: string;
   nodeKey: string;
   name?: string;
   kind: "instance" | "member";
-  address: RuntimeAddress;
+  address: ProjectionAddress;
   projection: CompiledProjectionPolicy;
   states: Array<{
     key: string;
@@ -179,26 +165,26 @@ export function compileProjection<TDataContent = never>(
   assertActivationCompileOptions(options);
   const root = Array.isArray(rootOrInstances) ? createRoot(rootOrInstances) : rootOrInstances;
   const states = resolveStates(root);
-  const stateByProjectionNode = groupStatesByProjectionNode(states);
-  const draft = emptyProjectionDraft<TDataContent>();
-  const targetProjectionNode = options.targetGenerator
-    ? findProjectionNodeByRuntimeId(root, options.targetGenerator.runtimeInstanceId)
+  const stateByContributor = groupStatesByContributor(states);
+  const draft = emptyProjectionIR<TDataContent>();
+  const targetContributor = options.targetGeneratorId
+    ? findContributorById(root, options.targetGeneratorId)
     : undefined;
-  if (targetProjectionNode && isRuntimeBoundary(targetProjectionNode)) {
+  if (targetContributor && isGeneratorBoundary(targetContributor)) {
     return finalizeSections(
-      compileTargetGeneratorProjection(targetProjectionNode, options, stateByProjectionNode),
+      compileTargetGeneratorProjection(targetContributor, options, stateByContributor),
       compileHistory(root, options, states),
     );
   }
 
-  const rootProjectionNode = directRootProjectionNode(root);
-  if (isRuntimeBoundary(rootProjectionNode)) {
+  const rootContributor = directRootContributor(root);
+  if (isGeneratorBoundary(rootContributor)) {
     return finalizeSections(
-      compileBoundaryGeneratorProjection(rootProjectionNode, options, stateByProjectionNode),
+      compileBoundaryGeneratorProjection(rootContributor, options, stateByContributor),
       compileHistory(root, options, states),
     );
   }
-  visitProjectionNode(draft, rootProjectionNode, options, stateByProjectionNode);
+  visitContributor(draft, rootContributor, options, stateByContributor);
 
   return finalizeSections(draft, compileHistory(root, options, states));
 }
@@ -207,8 +193,8 @@ function assertActivationCompileOptions(options: CompileProjectionOptions<any>):
   if (options.activationId === undefined) {
     return;
   }
-  if (!options.targetGenerator) {
-    throw new Error("compileProjection activationId requires targetGenerator");
+  if (!options.targetGeneratorId) {
+    throw new Error("compileProjection activationId requires targetGeneratorId");
   }
   if (!options.frameHistory) {
     throw new Error("compileProjection activationId requires frameHistory");
@@ -217,155 +203,151 @@ function assertActivationCompileOptions(options: CompileProjectionOptions<any>):
 
 export function inspectCompiledProjectionTree<TDataContent = never>(
   rootOrInstances: Instance<TDataContent> | Instance<TDataContent>[],
-  options: Omit<CompileProjectionOptions<TDataContent>, "targetGenerator"> = {},
+  options: Omit<CompileProjectionOptions<TDataContent>, "targetGeneratorId"> = {},
 ): CompiledProjectionTree<TDataContent> {
   const root = Array.isArray(rootOrInstances) ? createRoot(rootOrInstances) : rootOrInstances;
   const states = resolveStates(root);
-  const stateByProjectionNode = groupStatesByProjectionNode(states);
-  const rootProjectionNode = directRootProjectionNode(root);
+  const stateByContributor = groupStatesByContributor(states);
+  const rootContributor = directRootContributor(root);
 
   return {
-    roots: isRuntimeBoundary(rootProjectionNode)
-      ? [createCompiledProjectionNode(root, rootProjectionNode, undefined, options, stateByProjectionNode)]
-      : collectCompiledProjectionChildren(root, rootProjectionNode, undefined, options, stateByProjectionNode),
+    roots: isGeneratorBoundary(rootContributor)
+      ? [createCompiledContributor(root, rootContributor, undefined, options, stateByContributor)]
+      : collectCompiledContributorChildren(root, rootContributor, undefined, options, stateByContributor),
   };
 }
 
-function visitProjectionNode<TDataContent>(
-  draft: ProjectionDraft<TDataContent>,
-  projectionNode: ProjectionNode<TDataContent>,
+function visitContributor<TDataContent>(
+  draft: ProjectionIR<TDataContent>,
+  contributor: Contributor<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
+  stateByContributor: Map<string, ResolvedState[]>,
 ): void {
-  if (isRuntimeBoundary(projectionNode) && !belongsToGenerator(projectionNode, options.targetGenerator)) {
-    const exported = compileBoundaryGeneratorProjection(projectionNode, options, stateByProjectionNode);
-    const runtime = projectionNode.node.runtime as GeneratorRuntime<TDataContent>;
-    applyBoundaryProjection(
+  if (isGeneratorBoundary(contributor) && !belongsToGenerator(contributor, options.targetGeneratorId)) {
+    const exported = compileBoundaryGeneratorProjection(contributor, options, stateByContributor);
+    const runtime = contributor.node.runtime as GeneratorRuntime<TDataContent>;
+    applyProjection(
       draft,
-      readonlyProjectionSource(exported),
+      { ir: readonlyProjectionIR(exported) },
       runtime.boundaryProjection,
-      projectionContext(projectionNode, "boundary", options.targetGenerator),
+      projectionContext(contributor, "boundary", options.targetGeneratorId, options, stateByContributor),
       options.charter,
+      "boundaryProjection",
     );
     return;
   }
 
   applyProjection(
     draft,
-    compileNodeProjectionSource(projectionNode, options, stateByProjectionNode),
-    projectionNode.node.projection,
-    projectionContext(projectionNode, "node", options.targetGenerator),
+    { node: contributor.node },
+    contributor.node.projection,
+    projectionContext(contributor, "node", options.targetGeneratorId, options, stateByContributor),
     options.charter,
+    "projection",
   );
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    visitProjectionNode(draft, child, options, stateByProjectionNode);
+  for (const child of directContributorChildren(contributor)) {
+    visitContributor(draft, child, options, stateByContributor);
   }
 }
 
 function compileTargetGeneratorProjection<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): ProjectionDraft<TDataContent> {
-  if (!options.targetGenerator) {
-    throw new Error("compileTargetGeneratorProjection requires targetGenerator");
+  stateByContributor: Map<string, ResolvedState[]>,
+): ProjectionIR<TDataContent> {
+  if (!options.targetGeneratorId) {
+    throw new Error("compileTargetGeneratorProjection requires targetGeneratorId");
   }
-  return compileOwnedGeneratorProjection(projectionNode, {
+  return compileOwnedGeneratorProjection(contributor, {
     ...options,
-    targetGenerator: options.targetGenerator,
-  }, stateByProjectionNode);
+    targetGeneratorId: options.targetGeneratorId,
+  }, stateByContributor);
 }
 
 function compileBoundaryGeneratorProjection<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): ProjectionDraft<TDataContent> {
-  return compileOwnedGeneratorProjection(projectionNode, {
+  stateByContributor: Map<string, ResolvedState[]>,
+): ProjectionIR<TDataContent> {
+  return compileOwnedGeneratorProjection(contributor, {
     ...options,
-    targetGenerator: generatorForProjectionNode(projectionNode),
-  }, stateByProjectionNode);
+    targetGeneratorId: contributor.id,
+  }, stateByContributor);
 }
 
 function compileOwnedGeneratorProjection<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
-  options: CompileProjectionOptions<TDataContent> & { targetGenerator: Generator },
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): ProjectionDraft<TDataContent> {
-  const draft = emptyProjectionDraft<TDataContent>();
+  contributor: Contributor<TDataContent>,
+  options: CompileProjectionOptions<TDataContent> & { targetGeneratorId: GeneratorId },
+  stateByContributor: Map<string, ResolvedState[]>,
+): ProjectionIR<TDataContent> {
+  const draft = emptyProjectionIR<TDataContent>();
 
   applyProjection(
     draft,
-    compileNodeProjectionSource(projectionNode, options, stateByProjectionNode),
-    projectionNode.node.projection,
-    projectionContext(projectionNode, "node", options.targetGenerator),
+    { node: contributor.node },
+    contributor.node.projection,
+    projectionContext(contributor, "node", options.targetGeneratorId, options, stateByContributor),
     options.charter,
+    "projection",
   );
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    visitProjectionNode(draft, child, options, stateByProjectionNode);
+  for (const child of directContributorChildren(contributor)) {
+    visitContributor(draft, child, options, stateByContributor);
   }
   return draft;
 }
 
-function collectCompiledProjectionChildren<TDataContent>(
+function collectCompiledContributorChildren<TDataContent>(
   root: Instance<TDataContent>,
-  projectionNode: ProjectionNode<TDataContent>,
-  parentRuntimeInstanceId: string | undefined,
-  options: Omit<CompileProjectionOptions<TDataContent>, "targetGenerator">,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): CompiledProjectionNode<TDataContent>[] {
-  const nodes: CompiledProjectionNode<TDataContent>[] = [];
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    if (isRuntimeBoundary(child)) {
-      nodes.push(createCompiledProjectionNode(root, child, parentRuntimeInstanceId, options, stateByProjectionNode));
+  contributor: Contributor<TDataContent>,
+  parentId: string | undefined,
+  options: Omit<CompileProjectionOptions<TDataContent>, "targetGeneratorId">,
+  stateByContributor: Map<string, ResolvedState[]>,
+): CompiledContributor<TDataContent>[] {
+  const contributors: CompiledContributor<TDataContent>[] = [];
+  for (const child of directContributorChildren(contributor)) {
+    if (isGeneratorBoundary(child)) {
+      contributors.push(createCompiledContributor(root, child, parentId, options, stateByContributor));
     } else {
-      nodes.push(...collectCompiledProjectionChildren(root, child, parentRuntimeInstanceId, options, stateByProjectionNode));
+      contributors.push(...collectCompiledContributorChildren(root, child, parentId, options, stateByContributor));
     }
   }
-  return nodes;
+  return contributors;
 }
 
-function createCompiledProjectionNode<TDataContent>(
+function createCompiledContributor<TDataContent>(
   root: Instance<TDataContent>,
-  projectionNode: ProjectionNode<TDataContent>,
-  parentRuntimeInstanceId: string | undefined,
-  options: Omit<CompileProjectionOptions<TDataContent>, "targetGenerator">,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): CompiledProjectionNode<TDataContent> {
-  const runtime = projectionNode.node.runtime as GeneratorRuntime<TDataContent>;
-  const kind = "generator";
-  const targetGenerator = {
-    id: projectionNode.runtimeInstanceId,
-    kind,
-    runtimeInstanceId: projectionNode.runtimeInstanceId,
-  } satisfies Generator;
+  contributor: Contributor<TDataContent>,
+  parentId: string | undefined,
+  options: Omit<CompileProjectionOptions<TDataContent>, "targetGeneratorId">,
+  stateByContributor: Map<string, ResolvedState[]>,
+): CompiledContributor<TDataContent> {
+  const runtime = contributor.node.runtime as GeneratorRuntime<TDataContent>;
   const compileOptions = {
     ...options,
-    targetGenerator,
+    targetGeneratorId: contributor.id,
   };
   const compiled = finalizeSections(
-    compileBoundaryGeneratorProjection(projectionNode, compileOptions, stateByProjectionNode),
-    compileHistory(root, compileOptions, statesFromStateByProjectionNode(stateByProjectionNode)),
+    compileBoundaryGeneratorProjection(contributor, compileOptions, stateByContributor),
+    compileHistory(root, compileOptions, statesFromStateByContributor(stateByContributor)),
   );
 
   return {
-    id: projectionNode.runtimeInstanceId,
-    kind,
-    runtimeInstanceId: projectionNode.runtimeInstanceId,
-    nodeKey: projectionNode.node.key,
-    name: projectionNode.node.name,
-    address: projectionNode.address,
-    parentRuntimeInstanceId,
+    id: contributor.id,
+    kind: "generator",
+    nodeKey: contributor.node.key,
+    name: contributor.node.name,
+    address: contributor.address,
+    parentId,
     runtime: {
       type: runtime.type,
       trigger: runtime.trigger,
       concurrency: runtime.concurrency ?? "serial",
       activationHistory: runtime.activationHistory ?? "live",
     },
-    output: outputMeta(projectionNode.node.output),
+    output: outputMeta(contributor.node.output),
     projection: {
-      own: inspectProjectionPolicy(projectionNode.node.projection),
-      boundary: inspectBoundaryProjectionPolicy(runtime.boundaryProjection),
+      own: inspectProjectionPolicy(contributor.node.projection),
+      boundary: inspectProjectionPolicy(runtime.boundaryProjection),
     },
     compiled: {
       systemParts: compiled.systemParts,
@@ -373,69 +355,69 @@ function createCompiledProjectionNode<TDataContent>(
       tools: compiled.tools.map(actionMeta),
       retrievableStates: compiled.retrievableStates,
     },
-    projectionNodes: collectOwnedProjectionNodes(projectionNode, options, stateByProjectionNode),
-    children: collectCompiledProjectionChildren(
+    contributors: collectOwnedContributors(contributor, options, stateByContributor),
+    children: collectCompiledContributorChildren(
       root,
-      projectionNode,
-      projectionNode.runtimeInstanceId,
+      contributor,
+      contributor.id,
       options,
-      stateByProjectionNode,
+      stateByContributor,
     ),
   };
 }
 
-function collectOwnedProjectionNodes(
-  projectionNode: ProjectionNode<any>,
-  options: Omit<CompileProjectionOptions<any>, "targetGenerator">,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): CompiledProjectionNodeView[] {
-  const views: CompiledProjectionNodeView[] = [projectionNodeView(projectionNode, options, stateByProjectionNode)];
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    if (isRuntimeBoundary(child)) {
+function collectOwnedContributors(
+  contributor: Contributor<any>,
+  options: Omit<CompileProjectionOptions<any>, "targetGeneratorId">,
+  stateByContributor: Map<string, ResolvedState[]>,
+): CompiledContributorView[] {
+  const views: CompiledContributorView[] = [contributorView(contributor, options, stateByContributor)];
+  for (const child of directContributorChildren(contributor)) {
+    if (isGeneratorBoundary(child)) {
       continue;
     }
-    views.push(projectionNodeView(child, options, stateByProjectionNode));
-    views.push(...collectOwnedProjectionDescendantNodes(child, options, stateByProjectionNode));
+    views.push(contributorView(child, options, stateByContributor));
+    views.push(...collectOwnedContributorDescendants(child, options, stateByContributor));
   }
   return views;
 }
 
-function collectOwnedProjectionDescendantNodes(
-  projectionNode: ProjectionNode<any>,
-  options: Omit<CompileProjectionOptions<any>, "targetGenerator">,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): CompiledProjectionNodeView[] {
-  const views: CompiledProjectionNodeView[] = [];
-  for (const child of directProjectionNodeChildren(projectionNode)) {
-    if (isRuntimeBoundary(child)) {
+function collectOwnedContributorDescendants(
+  contributor: Contributor<any>,
+  options: Omit<CompileProjectionOptions<any>, "targetGeneratorId">,
+  stateByContributor: Map<string, ResolvedState[]>,
+): CompiledContributorView[] {
+  const views: CompiledContributorView[] = [];
+  for (const child of directContributorChildren(contributor)) {
+    if (isGeneratorBoundary(child)) {
       continue;
     }
-    views.push(projectionNodeView(child, options, stateByProjectionNode));
-    views.push(...collectOwnedProjectionDescendantNodes(child, options, stateByProjectionNode));
+    views.push(contributorView(child, options, stateByContributor));
+    views.push(...collectOwnedContributorDescendants(child, options, stateByContributor));
   }
   return views;
 }
 
-function projectionNodeView(
-  projectionNode: ProjectionNode<any>,
-  options: Omit<CompileProjectionOptions<any>, "targetGenerator">,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): CompiledProjectionNodeView {
+function contributorView(
+  contributor: Contributor<any>,
+  options: Omit<CompileProjectionOptions<any>, "targetGeneratorId">,
+  stateByContributor: Map<string, ResolvedState[]>,
+): CompiledContributorView {
   return {
-    runtimeInstanceId: projectionNode.runtimeInstanceId,
-    nodeKey: projectionNode.node.key,
-    name: projectionNode.node.name,
-    kind: projectionNode.isMember ? "member" : "instance",
-    address: projectionNode.address,
-    projection: inspectProjectionPolicy(projectionNode.node.projection),
-    states: (stateByProjectionNode.get(projectionNode.runtimeInstanceId) ?? []).map((state) => ({
+    id: contributor.id,
+    nodeKey: contributor.node.key,
+    name: contributor.node.name,
+    kind: contributor.isMember ? "member" : "instance",
+    address: contributor.address,
+    projection: inspectProjectionPolicy(contributor.node.projection),
+    states: (stateByContributor.get(contributor.id) ?? []).map((state) => ({
       key: state.address.stateKey,
       address: state.address,
       projection: state.descriptor.projection,
       value: state.container.value,
     })),
-    tools: resolveFrameTools(projectionNode, options.charter).map(actionMeta),
-    commands: resolveFrameCommands(projectionNode, options.charter).map(actionMeta),
+    tools: resolveFrameTools(contributor, options.charter).map(actionMeta),
+    commands: resolveFrameCommands(contributor, options.charter).map(actionMeta),
   };
 }
 
@@ -447,7 +429,7 @@ function actionMeta(action: AnyAction): ActionMeta {
   };
 }
 
-function outputMeta(output: ProjectionNode<any>["node"]["output"]): OutputMeta | undefined {
+function outputMeta(output: Contributor<any>["node"]["output"]): OutputMeta | undefined {
   if (!output) {
     return undefined;
   }
@@ -458,40 +440,34 @@ function outputMeta(output: ProjectionNode<any>["node"]["output"]): OutputMeta |
   };
 }
 
-function compileNodeProjectionSource<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+function compileNodeProjectionIR<TDataContent>(
+  contributor: Contributor<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
-  stateByProjectionNode: Map<string, ResolvedState[]>,
-): ProjectionSource<TDataContent> {
-  const source = emptyProjectionDraft<TDataContent>();
+  stateByContributor: Map<string, ResolvedState[]>,
+): ProjectionIR<TDataContent> {
+  const source = emptyProjectionIR<TDataContent>();
 
-  for (const state of stateByProjectionNode.get(projectionNode.runtimeInstanceId) ?? []) {
+  for (const state of stateByContributor.get(contributor.id) ?? []) {
     addStateProjectionSource(source, state);
   }
 
-  const tools = resolveFrameTools(projectionNode, options.charter);
+  const tools = resolveFrameTools(contributor, options.charter);
   for (const tool of tools) {
-    assertNodeActionStateCompatibility(tool, projectionNode.node, "tool");
+    assertNodeActionStateCompatibility(tool, contributor.node, "tool");
   }
   source.tools.push(
     ...tools.map((tool) =>
       bindAction(tool, {
-        runtimeInstanceId: projectionNode.runtimeInstanceId,
+        generatorId: contributor.id,
       }),
     ),
   );
 
-  return {
-    instructions: projectionNode.node.instructions,
-    systemParts: source.systemParts,
-    dynamicParts: source.dynamicParts,
-    tools: source.tools,
-    states: source.states,
-  };
+  return source;
 }
 
 function addStateProjectionSource(
-  source: ProjectionDraft<any>,
+  source: ProjectionIR<any>,
   state: ResolvedState,
 ): void {
   const part = stateProjectionPart(state);
@@ -499,7 +475,7 @@ function addStateProjectionSource(
     return;
   }
 
-  addStatePart(source, part);
+  addProjectionStatePart(source, part);
   if (part.section === "system") {
     source.systemParts.push(part);
   } else if (part.section === "dynamic") {
@@ -522,99 +498,20 @@ function stateProjectionPart(state: ResolvedState): ProjectionStatePart | undefi
   };
 }
 
-export function applyStaticProjection(
-  draft: ProjectionDraft<any>,
-  source: ProjectionSource<any>,
-  projection?: StaticProjection,
-): void {
-  const resolved = normalizeStaticProjection(projection);
-  if (resolved.mode === "hidden") {
-    return;
-  }
-  if (resolved.mode === "replace") {
-    clearProjectionDraft(draft);
-  }
-
-  if (resolved.instructions !== "hidden") {
-    if (source.instructions) {
-      const item = {
-        type: "text",
-        text: source.instructions,
-      } satisfies ProjectionTextPart;
-      if (resolved.instructions === "system") {
-        draft.systemParts.push(item);
-      } else {
-        draft.dynamicParts.push(item);
-      }
-    }
-
-    appendProjectionParts(draft, draft.systemParts, source.systemParts);
-    appendProjectionParts(draft, draft.dynamicParts, source.dynamicParts);
-
-    if (resolved.tools !== "hidden") {
-      appendProjectionParts(
-        draft,
-        resolved.instructions === "system" ? draft.systemParts : draft.dynamicParts,
-        source.states.filter((state) => state.section === "retrieval"),
-      );
-    }
-  }
-
-  if (resolved.tools !== "hidden") {
-    draft.tools.push(...source.tools);
-  }
-}
-
-export function applyStaticBoundaryProjection(
-  parentDraft: ProjectionDraft<any>,
-  source: ProjectionSource<any>,
-  projection?: StaticBoundaryProjection,
-): void {
-  const resolved = normalizeStaticBoundaryProjection(projection);
-  if (resolved.mode === "hidden") {
-    return;
-  }
-  if (resolved.mode === "replace") {
-    clearProjectionDraft(parentDraft);
-  }
-
-  mergeProjectionSource(parentDraft, source);
-}
-
 function applyProjection<TDataContent>(
-  draft: ProjectionDraft<TDataContent>,
+  draft: ProjectionIR<TDataContent>,
   source: ProjectionSource<TDataContent>,
   projection: Projection<TDataContent>,
   ctx: ProjectionContext<TDataContent>,
   charter: Charter<TDataContent> | undefined,
+  slot: "projection" | "boundaryProjection",
 ): void {
-  const resolved = resolveProjectionValue(projection, charter);
-  if (isProjectionFunction<TDataContent>(resolved)) {
-    resolved.method(ctx, draft, source);
-    return;
-  }
-
-  applyStaticProjection(draft, source, resolved);
-}
-
-function applyBoundaryProjection<TDataContent>(
-  draft: ProjectionDraft<TDataContent>,
-  source: ProjectionSource<TDataContent>,
-  projection: BoundaryProjection<TDataContent>,
-  ctx: ProjectionContext<TDataContent>,
-  charter: Charter<TDataContent> | undefined,
-): void {
-  const resolved = resolveBoundaryProjectionValue(projection, charter);
-  if (isProjectionFunction<TDataContent>(resolved)) {
-    resolved.method(ctx, draft, source);
-    return;
-  }
-
-  applyStaticBoundaryProjection(draft, source, resolved);
+  const resolved = resolveProjectionValue(projection, ctx.originNode, slot, charter);
+  resolved.method(ctx, draft, source);
 }
 
 function finalizeSections<TDataContent>(
-  draft: ProjectionDraft<TDataContent>,
+  draft: ProjectionIR<TDataContent>,
   history: FrameMessage<TDataContent>[],
 ): CompiledInference<TDataContent> {
   const projectedStates = collectProjectedStates(draft);
@@ -684,24 +581,23 @@ function historyProjectionContext<TDataContent>(
       projection: HistoryProjection<TDataContent>;
     }
   | undefined {
-  const target = options.targetGenerator;
-  if (!target) {
+  const targetGeneratorId = options.targetGeneratorId;
+  if (!targetGeneratorId) {
     return undefined;
   }
 
-  const projectionNode = findProjectionNodeByRuntimeId(root, target.runtimeInstanceId);
-  if (!projectionNode || !isRuntimeBoundary(projectionNode)) {
+  const contributor = findContributorById(root, targetGeneratorId);
+  if (!contributor || !isGeneratorBoundary(contributor)) {
     return undefined;
   }
 
-  const runtime = projectionNode.node.runtime as GeneratorRuntime<TDataContent>;
+  const runtime = contributor.node.runtime as GeneratorRuntime<TDataContent>;
   return {
     context: {
-      target,
-      runtimeInstanceId: target.runtimeInstanceId,
+      generatorId: targetGeneratorId,
       activationId: options.activationId ?? "",
       trigger: runtime.trigger,
-      history: visibleHistoryForTarget(root, target, runtime, options),
+      history: visibleHistoryForTarget(root, targetGeneratorId, runtime, options),
       states: stateValues(states),
     },
     projection: runtime.historyProjection ?? { type: "messages" },
@@ -710,7 +606,7 @@ function historyProjectionContext<TDataContent>(
 
 function visibleHistoryForTarget<TDataContent>(
   _root: Instance<TDataContent>,
-  target: Generator,
+  targetGeneratorId: GeneratorId,
   runtime: GeneratorRuntime<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
 ): Frame<TDataContent>[] {
@@ -718,7 +614,7 @@ function visibleHistoryForTarget<TDataContent>(
     throw new Error("compileProjection activationId requires frameHistory");
   }
 
-  const rawHistory = options.frameHistory ?? framesFromMessages(options.history ?? [], target);
+  const rawHistory = options.frameHistory ?? framesFromMessages(options.history ?? [], targetGeneratorId);
   const activationFrameIndex = activationFrameIndexFor(rawHistory, options.activationId, {
     requireActivationFrame: options.activationId !== undefined,
   });
@@ -739,7 +635,7 @@ function visibleHistoryForTarget<TDataContent>(
         return true;
       }
       return (
-        actorMessageVisibleToGenerator(message, frame, target) &&
+        actorMessageVisibleToGenerator(message, frame, targetGeneratorId) &&
         actorMessageVisibleByDelivery(message, frameIndex, activationFrameIndex)
       );
     });
@@ -799,12 +695,7 @@ function frameMessagesFromFrameHistory<TDataContent>(
   history: Frame<TDataContent>[],
 ): FrameMessage<TDataContent>[] {
   return messages({
-    target: {
-      id: "",
-      kind: "generator",
-      runtimeInstanceId: "",
-    },
-    runtimeInstanceId: "",
+    generatorId: "",
     activationId: "",
     trigger: { type: "actor-frame" },
     history,
@@ -814,11 +705,11 @@ function frameMessagesFromFrameHistory<TDataContent>(
 
 function framesFromMessages<TDataContent>(
   frameMessages: FrameMessage<TDataContent>[],
-  target?: Generator,
+  targetGeneratorId?: GeneratorId,
 ): Frame<TDataContent>[] {
   return frameMessages.map((message, index) => ({
     id: `synthetic-history-${index}`,
-    generatorId: target?.id ?? "synthetic-history",
+    generatorId: targetGeneratorId ?? "synthetic-history",
     messages: [message],
   }));
 }
@@ -843,11 +734,11 @@ function stateValues(states: ResolvedState[]): Record<string, unknown> {
   return values;
 }
 
-function statesFromStateByProjectionNode(stateByProjectionNode: Map<string, ResolvedState[]>): ResolvedState[] {
-  return [...stateByProjectionNode.values()].flat();
+function statesFromStateByContributor(stateByContributor: Map<string, ResolvedState[]>): ResolvedState[] {
+  return [...stateByContributor.values()].flat();
 }
 
-function collectProjectedStates(draft: ProjectionDraft<any>): ProjectionStatePart[] {
+function collectProjectedStates(draft: ProjectionIR<any>): ProjectionStatePart[] {
   const states: ProjectionStatePart[] = [];
   const seen = new Set<ProjectionStatePart>();
   const add = (state: ProjectionStatePart) => {
@@ -927,68 +818,96 @@ function compileContentParts<TDataContent>(
   });
 }
 
-function groupStatesByProjectionNode(states: ResolvedState[]): Map<string, ResolvedState[]> {
+function groupStatesByContributor(states: ResolvedState[]): Map<string, ResolvedState[]> {
   const grouped = new Map<string, ResolvedState[]>();
   for (const state of states) {
-    const projectionNodeKey = stateProjectionNodeKey(state);
-    const list = grouped.get(projectionNodeKey) ?? [];
+    const contributorKey = stateContributorKey(state);
+    const list = grouped.get(contributorKey) ?? [];
     list.push(state);
-    grouped.set(projectionNodeKey, list);
+    grouped.set(contributorKey, list);
   }
   return grouped;
 }
 
-function stateProjectionNodeKey(state: ResolvedState): string {
+function stateContributorKey(state: ResolvedState): string {
   if (state.descriptor.scope === "hoist") {
-    return encodeRuntimeAddress({
+    return encodeProjectionAddress({
       type: "instance",
       instanceId: state.targetInstance.id,
     });
   }
 
-  return state.sourceProjectionNode.runtimeInstanceId;
+  return state.sourceContributor.id;
 }
 
 function resolveProjectionValue<TDataContent>(
   projection: Projection<TDataContent>,
+  node: ProjectionContext<TDataContent>["originNode"],
+  slot: "projection" | "boundaryProjection",
   charter: Charter<TDataContent> | undefined,
-): StaticProjection | ProjectionFunction<TDataContent> {
-  if (typeof projection === "string") {
-    if (!charter) {
-      throw new Error(`Cannot resolve projection ref "${projection}" without charter`);
-    }
-    const fn = charter.projections[projection];
-    if (!fn) {
-      throw new Error(`Unknown projection ref "${projection}"`);
-    }
-    return fn;
+): ProjectionFunction<TDataContent> {
+  if (isProjectionFunction<TDataContent>(projection)) {
+    return projection;
   }
 
-  return projection;
+  const sourceProjection = sourceNodeProjectionSlot(node, slot, charter);
+  if (sourceProjection?.name === projection) {
+    return sourceProjection;
+  }
+
+  if (!charter) {
+    throw new Error(`Cannot resolve projection ref "${projection}" without charter`);
+  }
+  const fn = charter.projections[projection];
+  if (!fn) {
+    throw new Error(`Unknown projection ref "${projection}"`);
+  }
+  return fn;
 }
 
-function resolveBoundaryProjectionValue<TDataContent>(
-  projection: BoundaryProjection<TDataContent>,
+function sourceNodeProjectionSlot<TDataContent>(
+  node: ProjectionContext<TDataContent>["originNode"],
+  slot: "projection" | "boundaryProjection",
   charter: Charter<TDataContent> | undefined,
-): StaticBoundaryProjection | ProjectionFunction<TDataContent> {
-  if (typeof projection === "string") {
-    if (!charter) {
-      throw new Error(`Cannot resolve projection ref "${projection}" without charter`);
-    }
-    const fn = charter.projections[projection];
-    if (!fn) {
-      throw new Error(`Unknown projection ref "${projection}"`);
-    }
-    return fn;
+): ProjectionFunction<TDataContent> | undefined {
+  const sourceNode = sourceNodeForProjectionSlot(node, charter);
+  if (!sourceNode) {
+    return undefined;
   }
 
-  return projection;
+  const value = slot === "projection"
+    ? sourceNode.projection
+    : sourceNode.runtime.type === "generator"
+      ? sourceNode.runtime.boundaryProjection
+      : undefined;
+  return isProjectionFunction<TDataContent>(value) ? value : undefined;
+}
+
+function sourceNodeForProjectionSlot<TDataContent>(
+  node: ProjectionContext<TDataContent>["originNode"],
+  charter: Charter<TDataContent> | undefined,
+): ProjectionContext<TDataContent>["originNode"] | undefined {
+  if (!charter) {
+    return undefined;
+  }
+  if (node.sourceNodeKey) {
+    return charter.nodes[node.sourceNodeKey];
+  }
+  const sourceNode = charter.nodes[node.key];
+  return sourceNode && sourceNode !== node ? sourceNode : undefined;
 }
 
 function inspectProjectionPolicy<TDataContent>(
   projection: Projection<TDataContent>,
 ): CompiledProjectionPolicy {
   if (isProjectionFunction<TDataContent>(projection)) {
+    if (projection.standard) {
+      return {
+        type: "standard",
+        name: projection.name,
+        ...projection.standard,
+      };
+    }
     return {
       type: "function",
       name: projection.name,
@@ -1006,36 +925,27 @@ function inspectProjectionPolicy<TDataContent>(
       tools: "ref",
     };
   }
-  return normalizeStaticProjection(projection);
-}
-
-function inspectBoundaryProjectionPolicy<TDataContent>(
-  projection: BoundaryProjection<TDataContent>,
-): CompiledBoundaryProjectionPolicy {
-  if (isProjectionFunction<TDataContent>(projection)) {
-    return { type: "function", name: projection.name, mode: "function" };
-  }
-  if (typeof projection === "string") {
-    return { type: "ref", ref: projection, mode: "ref" };
-  }
-  return normalizeStaticBoundaryProjection(projection);
+  throw new Error("Cannot inspect unknown projection");
 }
 
 function projectionContext<TDataContent>(
-  projectionNode: ProjectionNode<TDataContent>,
+  contributor: Contributor<TDataContent>,
   callSite: ProjectionContext<TDataContent>["callSite"],
-  target: Generator | undefined,
+  targetGeneratorId: GeneratorId | undefined,
+  options: CompileProjectionOptions<TDataContent>,
+  stateByContributor: Map<string, ResolvedState[]>,
 ): ProjectionContext<TDataContent> {
   return {
     callSite,
-    runtimeInstanceId: projectionNode.runtimeInstanceId,
-    address: projectionNode.address,
-    target,
-    node: projectionNode.node,
+    generatorId: contributor.id,
+    address: contributor.address,
+    targetGeneratorId,
+    originNode: contributor.node,
+    createNodeIR: () => compileNodeProjectionIR(contributor, options, stateByContributor),
   };
 }
 
-function readonlyProjectionSource<TDataContent>(draft: ProjectionDraft<TDataContent>): ProjectionSource<TDataContent> {
+function readonlyProjectionIR<TDataContent>(draft: ProjectionIR<TDataContent>): ProjectionSource<TDataContent>["ir"] {
   return {
     systemParts: draft.systemParts,
     dynamicParts: draft.dynamicParts,
@@ -1044,87 +954,37 @@ function readonlyProjectionSource<TDataContent>(draft: ProjectionDraft<TDataCont
   };
 }
 
-function mergeProjectionSource(
-  draft: ProjectionDraft<any>,
-  source: ProjectionSource<any>,
-): void {
-  appendProjectionParts(draft, draft.systemParts, source.systemParts);
-  appendProjectionParts(draft, draft.dynamicParts, source.dynamicParts);
-  for (const state of source.states) {
-    addStatePart(draft, state);
-  }
-  draft.tools.push(...source.tools);
-}
-
-function appendProjectionParts(
-  draft: ProjectionDraft<any>,
-  target: ProjectionPart<any>[],
-  parts: readonly ProjectionPart<any>[],
-): void {
-  for (const part of parts) {
-    target.push(part);
-    if (part.type === "state") {
-      addStatePart(draft, part);
-    }
-  }
-}
-
-function addStatePart(draft: ProjectionDraft<any>, state: ProjectionStatePart): void {
-  if (!draft.states.includes(state)) {
-    draft.states.push(state);
-  }
-}
-
-function stateAddressForProjectionNode(projectionNode: ProjectionNode<any>): StateAddress | undefined {
-  const descriptor = projectionNode.node.state;
+function stateAddressForContributor(contributor: Contributor<any>): StateAddress | undefined {
+  const descriptor = contributor.node.state;
   if (!descriptor) {
     return undefined;
   }
   return {
     instanceId:
       descriptor.scope === "local"
-        ? projectionNode.concreteInstance.id
-        : hoistStateInstance(projectionNode).id,
+        ? contributor.concreteInstance.id
+        : hoistStateInstance(contributor).id,
     stateKey: descriptor.key,
   };
 }
 
-function emptyProjectionDraft<TDataContent = never>(): ProjectionDraft<TDataContent> {
-  return { systemParts: [], dynamicParts: [], tools: [], states: [] };
-}
-
-function clearProjectionDraft(draft: ProjectionDraft<any>): void {
-  draft.systemParts.length = 0;
-  draft.dynamicParts.length = 0;
-  draft.tools.length = 0;
-  draft.states.length = 0;
-}
-
-function isRuntimeBoundary(projectionNode: ProjectionNode<any>): boolean {
-  return projectionNode.node.runtime.type === "generator";
-}
-
-function generatorForProjectionNode(projectionNode: ProjectionNode<any>): Generator {
-  return {
-    id: projectionNode.runtimeInstanceId,
-    kind: "generator",
-    runtimeInstanceId: projectionNode.runtimeInstanceId,
-  };
+function isGeneratorBoundary(contributor: Contributor<any>): boolean {
+  return contributor.node.runtime.type === "generator";
 }
 
 function belongsToGenerator(
-  projectionNode: ProjectionNode<any>,
-  generator: Generator | undefined,
+  contributor: Contributor<any>,
+  generatorId: GeneratorId | undefined,
 ): boolean {
-  return Boolean(generator && generator.runtimeInstanceId === projectionNode.runtimeInstanceId);
+  return generatorId === contributor.id;
 }
 
-function directRootProjectionNode<TDataContent>(
+function directRootContributor<TDataContent>(
   instance: Instance<TDataContent>,
-): ProjectionNode<TDataContent> {
-  const projectionNode = collectProjectionNodes(instance)[0];
-  if (!projectionNode) {
-    throw new Error("Unable to create root projection node");
+): Contributor<TDataContent> {
+  const contributor = collectContributors(instance)[0];
+  if (!contributor) {
+    throw new Error("Unable to create root contributor");
   }
-  return projectionNode;
+  return contributor;
 }

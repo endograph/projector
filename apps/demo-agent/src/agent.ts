@@ -14,7 +14,7 @@ import { AiSdkExecutor } from "@projectors/aisdk-executor";
 import { ConvexClient } from "convex/browser";
 import { fileURLToPath } from "node:url";
 import {
-  ROOT_RUNTIME_INSTANCE_ID,
+  ROOT_GENERATOR_ID,
   createMachine,
   executeCommand,
   runMachine,
@@ -242,7 +242,7 @@ export default defineAgent({
         mode: "text" | "voice",
         update: {
           request?: {
-            runtimeInstanceId?: string;
+            generatorId?: string;
             output?: { audience?: unknown };
           };
           messageId: string;
@@ -380,7 +380,7 @@ export default defineAgent({
         machine = createDemoMachine(refreshedFrames);
         unsubscribeMachine = machine.subscribe(scheduleMachineHost);
         await syncMachineRuntime(machine, {
-          runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+          generatorId: ROOT_GENERATOR_ID,
           visibleFrames: [],
         });
         console.warn(`[demo-agent] refreshed durable session state after ${reason}`);
@@ -410,7 +410,7 @@ export default defineAgent({
           if (!frameId) return;
           if (!frame.inert) {
             await syncMachineRuntime(machine, {
-              runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+              generatorId: ROOT_GENERATOR_ID,
               visibleFrames: [frame],
             });
             applyRoomIoParticipant();
@@ -435,27 +435,20 @@ export default defineAgent({
       };
       unsubscribeMachine = machine.subscribe(scheduleMachineHost);
 
-      let commandTail: Promise<void> = Promise.resolve();
       ctx.room.localParticipant?.registerRpcMethod(COMMAND_RPC_METHOD, async (data) => {
-        const runCommand = commandTail
-          .catch(() => undefined)
-          .then(async () => {
-            await assertLease();
-            const payload = parseCommandRpcPayload(data.payload);
-            if (payload.sessionId !== init.sessionId) {
-              return {
-                success: false,
-                error: "Command session does not match LiveKit worker session",
-                clientId: payload.message.clientId,
-              };
-            }
-
-            const result = await executeCommand(machine, payload.message);
-            await hostTail;
-            return result;
+        await assertLease();
+        const payload = parseCommandRpcPayload(data.payload);
+        if (payload.sessionId !== init.sessionId) {
+          return JSON.stringify({
+            success: false,
+            error: "Command session does not match LiveKit worker session",
+            callId: payload.message.callId,
           });
-        commandTail = runCommand.then(() => undefined, () => undefined);
-        return JSON.stringify(await runCommand);
+        }
+
+        const result = await executeCommand(machine, payload.message);
+        await hostTail;
+        return JSON.stringify(result);
       });
       ctx.room.once(RoomEvent.Disconnected, () => {
         ctx.room.localParticipant?.unregisterRpcMethod(COMMAND_RPC_METHOD);
@@ -514,7 +507,7 @@ export default defineAgent({
 
       if (!shouldUseRealtime()) {
         await syncMachineRuntime(machine, {
-          runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+          generatorId: ROOT_GENERATOR_ID,
           visibleFrames: [],
         });
       }
@@ -552,7 +545,7 @@ export default defineAgent({
         onImage: (image) => {
           latestCameraImage = image;
           void syncMachineRuntime(machine, {
-            runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+            generatorId: ROOT_GENERATOR_ID,
             visibleFrames: [],
           }).catch((error) => {
             console.warn("[demo-agent] failed to sync camera sensor", error);
@@ -561,7 +554,7 @@ export default defineAgent({
       });
 
       await syncMachineRuntime(machine, {
-        runtimeInstanceId: ROOT_RUNTIME_INSTANCE_ID,
+        generatorId: ROOT_GENERATOR_ID,
         visibleFrames: [],
       });
 
@@ -715,17 +708,17 @@ function frameMessageMode(frame: Frame): "text" | "voice" {
 
 function shouldPersistAssistantMessage(frame: Frame, message: Frame["messages"][number]): boolean {
   if (message.audience === "self") return false;
-  return frame.runtimeInstanceId === ROOT_RUNTIME_INSTANCE_ID;
+  return !frame.generatorId || frame.generatorId === ROOT_GENERATOR_ID;
 }
 
 function shouldPersistAssistantStreamingUpdate(update: {
   request?: {
-    runtimeInstanceId?: string;
+    generatorId?: string;
     output?: { audience?: unknown };
   };
 }): boolean {
   if (update.request?.output?.audience === "self") return false;
-  return !update.request?.runtimeInstanceId || update.request.runtimeInstanceId === ROOT_RUNTIME_INSTANCE_ID;
+  return !update.request?.generatorId || update.request.generatorId === ROOT_GENERATOR_ID;
 }
 
 function idempotencyKey(prefix: string, source: unknown): string {
@@ -1000,7 +993,12 @@ function parseCommandRpcPayload(payload: string): {
     throw new Error("Command RPC payload is missing message");
   }
   const message = parsed.message as Partial<ClientMachineMessage>;
-  if (message.type !== "command" || typeof message.name !== "string") {
+  if (
+    message.type !== "action" ||
+    message.kind !== "request" ||
+    message.action !== "command" ||
+    typeof message.name !== "string"
+  ) {
     throw new Error("Command RPC message must be a command");
   }
   return {
