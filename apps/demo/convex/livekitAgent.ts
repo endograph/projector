@@ -133,7 +133,7 @@ export const getAgentInit = query({
       sessionId: room.sessionId,
       frameId: latestFrame._id,
       instance,
-      clientSnapshot: stripClientSchemas(createDemoClientSnapshot(instance, syncState)),
+      clientSnapshot: stripClientSchemas(createDemoClientSnapshot(instance, room.sessionId, syncState)),
       syncState,
       messages: await listMessagesForSession(ctx, room.sessionId),
     };

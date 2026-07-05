@@ -20,9 +20,17 @@ import {
   runMachine,
   type Executor,
   type Frame,
+  type FrameDraft,
   syncMachineRuntime,
 } from "@projectors/core";
 import type { ClientMachineMessage } from "@projectors/core/client";
+import {
+  attachmentSummary,
+  storedAttachmentsFromContentParts,
+  userContentPartsForAttachments,
+  type DemoAttachmentData,
+  type StoredDemoAttachmentData,
+} from "./attachments.js";
 import {
   createDemoCharter,
   getAgentControlsState,
@@ -214,11 +222,11 @@ export default defineAgent({
       }
       console.log(`[demo-agent] loaded session ${init.sessionId} with ${init.messages.length} messages`);
 
-      let root = hydrateDemoInstance(init.instance);
+      let root = hydrateDemoInstance(init.instance, init.sessionId);
       let referenceFrameId = init.frameId;
       const contextFrames = (await convex.query(api.sessions.listMachineContextFrames, {
         sessionId: init.sessionId,
-      })) as Frame[];
+      })) as Frame<any>[];
       console.log(`[demo-agent] initialized machine with ${contextFrames.length} context frame(s)`);
 
       const isLiveMode = (): boolean => getAgentControlsState(root).liveMode;
@@ -228,6 +236,7 @@ export default defineAgent({
       const addDemoMessage = (args: {
         role: "user" | "assistant";
         content: string;
+        attachments?: StoredDemoAttachmentData[];
         frameId?: Id<"frames">;
         mode: "text" | "voice";
         idempotencyKey?: string;
@@ -263,14 +272,14 @@ export default defineAgent({
           streamSeq: update.streamSeq,
         });
       };
-      const agentDiscreteExecutor = new AiSdkExecutor({
+      const agentDiscreteExecutor = new AiSdkExecutor<DemoAttachmentData>({
         model: aiSdkOpenAI(DISCRETE_MODEL),
         maxOutputTokens: 4096,
         stream: shouldStreamText,
         providerOptions: OPENAI_NO_REASONING_OPTIONS,
         onStreamUpdate: (update) => persistStreamingMessageUpdate("assistant", "text", update),
       });
-      const memoryExecutor = new AiSdkExecutor({
+      const memoryExecutor = new AiSdkExecutor<DemoAttachmentData>({
         model: aiSdkOpenAI(DISCRETE_MODEL),
         maxOutputTokens: 1024,
         maxSteps: 3,
@@ -278,7 +287,7 @@ export default defineAgent({
       });
       const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>
         request.inference.tools.some((tool) => tool.name === "saveMemories");
-      const discreteExecutor: Executor = {
+      const discreteExecutor: Executor<any> = {
         run: (request) =>
           isMemoryRequest(request)
             ? memoryExecutor.run(request)
@@ -292,6 +301,7 @@ export default defineAgent({
       activeSession = session;
       const agent = new DemoVoiceAgent();
       const liveKitExecutor = new LiveKitRealtimeExecutor({
+        debug: DEBUG_REALTIME_EVENTS,
         session: session as unknown as LiveKitSessionLike,
         agent: agent as unknown as LiveKitAgentLike,
         room: ctx.room as unknown as LiveKitRoomLike,
@@ -299,7 +309,7 @@ export default defineAgent({
         realtime: { enabled: () => shouldUseRealtime() },
         input: {
           messageTopic: MESSAGE_TOPIC,
-          parseDataMessage: (payload) => parseLiveKitTextMessage(payload),
+          parseDataMessage: (payload) => parseLiveKitDemoMessage(payload),
         },
         eventNames: {
           dataReceived: RoomEvent.DataReceived as string,
@@ -315,18 +325,19 @@ export default defineAgent({
           console.warn("[demo-agent] failed to stop camera sampler", error);
         });
       });
-      const createDemoMachine = (frames: Frame[]) =>
+      const createDemoMachine = (frames: Frame<any>[]) =>
         createMachine({
           id: init.sessionId,
-          root,
-          charter: createDemoCharter({ executor: liveKitExecutor, cameraSensor }),
+          instance: root,
+          charter: createDemoCharter({ cameraSensor }),
+          executor: liveKitExecutor,
           frames,
         });
       let machine = createDemoMachine(contextFrames);
       let unsubscribeMachine: (() => void) | undefined;
 
       const persistFrameMessages = async (
-        frame: Frame,
+        frame: Frame<any>,
         frameId: Id<"frames">,
       ) => {
         const mode = frameMessageMode(frame);
@@ -334,9 +345,11 @@ export default defineAgent({
           const text = typeof message.text === "string" ? message.text : "";
           if (message.type === "user" && text.trim()) {
             const streamState = normalizeStreamState(message.streamState);
+            const attachments = storedAttachmentsFromContentParts(message.content);
             await addDemoMessage({
               role: "user",
               content: text,
+              ...(attachments.length ? { attachments } : {}),
               frameId,
               mode,
               idempotencyKey: idempotencyKey("user", message),
@@ -370,11 +383,11 @@ export default defineAgent({
           throw new Error(`No demo session is associated with LiveKit room "${roomName}"`);
         }
 
-        root = hydrateDemoInstance(refreshed.instance);
+        root = hydrateDemoInstance(refreshed.instance, init.sessionId);
         referenceFrameId = refreshed.frameId;
         const refreshedFrames = (await convex.query(api.sessions.listMachineContextFrames, {
           sessionId: init.sessionId,
-        })) as Frame[];
+        })) as Frame<any>[];
 
         unsubscribeMachine?.();
         machine = createDemoMachine(refreshedFrames);
@@ -386,7 +399,7 @@ export default defineAgent({
         console.warn(`[demo-agent] refreshed durable session state after ${reason}`);
       };
 
-      const persistMachineFrame = async (frame: Frame): Promise<Id<"frames"> | undefined> => {
+      const persistMachineFrame = async (frame: Frame<any>): Promise<Id<"frames"> | undefined> => {
         await assertLease();
         let frameId: Id<"frames">;
         try {
@@ -702,11 +715,11 @@ function participantJoinedAtMs(participant: RemoteParticipant): bigint {
   return 0n;
 }
 
-function frameMessageMode(frame: Frame): "text" | "voice" {
-  return frame.metadata?.mode === "voice" ? "voice" : "text";
+function frameMessageMode(frame: Frame<any>): "text" | "voice" {
+  return frame.provenance?.execution?.mode === "voice" ? "voice" : "text";
 }
 
-function shouldPersistAssistantMessage(frame: Frame, message: Frame["messages"][number]): boolean {
+function shouldPersistAssistantMessage(frame: Frame<any>, message: Frame<any>["messages"][number]): boolean {
   if (message.audience === "self") return false;
   return !frame.generatorId || frame.generatorId === ROOT_GENERATOR_ID;
 }
@@ -841,6 +854,12 @@ function summarizeRealtimeClientEvent(event: unknown): string | undefined {
   ) {
     return `${type} ${formatRecordSummary(record, ["item_id", "response_id", "audio_end_ms"])}`;
   }
+  if (type === "conversation.item.create") {
+    return `${type} item=${summarizeRealtimeItem(record.item)} previous_item_id=${String(record.previous_item_id ?? "<none>")}`;
+  }
+  if (type === "conversation.item.delete") {
+    return `${type} item_id=${String(record.item_id ?? "<none>")}`;
+  }
   return undefined;
 }
 
@@ -897,18 +916,7 @@ function summarizeRealtimeOutput(output: unknown): string {
   return output
     .map((item) => {
       const record = asRecord(item);
-      const content = Array.isArray(record.content) ? record.content : [];
-      const chars = content.reduce((sum, part) => {
-        const partRecord = asRecord(part);
-        const text =
-          typeof partRecord.text === "string"
-            ? partRecord.text
-            : typeof partRecord.transcript === "string"
-              ? partRecord.transcript
-              : "";
-        return sum + text.length;
-      }, 0);
-      return `${String(record.type ?? "<type>")}:${String(record.role ?? record.name ?? "<role>")}:chars=${chars}`;
+      return `${String(record.type ?? "<type>")}:${String(record.role ?? record.name ?? "<role>")}:${summarizeRealtimeContent(record.content)}`;
     })
     .join(",");
 }
@@ -923,20 +931,47 @@ function summarizeRealtimeItem(item: unknown): string {
     return `${type}:call_id=${String(record.call_id ?? "<none>")}:output_chars=${typeof record.output === "string" ? record.output.length : 0}`;
   }
   if (type === "message") {
-    const content = Array.isArray(record.content) ? record.content : [];
-    const chars = content.reduce((sum, part) => {
-      const partRecord = asRecord(part);
-      const text =
-        typeof partRecord.text === "string"
-          ? partRecord.text
-          : typeof partRecord.transcript === "string"
-            ? partRecord.transcript
-            : "";
-      return sum + text.length;
-    }, 0);
-    return `${type}:${String(record.role ?? "<role>")}:chars=${chars}`;
+    return `${type}:${String(record.role ?? "<role>")}:${summarizeRealtimeContent(record.content)} id=${String(record.id ?? "<none>")}`;
   }
   return type;
+}
+
+function summarizeRealtimeContent(contentValue: unknown): string {
+  const content = Array.isArray(contentValue) ? contentValue : contentValue ? [contentValue] : [];
+  let textChars = 0;
+  let transcriptChars = 0;
+  const types: string[] = [];
+  const images: string[] = [];
+  const imageUrls: string[] = [];
+  for (const part of content) {
+    const partRecord = asRecord(part);
+    const type = typeof partRecord.type === "string" ? partRecord.type : "<part>";
+    types.push(type);
+    if (typeof partRecord.text === "string") textChars += partRecord.text.length;
+    if (typeof partRecord.transcript === "string") transcriptChars += partRecord.transcript.length;
+    if (type === "input_image") {
+      images.push(describeRealtimeImageUrl(partRecord.image_url));
+      imageUrls.push(describeRawRealtimeImageUrl(partRecord.image_url));
+    }
+  }
+  return `parts=${types.join("|") || "<none>"} text_chars=${textChars} transcript_chars=${transcriptChars} images=${images.length}${images.length ? `[${images.join(",")}]` : ""}${imageUrls.length ? ` image_urls=${safeJson(imageUrls)}` : ""}`;
+}
+
+function describeRealtimeImageUrl(value: unknown): string {
+  if (typeof value !== "string") return "<missing>";
+  if (value.startsWith("data:")) return "data-url";
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname.slice(0, 80)}`;
+  } catch {
+    return value.slice(0, 80);
+  }
+}
+
+function describeRawRealtimeImageUrl(value: unknown): string {
+  if (typeof value !== "string") return "<missing>";
+  if (value.startsWith("data:")) return `data-url:${value.length}chars`;
+  return value;
 }
 
 function formatRecordSummary(record: Record<string, unknown>, keys: string[]): string {
@@ -969,13 +1004,70 @@ function assertEnv(name: string): void {
   }
 }
 
-function parseLiveKitTextMessage(payload: Uint8Array): string | undefined {
+function parseLiveKitDemoMessage(payload: Uint8Array): string | FrameDraft<any> | undefined {
   try {
-    const parsed = JSON.parse(new TextDecoder().decode(payload)) as { content?: unknown };
-    return typeof parsed.content === "string" && parsed.content.trim() ? parsed.content.trim() : undefined;
-  } catch {
+    const parsed = JSON.parse(new TextDecoder().decode(payload)) as {
+      content?: unknown;
+      attachments?: unknown;
+    };
+    const content = typeof parsed.content === "string" ? parsed.content.trim() : "";
+    const attachments = normalizeLiveKitAttachments(parsed.attachments);
+    if (DEBUG_REALTIME_EVENTS) {
+      console.log(
+        `[demo-agent] livekit data message parsed content_chars=${content.length} attachments=${summarizeDemoAttachments(attachments)}`,
+      );
+    }
+    if (!content && attachments.length === 0) return undefined;
+    const text = content || attachmentSummary(attachments);
+    return {
+      messages: [
+        {
+          type: "user",
+          content: userContentPartsForAttachments(content, attachments),
+          text,
+          audience: "broadcast",
+          source: { external: true, transport: "livekit" },
+        },
+      ],
+    };
+  } catch (error) {
+    if (DEBUG_REALTIME_EVENTS) {
+      console.warn("[demo-agent] failed to parse livekit data message", error);
+    }
     return undefined;
   }
+}
+
+function summarizeDemoAttachments(attachments: readonly DemoAttachmentData[]): string {
+  if (attachments.length === 0) return "0";
+  return attachments
+    .map((attachment) =>
+      `${attachment.kind}:${attachment.name}:type=${attachment.contentType}:url=${attachment.url ? "yes" : "no"}:dataUrl=${attachment.dataUrl ? `${attachment.dataUrl.length}chars` : "no"}`
+    )
+    .join(",");
+}
+
+function normalizeLiveKitAttachments(value: unknown): DemoAttachmentData[] {
+  if (!Array.isArray(value)) return [];
+  const attachments: DemoAttachmentData[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const storageId = typeof record.storageId === "string" ? record.storageId : "";
+    const name = typeof record.name === "string" ? record.name : "";
+    const contentType = typeof record.contentType === "string" && record.contentType
+      ? record.contentType
+      : "application/octet-stream";
+    const size = typeof record.size === "number" ? record.size : 0;
+    const kind = record.kind === "image" ? "image" : "file";
+    const url = typeof record.url === "string" && record.url ? record.url : null;
+    const dataUrl = typeof record.dataUrl === "string" && record.dataUrl.startsWith("data:image/")
+      ? record.dataUrl
+      : undefined;
+    if (!storageId || !name) continue;
+    attachments.push({ storageId, url, name, contentType, size, kind, ...(dataUrl ? { dataUrl } : {}) });
+  }
+  return attachments;
 }
 
 function parseCommandRpcPayload(payload: string): {

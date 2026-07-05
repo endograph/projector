@@ -19,6 +19,11 @@ These items are intentionally outside the first implementation pass described in
   generators need declarative scoped or summarized history instead of custom
   projection functions.
 - Generator pause / block / wake
+- `refreshInference` adoption in the LiveKit cascade executor. The AI SDK
+  executor re-projects history per step so mid-generation immediate messages
+  surface to the model and are absorbed; the cascade executor still projects
+  once per run, so messages it misses correctly retrigger but are never steered
+  into an open run.
 - An explicit self-wake mechanism for runtimes that need to schedule their own
   future activations. The self-trigger exclusion means self-addressed messages,
   including `delivery: "queued"` ones, never create activations on their own.

@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { collectSessionFramePath, getFrameIndexForSession, getLatestSessionFrameDoc } from "./frameHistory";
+import { attachmentValidator, resolveAttachmentUrls } from "./attachments";
 
 type DbCtx = MutationCtx | QueryCtx;
 type MessageDoc = Doc<"messages">;
@@ -22,7 +23,13 @@ export const listForFramePath = query({
     const framePath = await collectSessionFramePath(ctx, session, frameId);
     const frameIds = new Set(framePath.map((frame) => frame._id));
     const messages = await listMessagesForSession(ctx, sessionId);
-    return messages.filter((message) => frameIds.has(message.frameId));
+    const visibleMessages = messages.filter((message) => frameIds.has(message.frameId));
+    return await Promise.all(
+      visibleMessages.map(async (message) => ({
+        ...message,
+        attachments: await resolveAttachmentUrls(ctx, message.attachments),
+      })),
+    );
   },
 });
 
@@ -31,6 +38,7 @@ export const add = mutation({
     sessionId: v.id("sessions"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
+    attachments: v.optional(v.array(attachmentValidator)),
     frameId: v.optional(v.id("frames")),
     mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),
     idempotencyKey: v.optional(v.string()),
@@ -68,6 +76,7 @@ export const add = mutation({
           content: args.content,
           frameId,
         };
+        if (args.attachments !== undefined) patch.attachments = args.attachments;
         if (args.mode !== undefined) patch.mode = args.mode;
         if (args.streamState !== undefined) patch.streamState = args.streamState;
         if (args.streamSeq !== undefined) patch.streamSeq = args.streamSeq;
@@ -79,6 +88,7 @@ export const add = mutation({
     const messageId = await ctx.db.insert("messages", {
       role: args.role,
       content: args.content,
+      attachments: args.attachments,
       frameId,
       mode: args.mode,
       idempotencyKey: args.idempotencyKey,

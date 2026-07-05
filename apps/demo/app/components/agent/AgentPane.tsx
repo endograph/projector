@@ -78,6 +78,7 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
     const activeHistorySubtab = useAtomValue(activeHistorySubtabAtom);
     const { effigy, instances, snapshot, readOnly } = useProjector();
     const contentScrollRef = useRef<HTMLDivElement>(null);
+    const shouldAutoScrollHistoryRef = useRef(true);
     const activeSubtab =
       activeTab === "tree"
         ? activeTreeSubtab
@@ -87,8 +88,27 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
 
     useLayoutEffect(() => {
       if (!contentScrollRef.current) return;
-      contentScrollRef.current.scrollTop = 0;
+      shouldAutoScrollHistoryRef.current = true;
+      contentScrollRef.current.scrollTop =
+        activeTab === "history" ? contentScrollRef.current.scrollHeight : 0;
       contentScrollRef.current.scrollLeft = 0;
+    }, [activeTab, activeSubtab]);
+
+    useLayoutEffect(() => {
+      const scrollNode = contentScrollRef.current;
+      if (!scrollNode || activeTab !== "history") return;
+
+      const scrollToBottomIfPinned = () => {
+        if (shouldAutoScrollHistoryRef.current) {
+          scrollNode.scrollTop = scrollNode.scrollHeight;
+        }
+      };
+      const contentNode = scrollNode.firstElementChild;
+      const observer = new ResizeObserver(scrollToBottomIfPinned);
+      observer.observe(scrollNode);
+      if (contentNode) observer.observe(contentNode);
+      scrollToBottomIfPinned();
+      return () => observer.disconnect();
     }, [activeTab, activeSubtab]);
 
     return (
@@ -131,6 +151,11 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
         </nav>
         <div
           ref={contentScrollRef}
+          onScroll={(event) => {
+            if (activeTab === "history") {
+              shouldAutoScrollHistoryRef.current = isWithinBottom(event.currentTarget, 10);
+            }
+          }}
           className="terminal-scrollbar min-h-0 flex-1 overflow-y-auto p-4"
         >
           {activeTab === "tree" && (
@@ -163,7 +188,7 @@ export const AgentPane = forwardRef<HTMLDivElement, AgentPaneProps>(
           {activeTab === "playground" && (
             <PlaygroundTab
               instances={instances}
-              canonicalInstances={snapshot.root ? [snapshot.root] : []}
+              canonicalInstances={snapshot.instance ? [snapshot.instance] : []}
               effigy={effigy}
               readOnly={readOnly}
             />
@@ -1341,6 +1366,18 @@ function MessagesHistory({
             <div className="whitespace-pre-wrap break-words leading-5 text-terminal-green-dim">
               {message.content}
             </div>
+            {(message.attachments ?? []).length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {(message.attachments ?? []).map((attachment) => (
+                  <span
+                    key={attachment.storageId}
+                    className="max-w-full truncate rounded border border-terminal-green-dimmer px-1.5 py-0.5 text-terminal-green"
+                  >
+                    {attachment.name}
+                  </span>
+                ))}
+              </div>
+            )}
           </button>
         );
       })}
@@ -1941,14 +1978,6 @@ function generatorMatchesGenerator(
 }
 
 function frameTypeForFrame(frame: FrameDoc, messages: FrameMessage[]): FrameType {
-  const metadata = recordValue(frame.metadata);
-  const metadataType = stringValue(metadata?.type);
-  if (
-    metadataType === "projector.runtime-completion" ||
-    metadataType === "projector.runtime-turn"
-  ) {
-    return "work";
-  }
   if (messages.some((message) => message.type === "work")) return "work";
   if (messages.length === 0) return "instance";
   if (messages.some((message) => message.type === "instance")) return "instance";
@@ -2111,7 +2140,8 @@ function InstanceNode({
   defaultExpanded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const details = instance.states.length + instance.commands.length;
+  const details =
+    instance.states.length + instance.tools.length + instance.commands.length;
   const childCount = instance.members.length + instance.children.length;
 
   return (
@@ -2161,6 +2191,7 @@ function InstanceNode({
             />
           </TreeDisclosure>
           <StateList states={instance.states} />
+          <ActionList title="tools" actions={instance.tools} />
           <ActionList title="commands" actions={instance.commands} />
           {instance.members.length > 0 ? (
             <TreeSection title={`members ${instance.members.length}`}>
@@ -2993,6 +3024,10 @@ function findCommandInInstance(
     if (found) return found;
   }
   return undefined;
+}
+
+function isWithinBottom(element: HTMLElement, threshold: number) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
 function findStateInInstance(

@@ -18,6 +18,7 @@ export default defineSchema({
     activationId: v.optional(v.string()),
     inert: v.optional(v.boolean()),
     metadata: v.optional(v.any()),
+    provenance: v.optional(v.any()),
     messages: v.array(v.any()),
     createdAt: v.number(),
   }).index("by_reference", ["referenceFrameId"]),
@@ -47,6 +48,13 @@ export default defineSchema({
     frameId: v.id("frames"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
+    attachments: v.optional(v.array(v.object({
+      storageId: v.id("_storage"),
+      name: v.string(),
+      contentType: v.string(),
+      size: v.number(),
+      kind: v.union(v.literal("image"), v.literal("file")),
+    }))),
     createdAt: v.number(),
     // Voice mode fields
     mode: v.optional(v.union(v.literal("text"), v.literal("voice"))),

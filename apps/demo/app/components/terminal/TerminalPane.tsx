@@ -1,18 +1,23 @@
 "use client";
 
-import { forwardRef, useEffect, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import type { ForwardedRef } from "react";
 import type { Id } from "@/convex/_generated/dataModel";
-import type { DemoClientInstance, DemoMessage } from "@/src/types/display";
+import type { DemoAttachment, DemoClientInstance, DemoMessage } from "@/src/types/display";
 import type { OptimisticContext } from "@projectors/core/client";
 import type { LocalVideoTrack } from "livekit-client";
-import { scanlinesEnabledAtom } from "@/src/atoms";
+import { scanlinesEnabledAtom, type MessageTransport } from "@/src/atoms";
 import { useAtom } from "jotai";
 import { useProjector } from "@/src/projector/ProjectorProvider";
 
 type TerminalPaneProps = {
   messages: DemoMessage[];
   input: string;
+  attachments: TerminalAttachment[];
+  attachmentsUploading: boolean;
   onInputChange: (value: string) => void;
+  onAttachmentFiles: (files: File[]) => void;
+  onRemoveAttachment: (storageId: string) => void;
   onSend: () => void;
   onForkSession: () => void;
   onReturnToLatest: () => void;
@@ -21,6 +26,10 @@ type TerminalPaneProps = {
   timeTravelFrameId: Id<"frames"> | null;
   connectionError?: string | null;
   voiceStatus?: { status: string; detail?: string };
+  messageTransport: MessageTransport;
+  liveKitEnabled?: boolean;
+  liveKitReady?: boolean;
+  liveKitStatus?: { status: string; detail?: string };
   localCameraTrack?: LocalVideoTrack | null;
 };
 
@@ -29,7 +38,11 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
     {
       messages,
       input,
+      attachments,
+      attachmentsUploading,
       onInputChange,
+      onAttachmentFiles,
+      onRemoveAttachment,
       onSend,
       onForkSession,
       onReturnToLatest,
@@ -38,11 +51,19 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
       timeTravelFrameId,
       connectionError,
       voiceStatus,
+      messageTransport,
+      liveKitEnabled = false,
+      liveKitReady = false,
+      liveKitStatus,
       localCameraTrack,
     },
     ref,
   ) {
     const scrollRef = useRef<HTMLDivElement>(null);
+    const shouldAutoScrollRef = useRef(true);
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const [liveKitDiagnosticsOpen, setLiveKitDiagnosticsOpen] = useState(false);
+    const [dragDepth, setDragDepth] = useState(0);
     const [scanlinesEnabled, setScanlinesEnabled] = useAtom(scanlinesEnabledAtom);
     const { effigy, instances, readOnly } = useProjector();
     const state = getAgentControlsState(instances);
@@ -50,11 +71,78 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
     const cameraEnabled = Boolean(state?.cameraEnabled);
     const memoryEnabled = Boolean(state?.memoryEnabled);
     const streamingEnabled = state?.streamingEnabled !== false;
+    const liveKitTransportActive = messageTransport === "livekit";
+    const liveKitUnavailable = liveKitTransportActive && liveKitEnabled && !liveKitReady;
+    const hasAttachments = attachments.length > 0;
+    const isDraggingFiles = dragDepth > 0;
+    const sendDisabled = isLoading || attachmentsUploading || (!input.trim() && !hasAttachments) || liveKitUnavailable;
+    const handleSubmit = () => {
+      if (liveKitUnavailable) {
+        setLiveKitDiagnosticsOpen(true);
+        return;
+      }
+      onSend();
+    };
+    const handleDragEnter = (event: DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event) || isTimeTraveling) return;
+      event.preventDefault();
+      setDragDepth((depth) => depth + 1);
+    };
+    const handleDragOver = (event: DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event) || isTimeTraveling) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    };
+    const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event) || isTimeTraveling) return;
+      event.preventDefault();
+      setDragDepth((depth) => Math.max(0, depth - 1));
+    };
+    const handleDrop = (event: DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event) || isTimeTraveling) return;
+      event.preventDefault();
+      setDragDepth(0);
+      const files = Array.from(event.dataTransfer.files).filter((file) => file.size > 0);
+      if (files.length > 0) onAttachmentFiles(files);
+    };
+    const setTextareaRefs = useCallback(
+      (node: HTMLTextAreaElement | null) => {
+        textareaRef.current = node;
+        setForwardedRef(ref, node);
+      },
+      [ref],
+    );
+
+    useLayoutEffect(() => {
+      const node = scrollRef.current;
+      if (node && shouldAutoScrollRef.current) {
+        node.scrollTop = node.scrollHeight;
+      }
+    }, [messages.length, isLoading, input]);
+
+    useLayoutEffect(() => {
+      const scrollNode = scrollRef.current;
+      if (!scrollNode) return;
+
+      const scrollToBottomIfPinned = () => {
+        if (shouldAutoScrollRef.current) {
+          scrollNode.scrollTop = scrollNode.scrollHeight;
+        }
+      };
+      const contentNode = scrollNode.firstElementChild;
+      const observer = new ResizeObserver(scrollToBottomIfPinned);
+      observer.observe(scrollNode);
+      if (contentNode) observer.observe(contentNode);
+      scrollToBottomIfPinned();
+      return () => observer.disconnect();
+    }, []);
 
     useEffect(() => {
-      const node = scrollRef.current;
-      if (node) node.scrollTop = node.scrollHeight;
-    }, [messages.length, isLoading]);
+      const node = textareaRef.current;
+      if (!node) return;
+      node.style.height = "32px";
+      node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
+    }, [input]);
 
     const runToggle = async (name: string, enabled: boolean) => {
       if (readOnly) return;
@@ -79,7 +167,15 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
     };
 
     return (
-      <section className="pane-focus relative flex min-h-0 flex-col border-r border-terminal-green-dimmer bg-terminal-bg">
+      <section
+        className={`pane-focus relative flex min-h-0 flex-col border-r border-terminal-green-dimmer ${
+          isDraggingFiles ? "bg-terminal-cyan/10" : "bg-terminal-bg"
+        }`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <header className="flex items-center justify-between border-b border-terminal-green-dimmer px-4 py-2">
           <h1 className="terminal-glow text-sm font-bold tracking-[0.08em]">MESSAGES</h1>
           <div className="flex items-center gap-2 text-xs">
@@ -122,6 +218,9 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
 
         <div
           ref={scrollRef}
+          onScroll={(event) => {
+            shouldAutoScrollRef.current = isWithinBottom(event.currentTarget, 10);
+          }}
           className={`terminal-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto p-4 ${
             cameraEnabled ? "sm:pr-52" : ""
           }`}
@@ -195,42 +294,168 @@ export const TerminalPane = forwardRef<HTMLTextAreaElement, TerminalPaneProps>(
           </div>
         ) : (
           <form
-            className="border-t border-terminal-green-dimmer p-3"
+            className={`border-t px-2 py-1.5 ${
+              isDraggingFiles ? "border-terminal-cyan bg-terminal-cyan/10" : "border-terminal-green-dimmer"
+            }`}
             onSubmit={(event) => {
               event.preventDefault();
-              onSend();
+              handleSubmit();
             }}
           >
-            <div className="flex items-end gap-3">
-              <span className="pb-2 text-terminal-green-dim">&gt;</span>
+            {(attachments.length > 0 || attachmentsUploading) && (
+              <div className="mb-1.5 flex flex-wrap gap-2 pl-6">
+                {attachments.map((attachment) => (
+                  <PendingAttachmentPreview
+                    key={attachment.storageId}
+                    attachment={attachment}
+                    onRemove={() => onRemoveAttachment(attachment.storageId)}
+                  />
+                ))}
+                {attachmentsUploading && (
+                  <div className="flex h-8 items-center rounded border border-terminal-green-dimmer px-2 text-xs text-terminal-cyan">
+                    uploading...
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <span className="flex h-8 shrink-0 items-center text-terminal-green-dim">&gt;</span>
               <textarea
-                ref={ref}
+                ref={setTextareaRefs}
                 value={input}
                 onChange={(event) => onInputChange(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    onSend();
+                    handleSubmit();
                   }
                 }}
-                rows={2}
-                className="min-h-12 flex-1 resize-none bg-transparent text-sm leading-6 text-terminal-green outline-none placeholder:text-terminal-green-dimmer"
+                rows={1}
+                className="max-h-40 min-h-8 flex-1 resize-none overflow-y-auto bg-transparent px-1 py-1 text-sm leading-6 text-terminal-green outline-none placeholder:text-terminal-green-dimmer"
                 placeholder="Message the projector demo..."
               />
+              {liveKitTransportActive ? (
+                <button
+                  type="button"
+                  onClick={() => setLiveKitDiagnosticsOpen(true)}
+                  className={`flex h-8 w-4 shrink-0 items-center justify-center text-[10px] leading-none ${liveKitStatusColor(liveKitReady, liveKitStatus?.status)}`}
+                  aria-label="Show LiveKit RPC diagnostics"
+                >
+                  ●
+                </button>
+              ) : (
+                <span
+                  className="flex h-8 w-4 shrink-0 items-center justify-center text-sm leading-none text-terminal-green"
+                  aria-label="Convex transport ready"
+                  role="img"
+                >
+                  ∴
+                </span>
+              )}
               <button
                 type="submit"
-                disabled={isLoading || input.trim().length === 0}
-                className="rounded border border-terminal-green px-3 py-2 text-sm text-terminal-green hover:bg-terminal-green hover:text-terminal-bg disabled:cursor-not-allowed disabled:border-terminal-green-dimmer disabled:text-terminal-green-dimmer"
+                disabled={sendDisabled}
+                aria-label={liveKitUnavailable ? "Show LiveKit RPC diagnostics" : "Send message"}
+                className="h-8 shrink-0 rounded border border-terminal-green px-3 text-sm text-terminal-green hover:bg-terminal-green hover:text-terminal-bg disabled:cursor-not-allowed disabled:border-terminal-green-dimmer disabled:text-terminal-green-dimmer"
               >
                 send
               </button>
             </div>
           </form>
         )}
+        {liveKitDiagnosticsOpen && (
+          <LiveKitDiagnosticsModal
+            ready={liveKitReady}
+            status={liveKitStatus}
+            onClose={() => setLiveKitDiagnosticsOpen(false)}
+          />
+        )}
       </section>
     );
   },
 );
+
+function LiveKitDiagnosticsModal({
+  ready,
+  status,
+  onClose,
+}: {
+  ready: boolean;
+  status?: { status: string; detail?: string };
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-30 flex items-center justify-center bg-terminal-bg/80 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="LiveKit RPC diagnostics"
+      onClick={onClose}
+    >
+      <div
+        className="w-[min(420px,calc(100vw-2rem))] border border-terminal-green-dimmer bg-terminal-bg p-4"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-terminal-green-dimmer pb-3">
+          <div>
+            <h2 className="text-sm font-bold tracking-[0.08em] text-terminal-green">
+              LIVEKIT RPC
+            </h2>
+            <div className="mt-1 text-xs text-terminal-green-dim">
+              session request transport
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-terminal-green-dimmer px-2 py-1 text-xs text-terminal-green-dim hover:border-terminal-green hover:text-terminal-green"
+          >
+            close
+          </button>
+        </div>
+        <dl className="mt-4 space-y-3 text-xs leading-5">
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-terminal-green-dim">ready for requests</dt>
+            <dd className={ready ? "text-terminal-cyan" : "text-terminal-yellow"}>
+              {ready ? "yes" : "no"}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-terminal-green-dim">status</dt>
+            <dd className={liveKitStatusColor(ready, status?.status)}>
+              {status?.status ?? "connecting"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-terminal-green-dim">detail</dt>
+            <dd className="mt-1 break-words text-terminal-green">
+              {status?.detail ?? "Waiting for the LiveKit room and agent worker to become available."}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+function liveKitStatusColor(ready: boolean, status?: string): string {
+  if (ready) return "text-terminal-green";
+  return status === "disconnected" || status === "error" ? "text-terminal-red" : "text-terminal-yellow";
+}
+
+function setForwardedRef<T>(ref: ForwardedRef<T>, value: T | null) {
+  if (typeof ref === "function") {
+    ref(value);
+    return;
+  }
+  if (ref) {
+    ref.current = value;
+  }
+}
+
+function isWithinBottom(element: HTMLElement, threshold: number) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
 
 function CameraPreview({ track }: { track: LocalVideoTrack | null }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -297,12 +522,101 @@ function Toggle({
 
 function TerminalMessage({ message }: { message: DemoMessage }) {
   const isUser = message.role === "user";
+  const attachments = message.attachments ?? [];
   return (
     <article className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 text-sm">
       <div className={isUser ? "text-terminal-cyan" : "text-terminal-yellow"}>{isUser ? "user" : "agent"}</div>
-      <div className="whitespace-pre-wrap leading-6 text-terminal-green">{message.content}</div>
+      <div className="min-w-0 space-y-2">
+        {message.content && (
+          <div className="whitespace-pre-wrap leading-6 text-terminal-green">{message.content}</div>
+        )}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {attachments.map((attachment) => (
+              <SentAttachmentPreview key={attachment.storageId} attachment={attachment} />
+            ))}
+          </div>
+        )}
+      </div>
     </article>
   );
+}
+
+type TerminalAttachment = DemoAttachment & {
+  previewUrl?: string;
+};
+
+function PendingAttachmentPreview({
+  attachment,
+  onRemove,
+}: {
+  attachment: TerminalAttachment;
+  onRemove: () => void;
+}) {
+  if (attachment.kind === "image") {
+    return (
+      <div className="flex h-12 max-w-56 items-center gap-2 rounded border border-terminal-green-dimmer px-1.5 py-1">
+        <img
+          src={attachment.previewUrl ?? attachment.url ?? ""}
+          alt=""
+          className="h-9 w-9 shrink-0 rounded object-cover"
+        />
+        <span className="min-w-0 truncate text-xs text-terminal-green">{attachment.name}</span>
+        <RemoveAttachmentButton onClick={onRemove} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-8 max-w-56 items-center gap-2 rounded border border-terminal-green-dimmer px-2">
+      <span className="min-w-0 truncate text-xs text-terminal-green">{attachment.name}</span>
+      <RemoveAttachmentButton onClick={onRemove} />
+    </div>
+  );
+}
+
+function SentAttachmentPreview({ attachment }: { attachment: DemoAttachment }) {
+  const label = attachment.name || "attachment";
+  if (attachment.kind === "image" && attachment.url) {
+    return (
+      <a
+        href={attachment.url}
+        target="_blank"
+        rel="noreferrer"
+        className="block h-20 w-20 overflow-hidden rounded border border-terminal-green-dimmer hover:border-terminal-green"
+        title={label}
+      >
+        <img src={attachment.url} alt={label} className="h-full w-full object-cover" />
+      </a>
+    );
+  }
+
+  const className = "max-w-64 truncate rounded border border-terminal-green-dimmer px-2 py-1 text-xs text-terminal-green-dim";
+  if (attachment.url) {
+    return (
+      <a href={attachment.url} target="_blank" rel="noreferrer" className={`${className} hover:border-terminal-green hover:text-terminal-green`}>
+        {label}
+      </a>
+    );
+  }
+  return <span className={className}>{label}</span>;
+}
+
+function RemoveAttachmentButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-terminal-green-dimmer text-xs text-terminal-green-dim hover:border-terminal-red hover:text-terminal-red"
+      aria-label="Remove attachment"
+    >
+      x
+    </button>
+  );
+}
+
+function hasDraggedFiles(event: DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types).includes("Files");
 }
 
 function shortId(id: string) {

@@ -15,9 +15,10 @@ import {
 import type { ClientMachineMessage } from "@projectors/core/client";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import type { DemoAttachment } from "@/src/types/display";
 
 type VoiceStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
-type SendLiveKitMessage = (content: string) => Promise<void>;
+type SendLiveKitMessage = (message: { content: string; attachments: DemoAttachment[] }) => Promise<void>;
 type SendLiveKitCommand = (message: ClientMachineMessage) => Promise<unknown>;
 const MESSAGE_TOPIC = "demo.message.v1";
 const COMMAND_RPC_METHOD = "demo.command.v1";
@@ -118,7 +119,7 @@ export function LiveVoiceClient({
       return;
     }
 
-    onSendMessageChange?.(async (content: string) => {
+    onSendMessageChange?.(async ({ content, attachments }) => {
       if (
         roomRef.current !== room ||
         roomSessionIdRef.current !== sessionId ||
@@ -127,9 +128,12 @@ export function LiveVoiceClient({
         onSendMessageChange?.(null);
         throw new Error("LiveKit room changed before the message was sent");
       }
-      const payload = new TextEncoder().encode(JSON.stringify({ content, sentAt: Date.now() }));
+      const payload = new TextEncoder().encode(JSON.stringify({ content, attachments, sentAt: Date.now() }));
       console.info("[demo/livekit] publish text message", {
         topic: MESSAGE_TOPIC,
+        bytes: payload.byteLength,
+        contentChars: content.length,
+        attachments: summarizeLiveKitAttachments(attachments),
         participants: [...room.remoteParticipants.values()].map((participant) => participant.identity),
       });
       await room.localParticipant.publishData(payload, {
@@ -352,4 +356,15 @@ function isAgentParticipant(participant: RemoteParticipant): boolean {
 
 function findAgentParticipant(room: Room): RemoteParticipant | undefined {
   return [...room.remoteParticipants.values()].find(isAgentParticipant);
+}
+
+function summarizeLiveKitAttachments(attachments: readonly DemoAttachment[]): unknown {
+  return attachments.map((attachment) => ({
+    kind: attachment.kind,
+    name: attachment.name,
+    contentType: attachment.contentType,
+    size: attachment.size,
+    hasUrl: Boolean(attachment.url),
+    hasDataUrl: Boolean(attachment.dataUrl),
+  }));
 }

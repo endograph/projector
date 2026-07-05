@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { AnyParamsSchema, JsonObject } from "./params.ts";
 
 export type ProjectionMode = "hidden" | "augment" | "replace";
 
@@ -77,6 +78,7 @@ export type ProjectionContext<TDataContent = never> = {
   address: ProjectionAddress;
   targetGeneratorId?: GeneratorId;
   originNode: Node<TDataContent>;
+  params: JsonObject;
   createNodeIR(): ProjectionIR<TDataContent>;
 };
 
@@ -107,6 +109,7 @@ export type HistoryProjectionContext<TDataContent = never> = {
   trigger: RuntimeTrigger;
   history: Frame<TDataContent>[];
   states: Record<StateKey, unknown>;
+  params: JsonObject;
 };
 
 export type HistoryProjectionFunctionMethod<TDataContent = never> = {
@@ -314,7 +317,9 @@ export type ActionInstanceContext<TDataContent = never> = {
 export type ActionContext<
   S = undefined,
   TDataContent = never,
+  TParams extends JsonObject = {},
 > = {
+  params: TParams;
   getState?: (address: InferenceStateAddress) => unknown;
   instance: ActionInstanceContext<TDataContent>;
 } & ActionStateContext<S>;
@@ -325,16 +330,19 @@ export type Action<
   O = unknown,
   TName extends string = string,
   TDataContent = never,
+  TParams extends AnyParamsSchema = AnyParamsSchema,
 > = {
   state: StateDescriptor<S> | null;
+  params?: TParams;
   name: TName;
   description?: string;
   inputSchema?: z.ZodType<I>;
-  run?: (input: I, ctx: ActionContext<S, TDataContent>) => O | Promise<O>;
+  run?: (input: I, ctx: ActionContext<S, TDataContent, z.output<TParams>>) => O | Promise<O>;
 };
 
-export type AnyAction = {
+export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
   state: StateDescriptor<any> | null;
+  params?: TParams;
   name: string;
   description?: string;
   inputSchema?: z.ZodType<any>;
@@ -349,6 +357,7 @@ export type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
+  params?: AnyParamsSchema;
   instructions?: string;
   tools?: ActionConfigEntry[];
   commands?: ActionConfigEntry[];
@@ -357,12 +366,18 @@ export type NodeConfig<TDataContent = never> = {
   output?: OutputConfig<TDataContent>;
   projection?: Projection<TDataContent>;
   runtime?: Runtime<TDataContent>;
+  /** Per-executor config, namespaced by executor identity name. Plain JSON. */
+  executorConfig?: ExecutorConfig;
 };
 
-export type Node<TDataContent = never> = {
+export type Node<
+  TDataContent = never,
+  TParams extends AnyParamsSchema = AnyParamsSchema,
+> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  params: TParams;
   instructions?: string;
   toolBindings: ActionBindings;
   toolRefs: ActionRef[];
@@ -373,19 +388,21 @@ export type Node<TDataContent = never> = {
   output?: OutputConfig<TDataContent>;
   projection: Projection<TDataContent>;
   runtime: NormalizedRuntime<TDataContent>;
+  executorConfig?: ExecutorConfig;
 };
 
 export type Instance<TDataContent = never> = {
   id: InstanceId;
   node: Node<TDataContent>;
   isSource?: boolean;
+  params?: JsonObject;
   states?: Record<string, StateContainer>;
   children?: Instance<TDataContent>[];
 };
 
-export type CompletionReason = "done" | "cancelled" | "delegated" | "error";
+export type CompletionReason = "done" | "cancelled" | "delegated" | "error" | "terminal-action";
 
-export type WorkCompletionReason = "end-turn" | "done" | "cancelled" | "delegated";
+export type WorkCompletionReason = "end-turn" | "done" | "cancelled" | "delegated" | "error" | "terminal-action" | "absorbed";
 
 export type WorkActivationMessage = {
   type: "work";
@@ -401,6 +418,13 @@ export type WorkCompletionMessage = {
   type: "work";
   kind: "completion";
   activationId: string;
+  /**
+   * The generator whose work completed. Optional for completions that pair
+   * with an activation message already in the log; required to record a
+   * completion for work that was never scheduled through the machine (e.g.
+   * realtime turns).
+   */
+  generatorId?: GeneratorId;
   sourceFrameId?: string;
   reason: WorkCompletionReason;
 };
@@ -466,6 +490,7 @@ export type ActionRequestMessage = {
   input: unknown;
   target?: ProjectionAddress;
   callId: string;
+  audience?: Audience;
 };
 
 export type ActionResultMessage<TDataContent = never> = {
@@ -478,7 +503,9 @@ export type ActionResultMessage<TDataContent = never> = {
   success: boolean;
   value?: unknown;
   error?: string;
+  terminal?: boolean;
   outputMessageIndices?: number[];
+  audience?: Audience;
 };
 
 export type ActionMessage<TDataContent = never> =
@@ -486,8 +513,8 @@ export type ActionMessage<TDataContent = never> =
   | ActionResultMessage<TDataContent>;
 
 export type ExecuteActionResult<T = unknown, TDataContent = never> =
-  | { success: true; value?: T; messages?: FrameMessage<TDataContent>[]; callId: string }
-  | { success: false; error: string; value?: T; messages?: FrameMessage<TDataContent>[]; callId: string };
+  | { success: true; value?: T; messages?: FrameMessage<TDataContent>[]; terminal?: boolean; callId: string }
+  | { success: false; error: string; value?: T; messages?: FrameMessage<TDataContent>[]; terminal?: boolean; callId: string };
 
 export type FrameMessage<TDataContent = never> = (
   | ActorMessage<TDataContent>
@@ -497,12 +524,51 @@ export type FrameMessage<TDataContent = never> = (
 ) &
   Record<string, unknown>;
 
+export type ExecutorIdentity = {
+  name: string;
+  version?: string;
+};
+
+/**
+ * Execution facts an executor reports alongside the frames it produces —
+ * latency, token usage, cost, the model that actually ran. Open-keyed so
+ * executors can attach transport-specific extras (mode, provider request ids).
+ */
+export type ExecutionReport = {
+  latencyMs?: number;
+  model?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+  };
+  cost?: { amount: number; currency: string };
+} & Record<string, unknown>;
+
+export type FrameProducer =
+  | { executor: ExecutorIdentity }
+  | { machine: string };
+
+/**
+ * Framework-owned observational channel. Written only by the framework at
+ * frame-production boundaries (executors report via the enqueue report arg);
+ * never read by the fold: `fold(charter, frames)` and
+ * `fold(charter, stripProvenance(frames))` are identical by construction.
+ * Persistence may drop it — doing so costs forensics, never correctness.
+ */
+export type FrameProvenance = {
+  producer?: FrameProducer;
+  execution?: ExecutionReport;
+  /** The runner/claim that hosted production (workerId, leaseId, host…). */
+  runner?: Record<string, unknown>;
+};
+
 export type FrameDraft<TDataContent = never> = {
   generatorId?: GeneratorId;
   activationId?: string;
   inert?: boolean;
   messages: FrameMessage<TDataContent>[];
-  metadata?: Record<string, unknown>;
+  provenance?: FrameProvenance;
 };
 
 export type Frame<TDataContent = never> = FrameDraft<TDataContent> & {
@@ -523,27 +589,44 @@ export type AnyOutputConfig = OutputConfig<any>;
 
 export type EnqueueFrame<TDataContent = never> = (
   frame: FrameDraft<TDataContent>,
+  report?: ExecutionReport,
 ) => Frame<TDataContent>;
 
 export type ExecutorRunRequest<TDataContent = never> = {
   activationId: string;
   generatorId: GeneratorId;
+  /** The generator node's `executorConfig` namespace for this executor. */
+  config?: unknown;
   inference: CompiledInference<TDataContent>;
   enqueueFrame: EnqueueFrame<TDataContent>;
   createActionContext?: (action: AnyAction) => ActionContext<unknown, TDataContent>;
   output?: OutputConfig<TDataContent>;
   signal?: AbortSignal;
+  /**
+   * Re-projects the inference against the current frame log (visibility rules
+   * applied, this activation's own frames excluded). Executors that support
+   * multi-step runs should call this before each step; every frame returned by
+   * a refresh is treated as seen by this activation and its pending work is
+   * absorbed on completion.
+   */
+  refreshInference?: () => CompiledInference<TDataContent>;
 };
 
 export type ExecutorRunResult<TDataContent = never> = {
   completionReason: CompletionReason;
   value?: string;
   frames?: Array<FrameDraft<TDataContent> | Frame<TDataContent>>;
+  /**
+   * Run-level execution facts (latency, usage, cost). The machine folds these
+   * into the provenance of the frames it synthesizes from this result and the
+   * run's completion frame.
+   */
+  execution?: ExecutionReport;
 };
 
 export type ExecutorRealizePromptRequest<TDataContent = never> = Pick<
   ExecutorRunRequest<TDataContent>,
-  "generatorId" | "activationId" | "inference" | "output"
+  "generatorId" | "activationId" | "config" | "inference" | "output"
 >;
 
 export type ExecutorRealizedPrompt = {
@@ -551,7 +634,35 @@ export type ExecutorRealizedPrompt = {
   input: unknown;
 };
 
+/**
+ * Executor packages register their node-level config types here via
+ * declaration merging, keyed by their identity name:
+ *
+ *   declare module "@projectors/core" {
+ *     interface ExecutorConfigRegistry { aisdk: AisdkExecutorNodeConfig }
+ *   }
+ *
+ * A type-only import of the executor package is enough to typecheck a
+ * charter's `executorConfig` — the charter stays plain serializable data.
+ */
+export interface ExecutorConfigRegistry {}
+
+export type ExecutorConfig = {
+  [K in keyof ExecutorConfigRegistry]?: ExecutorConfigRegistry[K];
+} & Record<string, unknown>;
+
 export type ProjectorExecutor<TDataContent = never> = {
+  /**
+   * Reported into frame provenance by the machine — executors never write
+   * provenance directly. Anonymous executors produce unattributed frames.
+   * The identity name is also the executor's `executorConfig` namespace key.
+   */
+  identity?: ExecutorIdentity;
+  /**
+   * Validates each node's `executorConfig[identity.name]` at machine creation
+   * so misconfiguration fails at bind time, not mid-activation.
+   */
+  configSchema?: z.ZodType<unknown>;
   run(
     request: ExecutorRunRequest<TDataContent>,
   ): ExecutorRunResult<TDataContent> | Promise<ExecutorRunResult<TDataContent>>;
@@ -563,10 +674,13 @@ export type ProjectorExecutor<TDataContent = never> = {
 export type Executor<TDataContent = never> =
   ProjectorExecutor<TDataContent>;
 
-export type Charter<TDataContent = never> = {
+export type Charter<
+  TDataContent = never,
+  TParams extends AnyParamsSchema = AnyParamsSchema,
+> = {
   key?: string;
   version?: string;
-  executor: ProjectorExecutor<TDataContent>;
+  params: TParams;
   nodes: Record<string, Node<TDataContent>>;
   tools: Record<string, AnyAction>;
   commands: Record<string, AnyAction>;
@@ -578,7 +692,7 @@ export type Charter<TDataContent = never> = {
 export type CharterConfig<TDataContent = never> = {
   key?: string;
   version?: string;
-  executor: ProjectorExecutor<TDataContent>;
+  params?: AnyParamsSchema;
   nodes: readonly Node<TDataContent>[];
   tools: readonly AnyAction[];
   commands: readonly AnyAction[];
@@ -614,6 +728,7 @@ export type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  params?: unknown;
   instructions?: string;
   tools?: DryAction[];
   commands?: DryAction[];
@@ -622,12 +737,14 @@ export type DryNode<TDataContent = never> = {
   output?: SerializedOutputConfig;
   projection?: Ref;
   runtime?: DryRuntime;
+  executorConfig?: Record<string, unknown>;
 };
 
 export type SerializedInstance<TDataContent = never> = {
   id: InstanceId;
   node: DryNode<TDataContent> | Ref;
   isSource?: boolean;
+  params?: JsonObject;
   states?: Record<StateKey, StateContainer>;
   children?: SerializedInstance<TDataContent>[];
 };

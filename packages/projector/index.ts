@@ -6,6 +6,7 @@ export * from "./src/contributors.ts";
 export * from "./src/history.ts";
 export * from "./src/identifiers.ts";
 export * from "./src/machine.ts";
+export * from "./src/params.ts";
 export * from "./src/projection-functions.ts";
 export * from "./src/refs.ts";
 export * from "./src/projection-address.ts";

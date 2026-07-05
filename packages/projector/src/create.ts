@@ -12,8 +12,14 @@ import type {
 } from "./types.ts";
 import { defaultProjection, hiddenProjection, isProjectionFunction } from "./projection-functions.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
+import {
+  emptyParamsSchema,
+  normalizeParamsSchema,
+  type AnyParamsSchema,
+  type EnsureParamsSatisfy,
+} from "./params.ts";
 
-type InferActions<TConfig, TKey extends "tools" | "commands"> = TConfig extends Record<
+export type InferActions<TConfig, TKey extends "tools" | "commands"> = TConfig extends Record<
   TKey,
   infer TActions extends readonly ActionConfigEntry[]
 >
@@ -34,14 +40,72 @@ type InferState<TConfig> = TConfig extends { state: StateDescriptor<infer S> }
   ? NormalizedStateDescriptor<S>
   : undefined;
 
+type InferParamsSchema<TConfig> = TConfig extends { params: infer TParams extends AnyParamsSchema }
+  ? TParams
+  : typeof emptyParamsSchema;
+
+export type ActionEntryParams<TEntry> = TEntry extends AnyAction<infer TParams>
+  ? TParams
+  : typeof emptyParamsSchema;
+
+export type ValidateAttachedActionParams<TConfig, TKey extends "tools" | "commands"> =
+  [InferActions<TConfig, TKey>[number]] extends [never]
+    ? unknown
+    : InferActions<TConfig, TKey>[number] extends infer TEntry
+      ? TEntry extends string
+        ? unknown
+        : EnsureParamsSatisfy<InferParamsSchema<TConfig>, ActionEntryParams<TEntry>>
+      : unknown;
+
+export type NodeParamsSchemaOf<TNode> =
+  TNode extends Node<any, infer TParams> ? TParams : typeof emptyParamsSchema;
+
+export type NodeMemberParamsSchema<TNode> =
+  TNode extends { __config: infer TConfig }
+    ? TConfig extends { members: readonly (infer TMember)[] }
+      ? NodeParamsSchemaOf<TMember> | NodeMemberParamsSchema<TMember>
+      : never
+    : never;
+
+export type NodeTreeParamsSchema<TNode> =
+  NodeParamsSchemaOf<TNode> | NodeMemberParamsSchema<TNode>;
+
+export type ValidateNodeTreeParams<
+  TSuper extends AnyParamsSchema,
+  TNode,
+> =
+  EnsureParamsSatisfy<TSuper, NodeParamsSchemaOf<TNode>>
+  & (
+    TNode extends { __config: infer TConfig }
+      ? TConfig extends { members: readonly (infer TMember)[] }
+        ? ValidateNodeTreeParams<TSuper, TMember>
+        : unknown
+      : unknown
+  );
+
 export type CreatedNode<
   TDataContent,
   TConfig extends NodeConfig<TDataContent>,
-> = Node<TDataContent> & {
+> = Node<TDataContent, InferParamsSchema<TConfig>> & {
   state: InferState<TConfig>;
   __tools?: InferActionMetas<TConfig, "tools">;
   __commands?: InferActionMetas<TConfig, "commands">;
+  __config: TConfig;
 };
+
+const NODE_BRAND: unique symbol = Symbol.for("projector.node") as never;
+
+/**
+ * True for hydrated Node objects produced by createNode, as opposed to dry
+ * (serialized) node data or refs.
+ */
+export function isNode<TDataContent = never>(value: unknown): value is Node<TDataContent> {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as { [NODE_BRAND]?: unknown })[NODE_BRAND] === true,
+  );
+}
 
 export function normalizeProjection<TDataContent = never>(
   projection: Projection<TDataContent> | undefined,
@@ -112,7 +176,11 @@ function normalizeProjectionValue<TDataContent = never>(
 export function createNode<
   TDataContent = never,
   const TConfig extends NodeConfig<TDataContent> = NodeConfig<TDataContent>,
->(config: TConfig): CreatedNode<TDataContent, TConfig> {
+>(
+  config: TConfig
+    & ValidateAttachedActionParams<TConfig, "tools">
+    & ValidateAttachedActionParams<TConfig, "commands">,
+): CreatedNode<TDataContent, TConfig> {
   const key = config.key ?? config.name;
   if (!key) {
     throw new Error("Node requires key or name");
@@ -122,9 +190,11 @@ export function createNode<
   const commands = normalizeActionEntries(config.commands ?? []);
 
   return {
+    [NODE_BRAND]: true,
     key,
     sourceNodeKey: config.sourceNodeKey,
     name: config.name,
+    params: normalizeParamsSchema(config.params),
     instructions: config.instructions,
     toolBindings: tools.bindings,
     toolRefs: tools.refs,
@@ -135,7 +205,8 @@ export function createNode<
     output: config.output,
     projection: normalizeProjection(config.projection),
     runtime: normalizeRuntime(config.runtime),
-  } as CreatedNode<TDataContent, TConfig>;
+    executorConfig: config.executorConfig,
+  } as unknown as CreatedNode<TDataContent, TConfig>;
 }
 
 function normalizeActionEntries(entries: readonly ActionConfigEntry[]): {

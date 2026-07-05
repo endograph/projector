@@ -379,7 +379,7 @@ describe("LiveKitCascadeExecutor", () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]?.inert).toBeUndefined();
     expect(frames[0]).toMatchObject({
-      metadata: { mode: "text", transport: "livekit" },
+      provenance: { execution: { mode: "text", transport: "livekit" } },
       messages: [
         {
           type: "user",
@@ -912,7 +912,18 @@ function syncContext(
     generatorId: ROOT_GENERATOR_ID,
     inference: inference(),
     createActionContext: () => createUnboundActionContext(),
-    enqueueFrame: (frame) => machine.enqueueFrame(frame),
+    enqueueFrame: (frame, report) =>
+      machine.enqueueFrame(
+        report
+          ? {
+              ...frame,
+              provenance: {
+                ...frame.provenance,
+                execution: { ...frame.provenance?.execution, ...report },
+              },
+            }
+          : frame,
+      ),
     ...overrides,
     visibleFrames: (overrides.visibleFrames ?? []).map((frame) => ({
       ...frame,
@@ -925,7 +936,7 @@ function fakeMachine(frames: FrameDraft[]): RuntimeSyncContext["machine"] {
   const storedFrames: Frame[] = [];
   return {
     id: "machine",
-    root: { id: "root", node: createNode({ key: "root" }) },
+    instance: { id: "root", node: createNode({ key: "root" }) },
     charter: {} as RuntimeSyncContext["machine"]["charter"],
     frames: storedFrames,
     enqueueFrame(frame) {

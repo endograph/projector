@@ -7,10 +7,11 @@ import {
 } from "./actions.ts";
 import {
   collectContributors,
-  createRoot,
+  createRootInstance,
   directContributorChildren,
   findContributorById,
   hoistStateInstance,
+  resolveContributorNodeParams,
   type Contributor,
 } from "./contributors.ts";
 import { actorMessages, messages } from "./history.ts";
@@ -22,14 +23,9 @@ import {
 } from "./projection-functions.ts";
 import { encodeProjectionAddress } from "./projection-address.ts";
 import { resolveFrameCommands, resolveFrameTools } from "./scoped-actions.ts";
+import { sourceNodeKeyFor, sourceNodeProjectionSlot } from "./serialization.ts";
 import { resolveStates, type ResolvedState } from "./state.ts";
-import {
-  activationFrameIndexFor,
-  actorMessageVisibleByDelivery,
-  actorMessageVisibleToGenerator,
-  frameVisibleByActivationHistory,
-  isActorMessage,
-} from "./visibility.ts";
+import { visibleFramesForGenerator } from "./visibility.ts";
 import type {
   AnyAction,
   ActivationHistory,
@@ -163,7 +159,7 @@ export function compileProjection<TDataContent = never>(
   options: CompileProjectionOptions<TDataContent> = {},
 ): CompiledInference<TDataContent> {
   assertActivationCompileOptions(options);
-  const root = Array.isArray(rootOrInstances) ? createRoot(rootOrInstances) : rootOrInstances;
+  const root = Array.isArray(rootOrInstances) ? createRootInstance(rootOrInstances) : rootOrInstances;
   const states = resolveStates(root);
   const stateByContributor = groupStatesByContributor(states);
   const draft = emptyProjectionIR<TDataContent>();
@@ -205,7 +201,7 @@ export function inspectCompiledProjectionTree<TDataContent = never>(
   rootOrInstances: Instance<TDataContent> | Instance<TDataContent>[],
   options: Omit<CompileProjectionOptions<TDataContent>, "targetGeneratorId"> = {},
 ): CompiledProjectionTree<TDataContent> {
-  const root = Array.isArray(rootOrInstances) ? createRoot(rootOrInstances) : rootOrInstances;
+  const root = Array.isArray(rootOrInstances) ? createRootInstance(rootOrInstances) : rootOrInstances;
   const states = resolveStates(root);
   const stateByContributor = groupStatesByContributor(states);
   const rootContributor = directRootContributor(root);
@@ -599,6 +595,7 @@ function historyProjectionContext<TDataContent>(
       trigger: runtime.trigger,
       history: visibleHistoryForTarget(root, targetGeneratorId, runtime, options),
       states: stateValues(states),
+      params: resolveContributorNodeParams(contributor),
     },
     projection: runtime.historyProjection ?? { type: "messages" },
   };
@@ -615,33 +612,20 @@ function visibleHistoryForTarget<TDataContent>(
   }
 
   const rawHistory = options.frameHistory ?? framesFromMessages(options.history ?? [], targetGeneratorId);
-  const activationFrameIndex = activationFrameIndexFor(rawHistory, options.activationId, {
-    requireActivationFrame: options.activationId !== undefined,
-  });
+  const visible = visibleFramesForGenerator(rawHistory, targetGeneratorId, runtime, options.activationId);
+  return visible.map(stripProvenance);
+}
 
-  return rawHistory.flatMap((frame, frameIndex) => {
-    if (!frameVisibleByActivationHistory(
-      frame,
-      frameIndex,
-      activationFrameIndex,
-      runtime,
-      options.activationId,
-    )) {
-      return [];
-    }
-
-    const frameMessages = frame.messages.filter((message) => {
-      if (!isActorMessage(message)) {
-        return true;
-      }
-      return (
-        actorMessageVisibleToGenerator(message, frame, targetGeneratorId) &&
-        actorMessageVisibleByDelivery(message, frameIndex, activationFrameIndex)
-      );
-    });
-
-    return frameMessages.length > 0 ? [{ ...frame, messages: frameMessages }] : [];
-  });
+/**
+ * Provenance is observational: history-projection code never sees it, so the
+ * fold cannot come to depend on it and persistence remains free to drop it.
+ */
+function stripProvenance<TDataContent>(frame: Frame<TDataContent>): Frame<TDataContent> {
+  if (!frame.provenance) {
+    return frame;
+  }
+  const { provenance: _omitted, ...rest } = frame;
+  return rest;
 }
 
 function resolveHistoryProjection<TDataContent>(
@@ -700,6 +684,7 @@ function frameMessagesFromFrameHistory<TDataContent>(
     trigger: { type: "actor-frame" },
     history,
     states: {},
+    params: {},
   });
 }
 
@@ -850,7 +835,9 @@ function resolveProjectionValue<TDataContent>(
     return projection;
   }
 
-  const sourceProjection = sourceNodeProjectionSlot(node, slot, charter);
+  const sourceProjection = charter
+    ? sourceNodeProjectionSlot(charter, slot, sourceNodeKeyFor(node, charter))
+    : undefined;
   if (sourceProjection?.name === projection) {
     return sourceProjection;
   }
@@ -863,38 +850,6 @@ function resolveProjectionValue<TDataContent>(
     throw new Error(`Unknown projection ref "${projection}"`);
   }
   return fn;
-}
-
-function sourceNodeProjectionSlot<TDataContent>(
-  node: ProjectionContext<TDataContent>["originNode"],
-  slot: "projection" | "boundaryProjection",
-  charter: Charter<TDataContent> | undefined,
-): ProjectionFunction<TDataContent> | undefined {
-  const sourceNode = sourceNodeForProjectionSlot(node, charter);
-  if (!sourceNode) {
-    return undefined;
-  }
-
-  const value = slot === "projection"
-    ? sourceNode.projection
-    : sourceNode.runtime.type === "generator"
-      ? sourceNode.runtime.boundaryProjection
-      : undefined;
-  return isProjectionFunction<TDataContent>(value) ? value : undefined;
-}
-
-function sourceNodeForProjectionSlot<TDataContent>(
-  node: ProjectionContext<TDataContent>["originNode"],
-  charter: Charter<TDataContent> | undefined,
-): ProjectionContext<TDataContent>["originNode"] | undefined {
-  if (!charter) {
-    return undefined;
-  }
-  if (node.sourceNodeKey) {
-    return charter.nodes[node.sourceNodeKey];
-  }
-  const sourceNode = charter.nodes[node.key];
-  return sourceNode && sourceNode !== node ? sourceNode : undefined;
 }
 
 function inspectProjectionPolicy<TDataContent>(
@@ -941,6 +896,7 @@ function projectionContext<TDataContent>(
     address: contributor.address,
     targetGeneratorId,
     originNode: contributor.node,
+    params: resolveContributorNodeParams(contributor),
     createNodeIR: () => compileNodeProjectionIR(contributor, options, stateByContributor),
   };
 }

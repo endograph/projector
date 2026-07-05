@@ -1,4 +1,13 @@
-import { Output, generateText, streamText, stepCountIs, tool, type ModelMessage, type ToolSet } from "ai";
+import {
+  Output,
+  generateText,
+  streamText,
+  stepCountIs,
+  tool,
+  type ModelMessage,
+  type PrepareStepFunction,
+  type ToolSet,
+} from "ai";
 import {
   assistantMessageFromTextOutput,
   createToolActionRequest,
@@ -15,6 +24,7 @@ import type {
   AnyAction,
   CompiledInference,
   ContentPart,
+  ExecutionReport,
   ExecutorRealizedPrompt,
   ExecutorRealizePromptRequest,
   ExecutorRunRequest,
@@ -23,7 +33,7 @@ import type {
   ProjectorExecutor,
 } from "@projectors/core";
 import { z } from "zod";
-import type { AiSdkExecutorConfig, AiSdkStreamUpdate } from "./types.ts";
+import type { AiSdkExecutorConfig, AiSdkExecutorNodeConfig, AiSdkStreamUpdate } from "./types.ts";
 
 const DEFAULT_MAX_STEPS = 5;
 const DYNAMIC_CONTEXT_TAG = "dynamic-context";
@@ -41,10 +51,20 @@ type AiSdkImagePart = {
 };
 type AiSdkUserContent = string | Array<AiSdkTextPart | AiSdkImagePart>;
 
+type RunState = { terminal: boolean };
+
+const nodeConfigSchema = z.object({
+  maxOutputTokens: z.number().int().positive().optional(),
+  maxSteps: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+});
+
 export class AiSdkExecutor<
   TDataContent = never,
 > implements ProjectorExecutor<TDataContent> {
   readonly type = "aisdk";
+  readonly identity = { name: "aisdk" };
+  readonly configSchema = nodeConfigSchema;
 
   constructor(readonly config: AiSdkExecutorConfig<TDataContent>) {}
 
@@ -55,19 +75,22 @@ export class AiSdkExecutor<
 
     const generate = this.config.generateText ?? generateText;
     const stream = this.config.streamText ?? streamText;
-    const input = buildAiSdkInput(request, this.config);
+    const runState: RunState = { terminal: false };
+    const input = buildAiSdkInput(request, this.config, runState);
+    const startedAt = Date.now();
 
     try {
       if (shouldStream(this.config.stream, request)) {
-        return await this.runStreaming(request, stream, input as never);
+        return await this.runStreaming(request, stream, input as never, runState);
       }
 
       const result = await generate(input);
 
       const text = typeof result.text === "string" ? result.text : "";
       return {
-        completionReason: "done",
+        completionReason: completionReasonForFinish(runState, result.finishReason, this.config),
         ...(text.trim() ? { value: text } : {}),
+        execution: executionReport(this.config, startedAt, result.usage),
       };
     } catch (error) {
       if (isAbortError(error) || request.signal?.aborted) {
@@ -91,7 +114,9 @@ export class AiSdkExecutor<
     request: ExecutorRunRequest<TDataContent>,
     stream: NonNullable<AiSdkExecutorConfig<TDataContent>["streamText"]>,
     input: Parameters<NonNullable<AiSdkExecutorConfig<TDataContent>["streamText"]>>[0],
+    runState: RunState,
   ): Promise<ExecutorRunResult<TDataContent>> {
+    const startedAt = Date.now();
     const messageId = crypto.randomUUID();
     let seq = 0;
     let text = "";
@@ -134,9 +159,11 @@ export class AiSdkExecutor<
 
     const finalText = text || await result.text;
     const finalSeq = seq + 1;
+    const finishReason = await result.finishReason;
+    const usage = await Promise.resolve(result.usage).catch(() => undefined);
 
     return {
-      completionReason: "done",
+      completionReason: completionReasonForFinish(runState, finishReason, this.config),
       ...(finalText.trim()
         ? {
             frames: [
@@ -152,24 +179,66 @@ export class AiSdkExecutor<
             ],
           }
         : {}),
+      execution: executionReport(this.config, startedAt, usage),
     };
   }
+}
+
+function executionReport<TDataContent>(
+  config: AiSdkExecutorConfig<TDataContent>,
+  startedAt: number,
+  usage: unknown,
+): ExecutionReport {
+  const model = config.model;
+  const modelId =
+    typeof model === "string"
+      ? model
+      : typeof (model as { modelId?: unknown })?.modelId === "string"
+        ? (model as { modelId: string }).modelId
+        : undefined;
+  const usageRecord =
+    usage && typeof usage === "object" ? (usage as Record<string, unknown>) : undefined;
+  const tokens = (key: string): number | undefined => {
+    const value = usageRecord?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  };
+  const inputTokens = tokens("inputTokens");
+  const outputTokens = tokens("outputTokens");
+  const cachedInputTokens = tokens("cachedInputTokens");
+  return {
+    latencyMs: Date.now() - startedAt,
+    ...(modelId ? { model: modelId } : {}),
+    ...(inputTokens !== undefined || outputTokens !== undefined || cachedInputTokens !== undefined
+      ? {
+          usage: {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 function buildAiSdkInput<TDataContent = never>(
   request: ExecutorRunRequest<TDataContent>,
   config: AiSdkExecutorConfig<TDataContent>,
+  runState: RunState = { terminal: false },
 ) {
-  const tools = buildAiSdkTools(request, config);
+  const nodeConfig = parseNodeConfig(request.config);
+  const tools = buildAiSdkTools(request, config, runState);
   const hasTools = Object.keys(tools).length > 0;
   return {
     model: config.model,
     system: buildAiSdkSystem(request.inference),
     messages: buildAiSdkMessages(request.inference, config.messageToModelMessage),
+    prepareStep: request.refreshInference
+      ? buildPrepareStep(request.refreshInference, config)
+      : undefined,
     tools: hasTools ? tools : undefined,
     abortSignal: request.signal,
-    maxOutputTokens: config.maxOutputTokens,
-    temperature: config.temperature,
+    maxOutputTokens: nodeConfig.maxOutputTokens ?? config.maxOutputTokens,
+    temperature: nodeConfig.temperature ?? config.temperature,
     topP: config.topP,
     topK: config.topK,
     presencePenalty: config.presencePenalty,
@@ -180,7 +249,40 @@ function buildAiSdkInput<TDataContent = never>(
       : undefined,
     providerOptions: config.providerOptions as never,
     toolChoice: config.toolChoice as never,
-    stopWhen: hasTools ? stepCountIs(config.maxSteps ?? DEFAULT_MAX_STEPS) : undefined,
+    stopWhen: hasTools
+      ? [
+          stepCountIs(nodeConfig.maxSteps ?? config.maxSteps ?? DEFAULT_MAX_STEPS),
+          () => runState.terminal,
+        ]
+      : undefined,
+  };
+}
+
+function parseNodeConfig(config: unknown): AiSdkExecutorNodeConfig {
+  if (config === undefined) return {};
+  return nodeConfigSchema.parse(config);
+}
+
+/**
+ * Re-projects history before every step after the first so messages arriving
+ * mid-generation surface to the model per visibility rules. The re-projected
+ * history excludes this run's own frames; the in-flight tool exchange is
+ * re-appended from prior step response messages instead.
+ */
+function buildPrepareStep<TDataContent>(
+  refreshInference: () => CompiledInference<TDataContent>,
+  config: AiSdkExecutorConfig<TDataContent>,
+): PrepareStepFunction {
+  return ({ stepNumber, steps }) => {
+    if (stepNumber === 0) return undefined;
+    const inference = refreshInference();
+    return {
+      system: buildAiSdkSystem(inference),
+      messages: [
+        ...buildAiSdkMessages(inference, config.messageToModelMessage),
+        ...steps.flatMap((step) => step.response.messages),
+      ],
+    };
   };
 }
 
@@ -316,6 +418,7 @@ export function buildAiSdkMessages<TDataContent = never>(
 export function buildAiSdkTools<TDataContent = never>(
   request: ExecutorRunRequest<TDataContent>,
   config: AiSdkExecutorConfig<TDataContent>,
+  runState: RunState = { terminal: false },
 ): ToolSet {
   const tools: ToolSet = {};
 
@@ -325,7 +428,7 @@ export function buildAiSdkTools<TDataContent = never>(
       inputSchema: action.inputSchema ?? z.object({}),
       strict: config.toolStrict ?? false,
       execute: (input, aiSdkContext) =>
-        executeAction(action, input, request, config, aiSdkContext),
+        executeAction(action, input, request, config, aiSdkContext, runState),
     });
   }
 
@@ -338,6 +441,7 @@ async function executeAction<TDataContent>(
   request: ExecutorRunRequest<TDataContent>,
   config: AiSdkExecutorConfig<TDataContent>,
   aiSdkContext: unknown,
+  runState: RunState,
 ): Promise<unknown> {
   const toolCallId = readStringField(aiSdkContext, "toolCallId");
   const callId = toolCallId ?? crypto.randomUUID();
@@ -361,7 +465,22 @@ async function executeAction<TDataContent>(
         ? config.runAction({ action, input, context, request, aiSdkContext })
         : action.run?.(input as never, context as never),
   });
+  if (result.terminal) {
+    runState.terminal = true;
+  }
   return result.value;
+}
+
+function completionReasonForFinish<TDataContent>(
+  runState: RunState,
+  finishReason: string | undefined,
+  config: AiSdkExecutorConfig<TDataContent>,
+): ExecutorRunResult["completionReason"] {
+  if (runState.terminal) return "terminal-action";
+  if (finishReason && finishReason !== "stop" && config.debug) {
+    console.warn(`[aisdk-executor] run finished with non-stop finishReason: ${finishReason}`);
+  }
+  return "done";
 }
 
 function actorMessageToModelMessage(message: AnyActorMessage): ModelMessage {

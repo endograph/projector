@@ -18,6 +18,7 @@ import type {
   AnyAction,
   CompiledInference,
   ContentPart,
+  ExecutionReport,
   ExecutorRealizedPrompt,
   ExecutorRealizePromptRequest,
   RuntimeSyncContext,
@@ -131,6 +132,7 @@ export class LiveKitRealtimeExecutor<
   TDataContent = never,
 > implements ProjectorExecutor<TDataContent> {
   readonly type = "livekit-realtime";
+  readonly identity = { name: "livekit-realtime" };
 
   readonly connection: LiveKitRealtimeConnection<TDataContent>;
 
@@ -211,6 +213,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   private toolRegistry = new Map<string, AnyAction>();
   private readonly forwardedInputFrameIds = new Set<string>();
   private readonly bootstrappedRealtimeSessions = new WeakSet<object>();
+  private readonly syncedHistoryFingerprints = new WeakMap<object, Set<string>>();
   private realtimeServerEventHandler?: {
     session: LiveKitRealtimeSessionLike;
     handler: (...args: unknown[]) => void;
@@ -357,7 +360,6 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     return this.enqueueFrame({
       generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
-      metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
           ...metadata,
@@ -368,7 +370,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
           source: { external: true },
         } satisfies FrameMessage<TDataContent>,
       ],
-    });
+    }, { mode: "voice", transport: "livekit", transcript: true });
   }
 
   async enqueueUserTranscript(
@@ -378,7 +380,6 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     return this.enqueueFrame({
       generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
-      metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
           ...metadata,
@@ -389,12 +390,12 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
           source: { external: true },
         } satisfies FrameMessage<TDataContent>,
       ],
-    });
+    }, { mode: "voice", transport: "livekit", transcript: true });
   }
 
   async enqueueRealtimeTurnCompletion(
     sourceFrame: Frame<TDataContent>,
-    metadata: Record<string, unknown> = {},
+    report: Record<string, unknown> = {},
   ): Promise<Frame<TDataContent> | undefined> {
     if (!this.isRealtimeActive()) return undefined;
 
@@ -405,13 +406,12 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       activationId,
       sourceFrameId: sourceFrame.id,
       reason: "end-turn",
-      metadata: {
-        mode: "voice",
-        transport: "livekit",
-        realtimeTurn: true,
-        ...metadata,
-      },
-    }));
+    }), {
+      mode: "voice",
+      transport: "livekit",
+      realtimeTurn: true,
+      ...report,
+    });
   }
 
   beginRealtimeTurn(): void {
@@ -583,6 +583,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   ): Promise<void> {
     await this.bootstrapRealtimeSessionContext(context, realtimeSession);
     await this.publishDynamicContext(context.inference.dynamicParts, realtimeSession);
+    await this.syncMissingHistoryItems(context, realtimeSession);
     const shouldCreateResponse = await this.forwardVisibleInputAsRealtimeItems(
       context,
       realtimeSession,
@@ -610,7 +611,66 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       await this.createBootstrapRealtimeItems(context, realtimeSession);
     }
 
+    this.markHistoryItemsSynced(context, realtimeSession);
     this.bootstrappedRealtimeSessions.add(realtimeSession);
+  }
+
+  private markHistoryItemsSynced(
+    context: RuntimeSyncContext<TDataContent>,
+    realtimeSession: LiveKitRealtimeSessionLike,
+  ): void {
+    const sessionObject = isObject(realtimeSession) ? realtimeSession : undefined;
+    if (!sessionObject) return;
+
+    const excludedVisible = this.visibleUserMessageFingerprintCounts(context);
+    const synced = this.syncedHistoryFingerprints.get(sessionObject) ?? new Set<string>();
+    this.syncedHistoryFingerprints.set(sessionObject, synced);
+
+    for (const message of context.inference.history.filter(isActorMessage<TDataContent>)) {
+      const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
+      if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
+      synced.add(fingerprint);
+    }
+  }
+
+  private async syncMissingHistoryItems(
+    context: RuntimeSyncContext<TDataContent>,
+    realtimeSession: LiveKitRealtimeSessionLike,
+  ): Promise<void> {
+    const sessionObject = isObject(realtimeSession) ? realtimeSession : undefined;
+    if (!sessionObject) return;
+
+    const excludedVisible = this.visibleUserMessageFingerprintCounts(context);
+    const represented = representedChatMessages(
+      copyChatContext(realtimeSession.chatCtx)?.items ?? [],
+    );
+    const synced = this.syncedHistoryFingerprints.get(sessionObject) ?? new Set<string>();
+    this.syncedHistoryFingerprints.set(sessionObject, synced);
+
+    for (const [index, message] of context.inference.history.filter(isActorMessage<TDataContent>).entries()) {
+      const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
+      if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
+      if (takeRepresentedIndex(represented, fingerprint) !== undefined) continue;
+      if (synced.has(fingerprint)) continue;
+
+      const item = actorMessageToRealtimeMessage(
+        message,
+        `history:${index}`,
+        this.config.messageToText,
+      );
+      if (!item) continue;
+      this.executor.log("replay missing realtime history", {
+        index,
+        role: item.role,
+        itemId: item.id,
+        content: realtimeContentDebugSummary(item.content),
+      });
+      await this.sendRealtimeEvent(realtimeSession, {
+        type: "conversation.item.create",
+        item,
+      });
+      synced.add(fingerprint);
+    }
   }
 
   private resetDynamicContextState(): void {
@@ -779,6 +839,12 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
           this.config.messageToText,
         );
         if (!item) continue;
+        this.executor.log("forward visible realtime input", {
+          frameId: frame.id,
+          index,
+          itemId: item.id,
+          content: realtimeContentDebugSummary(item.content),
+        });
         addRepresentedIndex(represented, fingerprint, 0);
         await this.sendRealtimeEvent(realtimeSession, {
           type: "conversation.item.create",
@@ -824,6 +890,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     if (!realtimeSession.sendEvent) {
       throw new Error("No LiveKit realtime sendEvent method is available");
     }
+    this.executor.log("send realtime event", realtimeClientEventDebugSummary(event));
     await realtimeSession.sendEvent(event);
   }
 
@@ -908,15 +975,19 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       const input = this.executor.config.input;
       if (!input?.parseDataMessage) return;
       if (input.messageTopic && parsedTopic && parsedTopic !== input.messageTopic) return;
-      const text = input.parseDataMessage(payload, {
+      const parsed = input.parseDataMessage(payload, {
         participant,
         kind,
         topic: parsedTopic,
       });
-      if (!text) return;
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      this.enqueueExternalUserMessage(trimmed).catch((error) => {
+      const frame = normalizeExternalUserFrame(parsed);
+      if (!frame) return;
+      this.executor.log("enqueue LiveKit data frame", {
+        topic: parsedTopic,
+        bytes: payload.byteLength,
+        frame: frameDebugSummary(frame),
+      });
+      this.enqueueExternalUserFrame(frame).catch((error) => {
         this.executor.log("Failed to enqueue LiveKit data message", error);
       });
     };
@@ -963,28 +1034,40 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     this.handlers.push({ target: "room", event, handler });
   }
 
-  private async enqueueExternalUserMessage(text: string): Promise<Frame<TDataContent>> {
-    return this.enqueueFrame({
-      metadata: { mode: "text", transport: "livekit" },
-      messages: [
-        {
-          type: "user",
-          content: [textContent(text)],
-          text,
-          audience: "broadcast",
-          source: { external: true, transport: "livekit" },
-        } satisfies FrameMessage<TDataContent>,
-      ],
-    });
+  private async enqueueExternalUserFrame(frame: FrameDraft<TDataContent>): Promise<Frame<TDataContent>> {
+    return this.enqueueFrame(frame, { mode: "text", transport: "livekit" });
   }
 
-  private enqueueFrame(frame: FrameDraft<TDataContent>): Frame<TDataContent> {
-    const result = this.currentSyncContext?.machine.enqueueFrame(frame);
-    if (!result) {
+  private enqueueFrame(
+    frame: FrameDraft<TDataContent>,
+    report?: ExecutionReport,
+  ): Frame<TDataContent> {
+    const context = this.currentSyncContext;
+    if (!context) {
       throw new Error("LiveKitRealtimeConnection cannot enqueue a frame before runtime sync");
     }
-    return result;
+    return context.enqueueFrame(frame, report);
   }
+}
+
+function normalizeExternalUserFrame<TDataContent>(
+  parsed: string | FrameDraft<TDataContent> | undefined,
+): FrameDraft<TDataContent> | undefined {
+  if (!parsed) return undefined;
+  if (typeof parsed !== "string") return parsed;
+  const trimmed = parsed.trim();
+  if (!trimmed) return undefined;
+  return {
+    messages: [
+      {
+        type: "user",
+        content: [textContent(trimmed)],
+        text: trimmed,
+        audience: "broadcast",
+        source: { external: true, transport: "livekit" },
+      } satisfies FrameMessage<TDataContent>,
+    ],
+  };
 }
 
 class AssistantTranscriptStream<TDataContent> {
@@ -1330,7 +1413,7 @@ function contentPartsToLiveKitContent(
       content.push(`${label}${stringifyValue(part.data)}`);
       continue;
     }
-    if (options.allowImages) {
+    if (options.allowImages && canUseRealtimeImageData(part.data)) {
       content.push(
         llm.createImageContent({
           image: imageDataToLiveKitImage(part.data, part.mediaType),
@@ -1338,9 +1421,9 @@ function contentPartsToLiveKitContent(
           mimeType: part.mediaType,
         }),
       );
-    } else {
-      content.push(imageMetadataText(part));
+      continue;
     }
+    content.push(imageMetadataText(part));
   }
   return content;
 }
@@ -1392,14 +1475,14 @@ function contentPartsToRealtimeContent(
       content.push(realtimeTextContent(options.role, `${label}${stringifyValue(part.data)}`));
       continue;
     }
-    if (options.allowImages) {
+    if (options.allowImages && canUseRealtimeImageData(part.data)) {
       content.push({
         type: "input_image",
         image_url: imageDataToRealtimeImageUrl(part.data, part.mediaType),
       });
-    } else {
-      content.push(realtimeTextContent(options.role, imageMetadataText(part)));
+      continue;
     }
+    content.push(realtimeTextContent(options.role, imageMetadataText(part)));
   }
   return content;
 }
@@ -1511,6 +1594,12 @@ function imageDataToRealtimeImageUrl(
   return imageDataToLiveKitImage(data, mediaType);
 }
 
+function canUseRealtimeImageData(data: Extract<ContentPart<any>, { type: "image" }>["data"]): boolean {
+  if (data instanceof URL) return data.protocol === "data:";
+  if (typeof data === "string") return data.startsWith("data:");
+  return data instanceof Uint8Array || data instanceof ArrayBuffer;
+}
+
 function representedChatMessages(items: readonly llm.ChatItem[]): Map<string, number[]> {
   const represented = new Map<string, number[]>();
   items.forEach((item, index) => {
@@ -1591,6 +1680,69 @@ function realtimeContentDescriptor(content: readonly RealtimeContent[]): unknown
       };
     }
     return { type: "text", text: part.text };
+  });
+}
+
+function realtimeClientEventDebugSummary(event: RealtimeClientEvent): unknown {
+  if (event.type === "conversation.item.create") {
+    return {
+      type: event.type,
+      previousItemId: event.previous_item_id,
+      itemId: event.item.id,
+      role: event.item.role,
+      content: realtimeContentDebugSummary(event.item.content),
+    };
+  }
+  if (event.type === "conversation.item.delete") {
+    return {
+      type: event.type,
+      itemId: event.item_id,
+    };
+  }
+  return { type: event.type };
+}
+
+function realtimeContentDebugSummary(content: readonly RealtimeContent[]): unknown {
+  const images = content.filter((part): part is RealtimeImageContent => part.type === "input_image");
+  return {
+    parts: content.map((part) => part.type),
+    textChars: content.reduce((sum, part) => part.type === "input_image" ? sum : sum + part.text.length, 0),
+    images: images.map((part) => describeImageData(part.image_url)),
+    imageUrls: images
+      .map((part) => part.image_url)
+      .filter((url) => !url.startsWith("data:")),
+  };
+}
+
+function frameDebugSummary(frame: FrameDraft<any>): unknown {
+  return {
+    inert: frame.inert === true,
+    generatorId: frame.generatorId,
+    provenance: frame.provenance,
+    messages: frame.messages.map((message) => {
+      if (!isActorMessage(message)) {
+        return { type: message.type };
+      }
+      return {
+        type: message.type,
+        audience: message.audience,
+        textChars: typeof message.text === "string" ? message.text.length : 0,
+        content: contentPartsDebugSummary(message.content ?? []),
+      };
+    }),
+  };
+}
+
+function contentPartsDebugSummary(parts: readonly ContentPart<any>[]): unknown {
+  return parts.map((part) => {
+    if (part.type === "text") return { type: "text", chars: part.text.length };
+    if (part.type === "data") return { type: "data", label: part.label };
+    return {
+      type: "image",
+      label: part.label,
+      mediaType: part.mediaType,
+      data: describeImageData(part.data),
+    };
   });
 }
 

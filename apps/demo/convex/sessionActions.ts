@@ -12,10 +12,17 @@ import {
   createMachine,
   executeCommand,
   runMachine,
-  textContent,
   type Executor,
   type Frame,
 } from "@projectors/core";
+import {
+  attachmentSummary,
+  attachmentValidator,
+  resolveAttachmentUrls,
+  storedAttachmentsFromContentParts,
+  userContentPartsForFrame,
+} from "./attachments";
+import type { DemoAttachmentData } from "@projectors/demo-agent/src/attachments.js";
 import { escapeConvexJson } from "./convexJson";
 import {
   createInitialSerializedInstance,
@@ -26,7 +33,7 @@ import type { ClientMachineMessage } from "@projectors/core/client";
 
 const DISCRETE_MODEL = process.env.OPENAI_DISCRETE_MODEL ?? "gpt-5.5";
 
-const discreteExecutor = new AiSdkExecutor({
+const discreteExecutor = new AiSdkExecutor<DemoAttachmentData>({
   model: aiSdkOpenAI(DISCRETE_MODEL),
   maxOutputTokens: 4096,
 });
@@ -47,23 +54,24 @@ export const sendMessage = action({
   args: {
     sessionId: v.id("sessions"),
     content: v.string(),
+    attachments: v.optional(v.array(attachmentValidator)),
   },
-  handler: async (ctx, { sessionId, content }): Promise<{ success: true }> => {
+  handler: async (ctx, { sessionId, content, attachments }): Promise<{ success: true }> => {
     const session = await ctx.runQuery(api.sessions.get, { id: sessionId });
     if (!session) {
       throw new Error("Session not found");
     }
 
-    const rootInstance = hydrateDemoInstance(session.instance);
-    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame[];
-    const memoryExecutor = new AiSdkExecutor({
+    const rootInstance = hydrateDemoInstance(session.instance, sessionId);
+    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame<DemoAttachmentData>[];
+    const memoryExecutor = new AiSdkExecutor<DemoAttachmentData>({
       model: aiSdkOpenAI(DISCRETE_MODEL),
       maxOutputTokens: 1024,
       maxSteps: 3,
     });
     const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>
       request.inference.tools.some((tool) => tool.name === "saveMemories");
-    const executor: Executor = {
+    const executor: Executor<DemoAttachmentData> = {
       run: (request) =>
         isMemoryRequest(request)
           ? memoryExecutor.run(request)
@@ -73,19 +81,27 @@ export const sendMessage = action({
           ? memoryExecutor.realizePrompt(request)
           : discreteExecutor.realizePrompt(request),
     };
-    const machine = createMachine({
+    const machine = createMachine<DemoAttachmentData>({
       id: sessionId,
-      root: rootInstance,
-      charter: { ...createDemoCharter(), executor },
+      instance: rootInstance,
+      charter: createDemoCharter(),
+      executor,
       frames: contextFrames,
     });
 
+    const storedAttachments = attachments ?? [];
+    const resolvedAttachments = (await resolveAttachmentUrls(ctx, storedAttachments)) ?? [];
+    const userText = content.trim() || (storedAttachments.length ? attachmentSummary(storedAttachments) : "");
+    const userContent = userContentPartsForFrame(content, resolvedAttachments);
+    if (!userText || userContent.length === 0) {
+      throw new Error("Message requires text or attachments");
+    }
+
     machine.enqueueFrame({
-      metadata: { mode: "text", transport: "convex" },
-      messages: [{ type: "user", content: [textContent(content)], text: content }],
+      messages: [{ type: "user", content: userContent, text: userText }],
     });
 
-    const producedFrames: Frame[] = [];
+    const producedFrames: Frame<DemoAttachmentData>[] = [];
     for await (const frame of runMachine(machine)) {
       producedFrames.push(frame);
     }
@@ -125,18 +141,18 @@ export const sendClientMessage = action({
       throw new Error("Session not found");
     }
 
-    const rootInstance = hydrateDemoInstance(session.instance);
-    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame[];
-    const machine = createMachine({
+    const rootInstance = hydrateDemoInstance(session.instance, sessionId);
+    const contextFrames = (await ctx.runQuery(api.sessions.listMachineContextFrames, { sessionId })) as Frame<DemoAttachmentData>[];
+    const machine = createMachine<DemoAttachmentData>({
       id: sessionId,
-      root: rootInstance,
+      instance: rootInstance,
       charter: createDemoCharter(),
       frames: contextFrames,
     });
     const command = message as ClientMachineMessage;
     const result = await executeCommand(machine, command);
 
-    const producedFrames: Frame[] = [];
+    const producedFrames: Frame<DemoAttachmentData>[] = [];
     for await (const frame of runMachine(machine, { scheduleWork: false })) {
       producedFrames.push(frame);
     }
@@ -158,15 +174,16 @@ export const sendClientMessage = action({
 
 export const createSessionAtFoo = createSession;
 
-function prepareMachineFrame(frame: Frame, rootGeneratorId: string): Frame {
+type DurableFrame = Frame<DemoAttachmentData> & { metadata?: Record<string, unknown> };
+
+function prepareMachineFrame(frame: Frame<DemoAttachmentData>, rootGeneratorId: string): DurableFrame {
   const mode =
-    frame.metadata?.mode === "text" || frame.generatorId === rootGeneratorId
+    frame.generatorId === undefined || frame.generatorId === rootGeneratorId
       ? "text"
       : "memory";
   return {
     ...frame,
     metadata: {
-      ...frame.metadata,
       mode,
       transport: "convex",
     },
@@ -182,7 +199,7 @@ async function persistFrameMessages(
     rootGeneratorId,
   }: {
     sessionId: Id<"sessions">;
-    frame: Frame;
+    frame: Frame<DemoAttachmentData>;
     frameId: Id<"frames">;
     rootGeneratorId: string;
   },
@@ -190,10 +207,12 @@ async function persistFrameMessages(
   for (const message of frame.messages) {
     const text = typeof message.text === "string" ? message.text : "";
     if (message.type === "user" && text.trim()) {
+      const attachments = storedAttachmentsFromContentParts(message.content);
       await ctx.runMutation(api.messages.add, {
         sessionId,
         role: "user",
         content: text,
+        ...(attachments.length ? { attachments } : {}),
         frameId,
         mode: "text",
         idempotencyKey: idempotencyKey("user", message),
@@ -218,8 +237,8 @@ async function persistFrameMessages(
 }
 
 function shouldPersistAssistantMessage(
-  frame: Frame,
-  message: Frame["messages"][number],
+  frame: Frame<DemoAttachmentData>,
+  message: Frame<DemoAttachmentData>["messages"][number],
   rootGeneratorId: string,
 ): boolean {
   if (message.audience === "self") return false;
@@ -236,7 +255,7 @@ async function persistClientCommandAssistantMessages(
   }: {
     sessionId: Id<"sessions">;
     message: ClientMachineMessage;
-    frames: Frame[];
+    frames: Frame<DemoAttachmentData>[];
     frameIds: Id<"frames">[];
   },
 ): Promise<void> {

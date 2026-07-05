@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as attachments from "../attachments.js";
 import type * as branching from "../branching.js";
 import type * as convexJson from "../convexJson.js";
 import type * as frameHistory from "../frameHistory.js";
@@ -27,6 +28,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  attachments: typeof attachments;
   branching: typeof branching;
   convexJson: typeof convexJson;
   frameHistory: typeof frameHistory;

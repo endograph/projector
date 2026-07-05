@@ -75,6 +75,7 @@ export function restoreFrame(frame: FrameDoc) {
     id: projectorFrameId,
     messages: restoreConvexJson(frame.messages),
     ...(metadata ? { metadata } : {}),
+    ...(frame.provenance ? { provenance: restoreConvexJson(frame.provenance) } : {}),
   };
 }
 

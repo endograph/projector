@@ -162,7 +162,7 @@ export type LiveKitRealtimeExecutorConfig<TDataContent = never> = {
       participant?: unknown;
       kind?: unknown;
       topic?: string;
-    }) => string | undefined;
+    }) => string | FrameDraft<TDataContent> | undefined;
   };
   eventNames?: Partial<LiveKitEventNames>;
   runAction?: (input: RunActionInput<TDataContent>) => unknown | Promise<unknown>;

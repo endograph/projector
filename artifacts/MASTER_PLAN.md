@@ -359,6 +359,7 @@ type Instance<TDataContent = never> = {
   id: string;
   node: Node<TDataContent>;
   isSource?: boolean;
+  params?: JsonObject;
   states?: Record<string, StateContainer>;
   children?: Instance<TDataContent>[]; // removable runtime children
 };
@@ -422,6 +423,7 @@ type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
+  params?: AnyParamsSchema;
   instructions?: string;
   tools?: ActionConfigEntry[];
   commands?: ActionConfigEntry[];
@@ -430,12 +432,14 @@ type NodeConfig<TDataContent = never> = {
   output?: OutputConfig<TDataContent>;
   projection?: Projection<TDataContent>;
   runtime?: Runtime<TDataContent>;
+  executorConfig?: ExecutorConfig; // per-executor config, namespaced by executor identity name
 };
 
 type Node<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  params: AnyParamsSchema;
   instructions?: string;
   toolBindings: ActionBindings;
   toolRefs: ActionRef[];
@@ -446,6 +450,7 @@ type Node<TDataContent = never> = {
   output?: OutputConfig<TDataContent>;
   projection: Projection<TDataContent>;
   runtime: Runtime<TDataContent>;
+  executorConfig?: ExecutorConfig;
 };
 ```
 
@@ -478,7 +483,7 @@ Refs are dry, stable identifiers that hydrate through a compatible charter.
 type Charter<TDataContent = never> = {
   key?: string;
   version?: string;
-  executor: Executor<TDataContent>;
+  params: AnyParamsSchema;
   nodes: Record<string, Node<TDataContent>>;
   tools: Record<string, Action>;
   commands: Record<string, Action>;
@@ -490,7 +495,7 @@ type Charter<TDataContent = never> = {
 type CharterConfig<TDataContent = never> = {
   key?: string;
   version?: string;
-  executor: Executor<TDataContent>;
+  params?: AnyParamsSchema;
   nodes: readonly Node<TDataContent>[];
   tools: readonly Action[];
   commands: readonly Action[];
@@ -499,6 +504,28 @@ type CharterConfig<TDataContent = never> = {
   historyProjections?: readonly HistoryProjectionFunction<TDataContent>[];
 };
 ```
+
+The charter deliberately does not carry an executor. The charter is the
+universe: pure definition — static, serializable, versionable. The executor is
+the generator runtime — an environmental fact bound at machine creation:
+
+```ts
+createMachine({ instance, charter, executor, runner, frames });
+```
+
+`executor` is optional. A machine without one can hydrate and fold frames
+(read-only replay, inspection, prompt realization tooling); scheduling
+generator work throws. Type fit between charter and executor is enforced where
+they meet: both are parameterized by `TDataContent` at `createMachine`.
+`charter.version` therefore honestly covers fold semantics only — projections,
+states, node shapes. Which executor produced a given generation is recorded
+per frame as provenance, not pretended into the charter version; see Frame
+Provenance.
+
+`runner` is optional host/claim info (workerId, leaseId, host…) stamped into
+the provenance of frames the machine produces. The lease record itself stays
+an application-owned capability claim — "who may produce frames right now" —
+and is never the canonical record of what produced existing frames.
 
 `createCharter<TDataContent>()` is the primary type anchor for an application.
 The charter's data content type flows into registered nodes, runtime history
@@ -510,6 +537,121 @@ that need structured content should pass the app-owned data payload type and use
 `createCharter(config)` accepts array inputs for executable registries, validates
 unique names/keys, and normalizes the hydrated charter to record registries for
 field-specific ref lookup.
+
+## Params
+
+Params are the framework's typed environment mechanism. They are separate from
+state: params are supplied by the app at instance boundaries, while state is
+owned and mutated by the machine.
+
+Zod params schemas should stay in the JSON Schema-compatible object subset:
+plain object shapes, shallow top-level keys, and no transforms/refinements as a
+design dependency.
+
+```ts
+type JsonObject = Record<string, unknown>;
+type AnyParamsSchema = z.ZodObject<any>;
+```
+
+`Charter.params` is the external machine-level contract. It is optional in
+`createCharter(config)` and defaults to `z.object({})`.
+
+```ts
+const charter = createCharter({
+  params: z.object({
+    userId: z.string(),
+    orgId: z.string(),
+  }),
+  nodes: [profileNode],
+  // existing charter fields...
+});
+```
+
+`Node.params` is the node-local view over effective params. It is optional in
+`createNode(config)` and defaults to an empty object schema. Nodes do not receive
+the full machine params object; they receive only the keys declared by
+`node.params`.
+
+```ts
+const profileNode = createNode({
+  key: "profile",
+  params: z.object({
+    userId: z.string(),
+  }),
+});
+```
+
+`Action.params` is the action-local view over node params. It is optional in
+`createAction(config)` and defaults to an empty object schema. `ctx.params` in
+an action is typed from `action.params`, not from `node.params`.
+
+```ts
+const loadProfile = createAction({
+  state: null,
+  name: "loadProfile",
+  params: z.object({
+    userId: z.string(),
+  }),
+  run: async (_input, ctx) => {
+    ctx.params.userId;
+  },
+});
+```
+
+Static compatibility is intentionally strict in the first pass:
+
+- `charter.params` must satisfy every registered node's `node.params`;
+- member nodes are included recursively in that type check;
+- `node.params` must satisfy every inline attached action's `action.params`;
+- string action refs are resolved later through the charter, so their params are
+  validated when real params are parsed into action contexts rather than through
+  runtime schema comparison.
+
+The runtime does not compare params schemas to each other. Instead, it parses
+real values at the points where they matter:
+
+- `createRoot(charter, instances, params)` parses `params` with
+  `charter.params`;
+- `createMachine({ charter, instance })` parses the top-level instance's
+  effective params with `charter.params`;
+- node-local behavior parses the effective params through `node.params`;
+- action contexts parse the node-local params through `action.params`.
+
+The resolution chain is:
+
+```txt
+effective params -> node params -> action params
+```
+
+Effective params are formed by walking from the top-level machine instance to
+the current concrete instance and shallowly merging `Instance.params`.
+
+```ts
+function resolveEffectiveParams(instancePath: Instance[]): JsonObject {
+  const result: JsonObject = {};
+
+  for (const instance of instancePath) {
+    if (!instance.params) continue;
+
+    for (const [key, value] of Object.entries(instance.params)) {
+      if (key in result) {
+        throw new Error(`Param override is not supported yet: ${key}`);
+      }
+
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+```
+
+Params are shallow. There is no deep merge. Any duplicate key along the path is
+an unsupported override and throws, even if the value is identical.
+
+Member nodes do not create params boundaries. Like state and runtime identity,
+members fold into the nearest concrete owner instance. A member's `node.params`
+is a view over the owning concrete instance's effective params.
 
 Refs are compact, plain strings. They are resolved by field context rather than
 by a generic namespaced grammar:
@@ -539,10 +681,12 @@ is future work.
 
 ## Projection Nodes And Runtime Frames
 
-`createRoot(instances: Instance[])` is a helper API for idiomatic application
-composition. It returns a helper root `Instance` with id `"root"` and a hidden
-generator runtime. The id `"root"` is not globally reserved; it is only the id
-this helper chooses for the root instance it creates.
+`createRoot(charter, instances, params)` is a helper API for idiomatic
+application composition. It parses `params` with `charter.params`, then returns
+an ordinary helper `Instance` with id `"root"`, the current synthetic root
+generator node, `params` set to the parsed charter params, and `children` set to
+the supplied instance array. The id `"root"` is not globally reserved; it is
+only the id this helper chooses for the instance it creates.
 
 The helper is especially useful when an app wants to merge multiple independent
 durable instances into one machine tree. A common split is an `agentInstance`
@@ -550,11 +694,13 @@ that owns agent behavior and an independent `threadInstance` that owns
 conversation/thread state:
 
 ```ts
-const root = createRoot([agentInstance, threadInstance]);
+const instance = createRoot(charter, [agentInstance, threadInstance], {
+  userId: "user_123",
+});
 ```
 
-After this normalization there is still no separate wrapper type. Traversal,
-runtime ancestry, projection, and scheduling see the returned root as an
+After this normalization there is still no separate root/wrapper type. Traversal,
+runtime ancestry, projection, and scheduling see the returned value as an
 ordinary instance. State ownership is controlled by source instances:
 `scope: "hoist"` state beneath `agentInstance` targets `agentInstance` when that
 instance is marked `isSource: true`, and `scope: "hoist"` state beneath
@@ -575,7 +721,7 @@ instance.children, left to right
 Example:
 
 ```ts
-createRoot([instanceA, instanceB]);
+createRoot(charter, [instanceA, instanceB], params);
 // root.node.members = []
 // instanceA.node.members = [criticNode]
 // instanceA.children = [instanceFoo, instanceBar]
@@ -829,7 +975,9 @@ history projection extracts only actor messages from that visible frame history.
 Executors are responsible for rendering `CompiledInference.history` into the
 provider-visible conversation format they need; most LLM executors will filter
 to actor messages before rendering. Custom history projection output is not
-durable runtime state; it is recomputed for the compiled inference.
+durable runtime state; it is recomputed for the compiled inference. Frames in
+`HistoryProjectionContext.history` have `provenance` stripped: history
+projections are fold code, and the fold never reads provenance.
 
 Core should provide small helper functions for common history projections, such
 as `messages(ctx)`, `actorMessages(ctx)`, `messagesSinceLastCompletion(ctx)`,
@@ -883,27 +1031,31 @@ Executor output returns through the normal frame path:
 ```ts
 type EnqueueFrame<TDataContent = never> = (
   frame: FrameDraft<TDataContent>,
-) => Frame<TDataContent> | Promise<Frame<TDataContent>>;
+  report?: ExecutionReport,
+) => Frame<TDataContent>;
 
 type ExecutorRunRequest<TDataContent = never> = {
   generatorId: GeneratorId;
   activationId: string;
+  config?: unknown; // the generator node's executorConfig namespace for this executor
   inference: CompiledInference<TDataContent>;
   enqueueFrame: EnqueueFrame<TDataContent>;
   createActionContext?: (action: AnyAction) => ActionContext<unknown, TDataContent>;
   output?: OutputConfig<TDataContent>;
   signal?: AbortSignal;
+  refreshInference?: () => CompiledInference<TDataContent>;
 };
 
 type ExecutorRunResult<TDataContent = never> = {
   completionReason: CompletionReason;
   value?: string; // implicit LLM text output
   frames?: Array<FrameDraft<TDataContent> | Frame<TDataContent>>; // fully formed executor-produced frames
+  execution?: ExecutionReport; // run-level facts, folded into synthesized-frame and completion-frame provenance
 };
 
 type ExecutorRealizePromptRequest<TDataContent = never> = Pick<
   ExecutorRunRequest<TDataContent>,
-  "generatorId" | "activationId" | "inference" | "output"
+  "generatorId" | "activationId" | "config" | "inference" | "output"
 >;
 
 type ExecutorRealizedPrompt = {
@@ -912,6 +1064,8 @@ type ExecutorRealizedPrompt = {
 };
 
 type Executor<TDataContent = never> = {
+  identity?: ExecutorIdentity; // provenance attribution + executorConfig namespace key
+  configSchema?: z.ZodType<unknown>; // validates node executorConfig at machine creation
   run(
     request: ExecutorRunRequest<TDataContent>,
   ): ExecutorRunResult<TDataContent> | Promise<ExecutorRunResult<TDataContent>>;
@@ -920,6 +1074,64 @@ type Executor<TDataContent = never> = {
   ): ExecutorRealizedPrompt | Promise<ExecutorRealizedPrompt>;
 };
 ```
+
+Executors never write provenance directly. The framework wraps `enqueueFrame`
+at the run boundary and signs every frame the run produces with the executor's
+`identity`; the optional `report` argument carries execution facts (latency,
+usage, cost, transport tags) that the framework folds into that frame's
+`provenance.execution`. Anonymous executors (no `identity`) produce
+unattributed frames.
+
+### Executor Node Config
+
+Nodes may carry per-executor config as plain JSON, namespaced by executor
+identity name. The config is data and belongs in the versioned charter — model
+choice shapes generation — while its type is owned by the executor package.
+Type-only coupling resolves this: executor packages register their config
+types via declaration merging, so a type-only import is enough to typecheck a
+charter and the charter stays serializable data.
+
+```ts
+// @projectors/core
+interface ExecutorConfigRegistry {}
+
+type ExecutorConfig = {
+  [K in keyof ExecutorConfigRegistry]?: ExecutorConfigRegistry[K];
+} & Record<string, unknown>;
+
+// executor package
+declare module "@projectors/core" {
+  interface ExecutorConfigRegistry { aisdk: AiSdkExecutorNodeConfig }
+}
+
+// charter definition
+createNode({
+  key: "researcher",
+  executorConfig: { aisdk: { maxOutputTokens: 4096 } },
+});
+```
+
+Namespacing buys swap tolerance: a node can carry config for executors that
+are not currently bound, and each binding reads only its own namespace. The
+namespace key is naturally the executor ref if per-node executor bindings are
+added later. Runtime teeth back the type-level check: machine creation
+validates every reachable node's namespace against the bound executor's
+`configSchema` (fail fast at bind time), and each activation delivers the
+resolved namespace as `ExecutorRunRequest.config`. Declared config is intent;
+`provenance.execution` records what actually ran, so fallbacks surface in the
+log instead of hiding.
+
+Multi-step executors should call `refreshInference()` before each inference
+step after the first. It re-projects `CompiledInference` against the current
+frame log under the running activation's normal visibility rules, so
+`delivery: "immediate"` messages that arrived mid-run surface to the model on
+the next step while `delivery: "queued"` messages stay hidden. The re-projected
+history excludes the activation's own frames; the executor re-appends its
+in-flight step messages (tool calls and results from earlier steps of the same
+run) itself. Every frame returned by a refresh is recorded as consumed by the
+activation and its pending work is absorbed on completion; see Mid-Generation
+Messages And Absorption. Executors that never refresh simply answer the initial
+inference, and messages they did not see trigger follow-up work.
 
 When an executor returns `frames`, the framework enqueues them in result order,
 applying the current generator and activation metadata where omitted.
@@ -972,6 +1184,41 @@ keeps the action handle typed from that declaration. Machine creation and
 projection compilation validate that the action's declared state is compatible
 with the owner node's state before execution. Stateless actions use
 `state: null` and receive no mutation helpers.
+
+Actions may also declare `params`. Action contexts always include `ctx.params`,
+typed from the action's own params schema. The action does not receive the full
+node params object unless it declares the same keys.
+
+```ts
+type ActionContext<
+  S = undefined,
+  TDataContent = never,
+  TParams extends JsonObject = {},
+> = {
+  params: TParams;
+  getState?: (address: InferenceStateAddress) => unknown;
+  instance: ActionInstanceContext<TDataContent>;
+} & ActionStateContext<S>;
+
+type Action<
+  S = undefined,
+  I = unknown,
+  O = unknown,
+  TName extends string = string,
+  TDataContent = never,
+  TParams extends AnyParamsSchema = AnyParamsSchema,
+> = {
+  state: StateDescriptor<S> | null;
+  params?: TParams;
+  name: TName;
+  description?: string;
+  inputSchema?: z.ZodType<I>;
+  run?: (
+    input: I,
+    ctx: ActionContext<S, TDataContent, z.output<TParams>>,
+  ) => O | Promise<O>;
+};
+```
 
 The singular public API is sugar over the plural keyed runtime model. When
 `ctx.updateState(update)` emits a durable mutation, the mutation must include the
@@ -1131,12 +1378,31 @@ type Generator = {
   id: GeneratorId;
 };
 
+type ExecutorIdentity = { name: string; version?: string };
+
+type ExecutionReport = {
+  latencyMs?: number;
+  model?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number };
+  cost?: { amount: number; currency: string };
+} & Record<string, unknown>;
+
+type FrameProducer =
+  | { executor: ExecutorIdentity }
+  | { machine: string }; // e.g. "scheduler", "state-reconciliation"
+
+type FrameProvenance = {
+  producer?: FrameProducer;
+  execution?: ExecutionReport;
+  runner?: Record<string, unknown>; // workerId, leaseId, host…
+};
+
 type FrameDraft<TDataContent = never> = {
   generatorId?: GeneratorId;
   activationId?: string;
   inert?: boolean; // default false
   messages: FrameMessage<TDataContent>[];
-  metadata?: Record<string, unknown>;
+  provenance?: FrameProvenance; // framework-written, observational only
 };
 
 type Frame<TDataContent = never> =
@@ -1220,6 +1486,7 @@ type SerializedInstance<TDataContent = never> = {
   id: InstanceId;
   node: SerializedNodeRef<TDataContent>;
   isSource?: boolean;
+  params?: JsonObject;
   states?: Record<StateKey, StateContainer>;
   children?: SerializedInstance<TDataContent>[];
 };
@@ -1238,10 +1505,79 @@ type WorkMessage =
       type: "work";
       kind: "completion";
       activationId: string;
+      generatorId?: GeneratorId;
       sourceFrameId?: string;
-      reason: "end-turn" | "done" | "cancelled" | "delegated";
+      reason:
+        | "end-turn"
+        | "done"
+        | "cancelled"
+        | "delegated"
+        | "error"
+        | "terminal-action"
+        | "absorbed";
     };
 ```
+
+Completion detection is message-only: there is no frame-level side channel
+that encodes work semantics. `completion.generatorId` is optional for
+completions that pair with an activation message already in the log (the
+generator is recovered by joining on `activationId`), and required to record a
+completion for work that was never scheduled through the machine — e.g.
+realtime voice turns, emitted as self-contained `createRuntimeTurnFrame`
+frames carrying both the activation and completion messages. The
+machine-written completion path always includes `generatorId` so completions
+are self-describing.
+
+### Frame Provenance
+
+Frames carry two channels with different contracts, and there is no third bag:
+
+- `messages` are behavioral, typed, and framework-validated — the fold's only
+  input. Anything that should affect the fold must earn a typed message shape.
+- `provenance` is the framework-owned observational channel: producer
+  signature, execution facts, runner/claim info. The fold never reads it, by
+  construction: `fold(charter, frames)` and `fold(charter,
+  stripProvenance(frames))` are identical. Frames handed to history-projection
+  code have provenance stripped, so app fold code cannot come to depend on it.
+  Persistence may drop or relocate it — dropping costs forensics, never
+  correctness (strippable is not consequence-free: an app billing off
+  `execution` data must persist it).
+
+Provenance has a single write path: the framework signs frames at the
+production boundary. Provenance belongs on output, not intent — the activation
+frame records that work should happen; the executor is bound at claim/run
+time, so the run harness's wrapped `enqueueFrame` signs every frame the run
+produces (including the completion frame and frames synthesized from
+`ExecutorRunResult`) with `{ executor: identity }`, execution reports, and the
+machine's `runner` info. Machine-synthesized frames sign as
+`{ machine: "scheduler" }`, `{ machine: "state-reconciliation" }`, and so on.
+Executors report; the framework stamps.
+
+This shape is what makes distributed execution honest: with per-activation
+runners, executor identity is a property of each production act, not of the
+activation record. Each runner signs its own output, so concurrent activations
+on different runners with different executors produce a log that says exactly
+that. Crash honesty falls out — frames that landed before a crash are already
+signed, and a supervisor's synthesized cancellation is signed with claim info
+or honestly unsigned. The first signed frame of an activation is the de facto
+"work initiated" marker; no extra frame kind is needed.
+
+Resume/fork is an explicit executor choice at machine creation. Tooling may
+warn (never block) on provenance mismatch when continuing a log produced by a
+different executor; heterogeneous history is normal and legitimate.
+`realizePrompt` plus the provenance stamp enables forensic reconstruction of
+what any historical activation was prompted with.
+
+An app-owned metadata bag is deliberately absent. Apps that need their own
+frame tags should use message extension fields or their own persistence
+envelope; if a shared app bag is reintroduced later, the framework never reads
+or writes it and it gets no well-known keys — that slope is how metadata bags
+become load-bearing.
+
+Frame `spawn` and `transition` messages do not carry params in the first pass.
+Scoped params are represented in the `Instance.params` data model, but public
+spawn/transition helpers do not expose them yet. `attach` can carry params only
+because it mounts already-materialized `SerializedInstance` subtrees.
 
 Frames must be supplied to the runtime in stable durable append order. The
 framework does not require a dense global sequence number. Storage adapters may
@@ -1406,7 +1742,8 @@ history after it starts:
 
 - `"live"`: default. Each inference frame compiles history from the current frame
   log. Immediate visible messages can steer an already-open activation's next
-  inference frame.
+  inference frame. Executors realize this by calling the run request's
+  `refreshInference()` before each step.
 - `"snapshot"`: the activation is isolated from later external actor messages.
   It sees actor messages that were eligible at activation start, plus actor
   messages produced by that same activation.
@@ -1443,13 +1780,18 @@ work frames. The runtime reconstructs pending work by folding the frame log.
 - `activation` opens a durable unit of work.
 - `completion` closes a durable unit of work.
 
-`completion.reason` records why the activation closed. End-turn, normal
-completion, cancellation, and delegation all mean the current activation is
-closed and should not run again. `delegated` means framework-owned execution for
-the activation was handed to an external runtime or provider, and the framework
-should not expect the executor to emit ordinary completion output for that
-activation. If future blocked/retry behavior is needed, it should be added as a
-separate non-terminal work message with deterministic wake conditions.
+`completion.reason` records why the activation closed. Every reason means the
+activation is closed and should not run again. `delegated` means
+framework-owned execution for the activation was handed to an external runtime
+or provider, and the framework should not expect the executor to emit ordinary
+completion output for that activation. `absorbed` means another same-generator
+generation projected the activation's source frame before this activation ran,
+so its work was completed by that generation instead of a redundant run.
+`error` records an executor run that failed; it is a legitimate completion
+reason written verbatim, not masked as `cancelled`, so parent-completion
+triggers observe errored runs like any other close. If future blocked/retry
+behavior is needed, it should be added as a separate non-terminal work message
+with deterministic wake conditions.
 
 Activation IDs must be deterministic. Activation messages are emitted in their
 own frames, but each activation records the source frame that triggered it. A
@@ -1462,11 +1804,13 @@ activationId = hash(machineId, generatorId, triggerKey, sourceFrameId)
 
 Work frames are appended by framework reconciliation, not by mutating the frame
 that caused the work. Enqueueing a frame assigns its identity and appends it to
-the log. Reconciliation folds the full work log, then evaluates trigger source
-frames from a scheduling suffix. The suffix starts at the latest durable work
-frame, inclusive; if no work frame exists, it starts at the beginning of the
-frame log. Reconciliation appends any missing deterministic activation or
-completion work frames after their source frame has been persisted.
+the log. Reconciliation folds the full work log, then evaluates every durable
+frame as a potential trigger source. A candidate activation is appended only
+when no activation exists for its deterministic ID or generator/source pair and
+no completion exists for that ID; the completion check keeps source frames that
+were absorbed by a running generation from spawning stale activations after the
+fact. Reconciliation appends any missing deterministic activation or completion
+work frames after their source frame has been persisted.
 
 A non-inert frame matching generator runtime triggers will be followed by
 separate activation work frames for those runtimes. Work frames may themselves be
@@ -1479,18 +1823,18 @@ inputs and there is at most one terminal completion for a given activation ID.
 The exact frame IDs may come from storage, but the semantic work identity must be
 stable.
 
-The latest work frame acts as a durable scheduling cursor, but is included in
-the next reconciliation pass so `parent-activation` and `parent-completion`
-follow-up work can be recovered after a crash. Frames before that cursor are not
-searched for additional activation work. Cancellation is separate: open
-activations whose runtime no longer exists may be completed with
-`reason: "cancelled"` regardless of where their activation frame appears in
-history.
+There is no scheduling cursor: reconciliation rescans the full frame log each
+pass, and idempotence comes from deterministic activation IDs plus the
+activation and completion existence checks. This guarantees frames appended
+while a generation is running still receive durable work — either an activation
+frame or an absorbed completion — instead of being silently skipped once a
+later work frame lands. Cancellation is separate: open activations whose
+runtime no longer exists may be completed with `reason: "cancelled"` regardless
+of where their activation frame appears in history.
 
 Reconciliation must also be deterministic:
 
-- Process source frames from the scheduling suffix in stable durable append
-  order.
+- Process source frames in stable durable append order.
 - For each source frame, derive candidate work frames in `ProjectionNode`
   traversal order.
 - Append newly derived activation work frames and schedule runnable executor work
@@ -1509,7 +1853,42 @@ The framework does not own distributed lease semantics. Single-runner execution
 can run pending work directly. Multi-runner systems should dispatch activations
 externally and use their own queue, lease, or partitioning infrastructure. The
 framework exposes deterministic activation IDs and concurrency keys so external
-dispatchers can enforce exclusivity when needed.
+dispatchers can enforce exclusivity when needed. The lease/claim record is a
+capability claim — who may produce frames right now — and may denormalize
+executor identity for dispatch routing and live observability, but it stays
+operational and overwritable. Canonical provenance is the signed frames in the
+log: the host holding the claim passes `runner` info at machine creation and
+the framework stamps it into produced-frame provenance, so the claim is the
+promise and the signed frames are the receipt.
+
+### Mid-Generation Messages And Absorption
+
+Messages that arrive while a generation is running always get durable work.
+Whether that work runs as a fresh generation depends on whether an existing
+same-generator generation actually projected the message:
+
+- Every activation records the frames it projected — the initial compile plus
+  every `refreshInference()` call — as consumed, using the same visibility
+  rules as projection compilation. A frame counts as consumed only if at least
+  one of its actor messages survived visibility filtering.
+- When the activation completes, the framework appends `reason: "absorbed"`
+  completion messages, in the same frame as the activation's own completion,
+  for pending same-generator work whose source frame was consumed. Inert
+  frames, the activation's own source frame, self-produced frames, and frames
+  that do not match the generator's trigger are never absorbed.
+- `delivery: "immediate"` messages projected by a live activation are therefore
+  absorbed and do not retrigger. Immediate messages the generation never
+  projected keep their pending work and run as a new generation.
+- `delivery: "queued"` messages are invisible to already-open activations, so
+  they are never consumed mid-run and always produce follow-up work.
+- Cancelled runs absorb nothing, so messages they projected retrigger; this is
+  the crash and cancel recovery path.
+
+Absorption is recorded per absorbed activation as an ordinary singular
+completion message — a completion frame may carry several completion messages —
+so folding, first-completion-wins, and per-activation reasons stay uniform. An
+absorbed completion may precede its activation frame in the log; reconciliation
+then skips creating the activation frame entirely.
 
 ### Generator Discovery And Projection
 
@@ -1648,7 +2027,7 @@ The high-level run algorithm is:
 runMachine(machine, options) creates a MachineRun whose drain loop:
   syncGenerators(machine)
   yield any previously pending frames before using them as trigger sources
-  reconcile deterministic work frames from the scheduling suffix
+  reconcile deterministic work frames from the full frame log
   fold work messages to derive open and completed activations
   identify runnable activations
 
@@ -1817,6 +2196,8 @@ should be able to carry a stable logical output identity, currently expected to
 be named `outputId`, plus optional stream completion metadata. Apps can map that
 machine-owned `outputId` to their own message IDs or storage idempotency keys.
 Core should not define an application `messageId` or database `idempotencyKey`.
+Cost, latency, usage, and transport facts are not message metadata: they flow
+through `ExecutionReport` into frame `provenance.execution`.
 
 The stream side channel is a UI and telemetry convenience. It should be treated
 as best-effort and should not be the only path for persisting final assistant
@@ -1894,12 +2275,12 @@ not assume a single continuous, well-ordered turn timeline.
 
 The client integration boundary should be a realized public read model, not the
 durable frame log. Applications may keep the frame log private, noisy, or
-server-only. A browser or other client should subscribe to fully realized client
-instances plus small synchronization metadata:
+server-only. A browser or other client should subscribe to a fully realized
+client instance plus small synchronization metadata:
 
 ```ts
-type MachineClientSnapshot<TInstances = unknown> = {
-  instances: TInstances;
+type MachineClientSnapshot<TInstance = unknown> = {
+  instance: TInstance;
   recentCommandResidue: string[];
 };
 ```
@@ -2221,20 +2602,28 @@ substantially, split heavier inspection or form-generation utilities later.
 Serialization means resumability, not just `JSON.stringify` compatibility. A
 resumable machine is reconstructed from two inputs:
 
-- a current, already-materialized root instance snapshot; and
+- a current, already-materialized top-level instance snapshot; and
 - a durable frame log in stable append order.
 
-`createMachine({ root, frames })` treats `root` as the current canonical machine
-view supplied by the host. It preserves `frames` for projection history and work
-reconstruction, but it does not replay historical `InstanceMessage`s into
-`root`. Replaying arbitrary instance mutations into a current snapshot would be
-unsafe because the framework cannot know which mutations are already reflected in
-that snapshot.
+`createMachine({ instance, charter, executor, runner, frames })` treats
+`instance` as the current canonical machine view supplied by the host. It
+preserves `frames` for projection history and work reconstruction, but it does
+not replay historical `InstanceMessage`s into `instance`. Replaying arbitrary
+instance mutations into a current snapshot would be unsafe because the
+framework cannot know which mutations are already reflected in that snapshot.
+
+The executor is never serialized: folding history never invokes an executor,
+so hydrating a machine for read-only replay or inspection requires none.
+Resuming with a different executor than the one that produced earlier frames
+is legitimate; per-frame provenance keeps the history honest about which
+runtime produced which generation. Frame `provenance` serializes as optional
+passthrough — storage adapters may persist it inline, relocate it to a side
+table keyed by frame id, or drop it, without affecting fold semantics.
 
 If an application wants replay-from-initial semantics, it must provide an initial
-root snapshot and a frame log whose instance mutations have not yet been applied,
-or introduce explicit snapshot cursor metadata and replay only frames after that
-cursor. That mode is out of scope for the first pass.
+top-level instance snapshot and a frame log whose instance mutations have not yet
+been applied, or introduce explicit snapshot cursor metadata and replay only
+frames after that cursor. That mode is out of scope for the first pass.
 
 Use these terms consistently:
 
@@ -2311,6 +2700,7 @@ type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  params?: unknown;
   instructions?: string;
   tools?: Ref[];
   commands?: Ref[];
@@ -2319,6 +2709,7 @@ type DryNode<TDataContent = never> = {
   output?: SerializedOutputConfig;
   projection?: Ref;
   runtime?: DryRuntime;
+  executorConfig?: Record<string, unknown>; // plain JSON, round-trips as-is
 };
 ```
 
@@ -2447,6 +2838,13 @@ Add focused tests for:
   virtual projection addresses, duplicate sibling member node keys throw, member
   runtimes create work identities from those addresses, and member state or spawn
   operations resolve to the nearest concrete owner instance.
+- Params behavior: `createRoot(charter, instances, params)` parses and stores
+  charter params on the synthetic top-level instance, `createMachine` validates
+  real top-level params against `charter.params`, effective params shallowly
+  merge down instance paths and reject overrides, node and action contexts see
+  only their declared local param views, and static type tests cover charter to
+  node compatibility including member descendants plus node to action
+  compatibility.
 - State descriptor resolution and conflicts: `hoist` state resolves to the
   nearest source instance, duplicate state keys reuse valid existing
   values, incompatible `scope`, schema, or non-equivalent `init` values throw,
@@ -2494,8 +2892,10 @@ Add focused tests for:
   activations still see actor messages produced by the same activation.
 - Work reconciliation: generator triggers append deterministic
   activation work frames separate from the source frame, activation messages
-  record `sourceFrameId`, reconciliation processes source frames from the latest
-  durable work frame inclusively and derives work in projection traversal order,
+  record `sourceFrameId`, reconciliation rescans the full frame log
+  idempotently and derives work in projection traversal order, immediate
+  messages projected mid-generation via `refreshInference` are absorbed while
+  unseen immediate messages and queued messages produce follow-up generations,
   work-only and instance-only frames do not trigger `actor-frame`,
   nearest-ancestor rules apply to parent activation/completion triggers, a serial
   runtime's own assistant and tool frames derive no new activations for that
@@ -2516,8 +2916,22 @@ Add focused tests for:
   keeps actor messages eligible for history according to audience, delivery, and
   activation history, and does not invoke enqueue hooks, yield from `runMachine`,
   reconcile activation work, or schedule executors.
+- Executor binding: machines without an executor hydrate, fold frames, and
+  drain with `scheduleWork: false`, while scheduling generator work throws;
+  node `executorConfig` namespaces are validated against the bound executor's
+  `configSchema` at machine creation and delivered per activation as
+  `ExecutorRunRequest.config`.
+- Provenance: executor-produced frames are signed with executor identity,
+  execution reports, and runner info; machine-synthesized frames sign with a
+  machine producer; frames handed to history-projection code have provenance
+  stripped; and the fold is identical with provenance removed —
+  `fold(charter, frames) === fold(charter, stripProvenance(frames))`.
+- Message-only completions: turn boundaries (including realtime
+  `createRuntimeTurnFrame` frames) are detected from work messages alone,
+  completion messages recover their generator via inline `generatorId` or the
+  activation join, and no frame-level channel affects work semantics.
 - Client integration smoke coverage, if included in the first implementation
-  pass: client snapshots expose realized instances plus command residue without
+  pass: client snapshots expose a realized instance plus command residue without
   public frame-log synchronization, command and state addresses are stable for
   concrete instances and member projection nodes, recent command residue remains
   machine-level sync metadata, optimistic overlays retire and rebase by residue,

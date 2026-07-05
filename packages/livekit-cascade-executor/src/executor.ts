@@ -16,6 +16,7 @@ import type {
   AnyAction,
   CompiledInference,
   ContentPart,
+  ExecutionReport,
   ExecutorRealizedPrompt,
   ExecutorRealizePromptRequest,
   RuntimeSyncContext,
@@ -56,6 +57,7 @@ export class LiveKitCascadeExecutor<
   TDataContent = never,
 > implements ProjectorExecutor<TDataContent> {
   readonly type = "livekit-cascade";
+  readonly identity = { name: "livekit-cascade" };
 
   readonly connection: LiveKitCascadeConnection<TDataContent>;
 
@@ -266,7 +268,6 @@ export class LiveKitCascadeConnection<TDataContent = never> {
     return this.enqueueFrame({
       generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
-      metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
           ...metadata,
@@ -277,7 +278,7 @@ export class LiveKitCascadeConnection<TDataContent = never> {
           source: { external: true },
         } satisfies FrameMessage<TDataContent>,
       ],
-    });
+    }, { mode: "voice", transport: "livekit", transcript: true });
   }
 
   async enqueueUserTranscript(
@@ -287,7 +288,6 @@ export class LiveKitCascadeConnection<TDataContent = never> {
     return this.enqueueFrame({
       generatorId: this.executor.realtimeGeneratorId(),
       inert: true,
-      metadata: { mode: "voice", transport: "livekit", transcript: true },
       messages: [
         {
           ...metadata,
@@ -298,7 +298,7 @@ export class LiveKitCascadeConnection<TDataContent = never> {
           source: { external: true },
         } satisfies FrameMessage<TDataContent>,
       ],
-    });
+    }, { mode: "voice", transport: "livekit", transcript: true });
   }
 
   private async syncNow(input: CompiledInference<TDataContent> | RuntimeSyncContext<TDataContent>): Promise<void> {
@@ -489,7 +489,6 @@ export class LiveKitCascadeConnection<TDataContent = never> {
 
   private async enqueueExternalUserMessage(text: string): Promise<Frame<TDataContent>> {
     return this.enqueueFrame({
-      metadata: { mode: "text", transport: "livekit" },
       messages: [
         {
           type: "user",
@@ -499,15 +498,18 @@ export class LiveKitCascadeConnection<TDataContent = never> {
           source: { external: true, transport: "livekit" },
         } satisfies FrameMessage<TDataContent>,
       ],
-    });
+    }, { mode: "text", transport: "livekit" });
   }
 
-  private enqueueFrame(frame: FrameDraft<TDataContent>): Frame<TDataContent> {
-    const result = this.currentSyncContext?.machine.enqueueFrame(frame);
-    if (!result) {
+  private enqueueFrame(
+    frame: FrameDraft<TDataContent>,
+    report?: ExecutionReport,
+  ): Frame<TDataContent> {
+    const context = this.currentSyncContext;
+    if (!context) {
       throw new Error("LiveKitCascadeConnection cannot enqueue a frame before runtime sync");
     }
-    return result;
+    return context.enqueueFrame(frame, report);
   }
 }
 

@@ -25,7 +25,6 @@ import {
   textContent,
   type CompiledProjectionTree,
   type Charter,
-  type Executor,
   type GeneratorId,
   type Instance,
   type SerializedInstance,
@@ -63,6 +62,12 @@ const memoriesStateSchema = z.array(memorySchema);
 export type Memory = z.infer<typeof memorySchema>;
 export type MemoriesState = z.infer<typeof memoriesStateSchema>;
 
+const demoParamsSchema = z.object({
+  sessionId: z.string(),
+});
+
+type DemoParamsSchema = typeof demoParamsSchema;
+
 export type DemoMessage = {
   role: "user" | "assistant";
   content: string;
@@ -74,7 +79,7 @@ export type DemoMessage = {
 };
 
 export type DemoClientSnapshot = MachineClientSnapshot & {
-  projectionTree: CompiledProjectionTree;
+  projectionTree: CompiledProjectionTree<any>;
 };
 
 export type CameraSensorImage = {
@@ -286,6 +291,27 @@ export const pingCommand = createAction({
   },
 });
 
+export const echoSessionIdTool = createAction({
+  state: null,
+  params: demoParamsSchema,
+  name: "echoSessionId",
+  description: "Echo the current demo session id.",
+  inputSchema: z.object({}),
+  run: (_input, ctx) => sessionIdAssistantMessage(ctx.params.sessionId),
+});
+
+export const echoSessionIdCommand = createAction({
+  state: null,
+  params: demoParamsSchema,
+  name: "echoSessionId",
+  description: "Echo the current demo session id.",
+  inputSchema: z.object({}),
+  run: (_input, ctx): unknown => {
+    const message = sessionIdAssistantMessage(ctx.params.sessionId);
+    return actionResult({ value: message, messages: [message] });
+  },
+});
+
 export const saveMemories = createAction({
   state: memoriesState,
   name: "saveMemories",
@@ -388,38 +414,35 @@ export const agentControlsMemberNode = createNode({
 export const demoBaseNode = createNode({
   key: "demoBase",
   name: "Projector Demo Agent",
+  params: demoParamsSchema,
   instructions:
     "You are a friendly conversation buddy. Be natural, concise, and curious. Do not volunteer internal state, tools, framework details, or state changes during ordinary conversation. If the user asks about your internals, capabilities, memory, tools, state, or how you work, answer directly and transparently with the information available to you.",
   state: demoState,
-  tools: [pingTool],
-  commands: [pingCommand, setThemeHue],
+  tools: [pingTool, echoSessionIdTool],
+  commands: [pingCommand, echoSessionIdCommand, setThemeHue],
   members: [agentControlsMemberNode],
 });
 
-const executor: Executor = {
-  run: async () => ({ completionReason: "done" }),
-  realizePrompt: (request) => ({ provider: "demo", input: request.inference }),
-};
-
 export function createDemoCharter(
-  options: { executor?: Executor; cameraSensor?: CameraSensorDataSource } = {},
-): Charter {
+  options: { cameraSensor?: CameraSensorDataSource } = {},
+): Charter<any, DemoParamsSchema> {
   if ("cameraSensor" in options) {
     cameraSensorDataSource = options.cameraSensor;
   }
   return createCharter({
     key: "projector-demo",
     version: "1",
-    executor: options.executor ?? executor,
+    params: demoParamsSchema,
     nodes: [
       demoBaseNode,
       memoryMemberNode,
       agentControlsMemberNode,
       cameraSensorNode,
     ],
-    tools: [pingTool, saveMemories, enableLiveMode, enableCamera],
+    tools: [pingTool, echoSessionIdTool, saveMemories, enableLiveMode, enableCamera],
     commands: [
       pingCommand,
+      echoSessionIdCommand,
       setVoiceEnabled,
       setCameraEnabled,
       setMemoryEnabled,
@@ -437,7 +460,7 @@ export function createDemoCharter(
   });
 }
 
-export function createInitialDemoSourceInstance(): Instance {
+export function createInitialDemoSourceInstance(): Instance<any> {
   const demoBase = createSourceInstance({
     id: `demo-${crypto.randomUUID()}`,
     node: demoBaseNode,
@@ -446,41 +469,53 @@ export function createInitialDemoSourceInstance(): Instance {
   return demoBase;
 }
 
-export function createDemoMachineRoot(source: Instance): Instance {
+export function createDemoMachineRoot(
+  source: Instance<any>,
+  params: z.input<typeof demoParamsSchema>,
+): Instance<any> {
   reconcileAgentControlMembers(source);
-  const root = createRoot([source]);
+  const root = createRoot(createDemoCharter(), [source], params);
   resolveStates(root);
   return root;
 }
 
-export function createInitialDemoMachineRoot(): Instance {
-  return createDemoMachineRoot(createInitialDemoSourceInstance());
+export function createInitialDemoMachineRoot(
+  sessionId = `session-${crypto.randomUUID()}`,
+): Instance<any> {
+  return createDemoMachineRoot(createInitialDemoSourceInstance(), { sessionId });
 }
 
-export function createInitialDemoInstance(): Instance {
-  return createInitialDemoMachineRoot();
+export function createInitialDemoInstance(
+  sessionId = `session-${crypto.randomUUID()}`,
+): Instance<any> {
+  return createInitialDemoMachineRoot(sessionId);
 }
 
-export function createInitialSerializedInstance(): SerializedInstance {
+export function createInitialSerializedInstance(): SerializedInstance<any> {
   return serializeDemoSourceInstance(createInitialDemoSourceInstance());
 }
 
-export function hydrateDemoSourceInstance(serialized: SerializedInstance): Instance {
+export function hydrateDemoSourceInstance(serialized: SerializedInstance<any>): Instance<any> {
   const instance = hydrateInstance(serialized, createDemoCharter());
   resolveStates(instance);
   return instance;
 }
 
-export function serializeDemoSourceInstance(instance: Instance): SerializedInstance {
+export function serializeDemoSourceInstance(instance: Instance<any>): SerializedInstance<any> {
   resolveStates(instance);
   return serializeInstance(instance, createDemoCharter());
 }
 
-export function hydrateDemoInstance(serialized: SerializedInstance): Instance {
-  return createDemoMachineRoot(hydrateDemoSourceInstance(serialized));
+export function hydrateDemoInstance(
+  serialized: SerializedInstance<any>,
+  sessionId: string,
+): Instance<any> {
+  return createDemoMachineRoot(hydrateDemoSourceInstance(serialized), {
+    sessionId,
+  });
 }
 
-export function serializeDemoInstance(instance: Instance): SerializedInstance {
+export function serializeDemoInstance(instance: Instance<any>): SerializedInstance<any> {
   const source = findDemoSourceInstance(instance);
   if (!source) {
     throw new Error("Demo instance tree has no source instance");
@@ -488,24 +523,25 @@ export function serializeDemoInstance(instance: Instance): SerializedInstance {
   return serializeDemoSourceInstance(source);
 }
 
-export function getDemoRootGenerator(_instance: Instance): GeneratorId {
+export function getDemoRootGenerator(_instance: Instance<any>): GeneratorId {
   return ROOT_GENERATOR_ID;
 }
 
 export function createDemoClientSnapshot(
-  serialized: SerializedInstance,
+  serialized: SerializedInstance<any>,
+  sessionId: string,
   syncState: MachineSyncState = { recentCommandResidue: [] },
 ): DemoClientSnapshot {
-  const instance = hydrateDemoInstance(serialized);
+  const instance = hydrateDemoInstance(serialized, sessionId);
   return {
-    ...createMachineClientSnapshot(realizeClientInstances(instance), syncState),
+    ...createMachineClientSnapshot(realizeClientInstances(instance as Instance), syncState),
     projectionTree: inspectCompiledProjectionTree(instance, {
       charter: createDemoCharter(),
     }),
   };
 }
 
-function findDemoSourceInstance(instance: Instance): Instance | undefined {
+function findDemoSourceInstance(instance: Instance<any>): Instance<any> | undefined {
   if (instance.isSource) {
     return instance;
   }
@@ -518,7 +554,7 @@ function findDemoSourceInstance(instance: Instance): Instance | undefined {
   return undefined;
 }
 
-function reconcileAgentControlMembers(instance: Instance): void {
+function reconcileAgentControlMembers(instance: Instance<any>): void {
   const controls = agentControlsStateSchema.safeParse(
     readResolvedState(instance, "agentControls"),
   );
@@ -530,7 +566,7 @@ function reconcileAgentControlMembers(instance: Instance): void {
 }
 
 function reconcileOptionalMember(
-  instance: Instance,
+  instance: Instance<any>,
   node: typeof cameraSensorNode | typeof memoryMemberNode,
   enabled: boolean,
 ): void {
@@ -543,42 +579,42 @@ function reconcileOptionalMember(
   instance.children = children.length > 0 ? children : undefined;
 }
 
-export function getDemoState(instance: Instance): DemoState {
+export function getDemoState(instance: Instance<any>): DemoState {
   return demoStateSchema.parse(readResolvedState(instance, "demo"));
 }
 
-export function setDemoState(instance: Instance, next: DemoState): void {
+export function setDemoState(instance: Instance<any>, next: DemoState): void {
   demoStateSchema.parse(next);
   writeResolvedState(instance, "demo", next);
 }
 
-export function getAgentControlsState(instance: Instance): AgentControlsState {
+export function getAgentControlsState(instance: Instance<any>): AgentControlsState {
   return agentControlsStateSchema.parse(
     readResolvedState(instance, "agentControls"),
   );
 }
 
 export function setAgentControlsState(
-  instance: Instance,
+  instance: Instance<any>,
   next: AgentControlsState,
 ): void {
   agentControlsStateSchema.parse(next);
   writeResolvedState(instance, "agentControls", next);
 }
 
-export function getMemoriesState(instance: Instance): MemoriesState {
+export function getMemoriesState(instance: Instance<any>): MemoriesState {
   return memoriesStateSchema.parse(readResolvedState(instance, "memories"));
 }
 
 export function setMemoriesState(
-  instance: Instance,
+  instance: Instance<any>,
   next: MemoriesState,
 ): void {
   memoriesStateSchema.parse(next);
   writeResolvedState(instance, "memories", next);
 }
 
-function readResolvedState(instance: Instance, key: string): unknown {
+function readResolvedState(instance: Instance<any>, key: string): unknown {
   const state = resolveStates(instance).find(
     (candidate) => candidate.address.stateKey === key,
   );
@@ -589,7 +625,7 @@ function readResolvedState(instance: Instance, key: string): unknown {
 }
 
 function writeResolvedState(
-  instance: Instance,
+  instance: Instance<any>,
   key: string,
   value: unknown,
 ): void {
@@ -604,6 +640,10 @@ function writeResolvedState(
 
 function pongAssistantMessage() {
   return textAssistantMessage("pong");
+}
+
+function sessionIdAssistantMessage(sessionId: string) {
+  return textAssistantMessage(sessionId);
 }
 
 function newMemories(

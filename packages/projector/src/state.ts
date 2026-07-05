@@ -16,6 +16,20 @@ export type ResolvedState<TDataContent = any> = {
   sourceContributor: Contributor<TDataContent>;
 };
 
+export type StateReset = {
+  address: StateAddress;
+  value: unknown;
+};
+
+export type ResolveStatesOptions = {
+  /**
+   * Called when an existing value fails its descriptor schema and is replaced
+   * with the init value (onInitConflict "replace"). Machine paths use this to
+   * record the reset as a state.update frame so the log reproduces the state.
+   */
+  onReset?: (reset: StateReset) => void;
+};
+
 type StateGroup<TDataContent = any> = {
   targetInstance: Instance<TDataContent>;
   stateKey: StateKey;
@@ -27,6 +41,7 @@ type StateGroup<TDataContent = any> = {
 
 export function resolveStates<TDataContent>(
   root: Instance<TDataContent>,
+  options: ResolveStatesOptions = {},
 ): ResolvedState<TDataContent>[] {
   const groups = new Map<string, StateGroup<TDataContent>>();
 
@@ -52,7 +67,7 @@ export function resolveStates<TDataContent>(
 
   const resolved: ResolvedState<TDataContent>[] = [];
   for (const group of groups.values()) {
-    resolved.push(resolveStateGroup(group));
+    resolved.push(resolveStateGroup(group, options));
   }
 
   return resolved;
@@ -60,6 +75,7 @@ export function resolveStates<TDataContent>(
 
 function resolveStateGroup<TDataContent>(
   group: StateGroup<TDataContent>,
+  options: ResolveStatesOptions,
 ): ResolvedState<TDataContent> {
   const scope = group.entries[0]?.descriptor.scope;
   if (!scope) {
@@ -99,6 +115,10 @@ function resolveStateGroup<TDataContent>(
     const resetValue = resolveInitialValue(group.entries.map((entry) => entry.descriptor));
     validateAllSchemas(group.entries, resetValue, group.stateKey);
     existing.value = resetValue;
+    options.onReset?.({
+      address: { instanceId: group.targetInstance.id, stateKey: group.stateKey },
+      value: resetValue,
+    });
     return {
       address: { instanceId: group.targetInstance.id, stateKey: group.stateKey },
       targetInstance: group.targetInstance,

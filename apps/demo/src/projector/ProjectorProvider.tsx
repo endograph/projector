@@ -23,7 +23,7 @@ type SendClientMessageAction = (args: {
 }) => Promise<unknown>;
 
 const EMPTY_CLIENT_SNAPSHOT: DemoClientSnapshot = {
-  root: null,
+  instance: null,
   recentCommandResidue: [],
   projectionTree: { roots: [] },
 };
@@ -96,8 +96,8 @@ export function ProjectorProvider({
 
   useEffect(() => {
     effigy.setRecentCommandResidue(residue);
-    effigy.setInstances(currentSnapshot.root ? [currentSnapshot.root] : []);
-  }, [effigy, residue, currentSnapshot.root]);
+    effigy.setInstances(currentSnapshot.instance ? [currentSnapshot.instance] : []);
+  }, [effigy, residue, currentSnapshot.instance]);
 
   useEffect(
     () => effigy.subscribe(() => rerenderOptimisticState((version) => version + 1)),
@@ -108,7 +108,7 @@ export function ProjectorProvider({
     <ProjectorContext.Provider
       value={{
         effigy,
-        instances: effigy.getInstances() ?? (currentSnapshot.root ? [currentSnapshot.root] : []),
+        instances: effigy.getInstances() ?? (currentSnapshot.instance ? [currentSnapshot.instance] : []),
         snapshot: currentSnapshot,
         readOnly,
       }}

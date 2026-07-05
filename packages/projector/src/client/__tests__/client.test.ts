@@ -89,6 +89,12 @@ describe("machine effigy", () => {
 
 describe("client instance realization", () => {
   it("realizes concrete instances, member projection addresses, state addresses, and command targets", () => {
+    const lookup = createAction({
+      state: null,
+      name: "lookup",
+      description: "Lookup things",
+      inputSchema: z.object({ query: z.string() }),
+    });
     const setLiveMode = createAction({
       state: null,
       name: "setLiveMode",
@@ -105,6 +111,7 @@ describe("client instance realization", () => {
     const agent = createNode({
       key: "agent",
       state: agentState,
+      tools: [lookup],
       commands: [setLiveMode],
       members: [critic],
     });
@@ -126,6 +133,11 @@ describe("client instance realization", () => {
       value: { liveMode: false },
     });
     expect(client.commands[0]?.target).toEqual({ type: "instance", instanceId: "agent-1" });
+    expect(client.tools[0]).toMatchObject({
+      name: "lookup",
+      description: "Lookup things",
+      target: { type: "instance", instanceId: "agent-1" },
+    });
     expect(client.members[0]?.contributor.id).toBe("member:agent-1/critic");
     expect(client.members[0]?.commands[0]?.target).toEqual({
       type: "member",
@@ -372,7 +384,7 @@ describe("command residue helpers", () => {
     expect(consumed.recentCommandResidue).toEqual(["b"]);
 
     expect(createMachineClientSnapshot("root", consumed)).toEqual({
-      root: "root",
+      instance: "root",
       recentCommandResidue: ["b"],
     });
   });

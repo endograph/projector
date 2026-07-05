@@ -690,6 +690,118 @@ describe("AiSdkExecutor", () => {
     expect(firstRun).not.toHaveBeenCalled();
   });
 
+  it("stops the tool loop and returns terminal-action when a tool result is terminal", async () => {
+    const frames: FrameDraft[] = [];
+    const generate = vi.fn(async (input: any) => {
+      expect(input.stopWhen[1]()).toBe(false);
+      await input.tools.finish.execute({}, { toolCallId: "call-1" });
+      expect(input.stopWhen[1]()).toBe(true);
+      return result({ text: "wrapping up", finishReason: "tool-calls" });
+    });
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    const output = await executor.run(
+      request({
+        enqueueFrame: enqueueTo(frames),
+        inference: inference({
+          tools: [
+            {
+              state: null,
+              name: "finish",
+              run: () => actionResult({ value: "done", terminal: true }),
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(output.completionReason).toBe("terminal-action");
+    expect(output.value).toBe("wrapping up");
+    expect(frames).toMatchObject([
+      {
+        messages: [
+          { type: "action", kind: "request", name: "finish", callId: "call-1" },
+          { type: "action", kind: "result", name: "finish", success: true, terminal: true, callId: "call-1" },
+        ],
+      },
+    ]);
+  });
+
+  it("re-projects fresh history for each step after the first via prepareStep", async () => {
+    const generate = vi.fn(async () => result({ text: "done" }));
+    const refreshInference = vi.fn(() =>
+      inference({
+        systemParts: ["fresh system"],
+        history: [
+          { ...textUserMessage("hello") },
+          { ...textUserMessage("arrived mid-step") },
+        ],
+      }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    await executor.run(
+      request({
+        refreshInference,
+        inference: inference({ history: [{ ...textUserMessage("hello") }] }),
+      }),
+    );
+
+    const input = (generate.mock.calls as any)[0]?.[0];
+    expect(input.prepareStep({ stepNumber: 0, steps: [], messages: [] })).toBeUndefined();
+    expect(refreshInference).not.toHaveBeenCalled();
+
+    const responseMessages = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: {} }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "lookup",
+            output: { type: "text", value: "ok" },
+          },
+        ],
+      },
+    ];
+    expect(
+      input.prepareStep({
+        stepNumber: 1,
+        steps: [{ response: { messages: responseMessages } }],
+        messages: [],
+      }),
+    ).toEqual({
+      system: "## System\n\nfresh system",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "user", content: "arrived mid-step" },
+        ...responseMessages,
+      ],
+    });
+  });
+
+  it("omits prepareStep when the request cannot re-project", async () => {
+    const generate = vi.fn(async () => result({ text: "done" }));
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    await executor.run(request());
+
+    expect((generate.mock.calls as any)[0]?.[0]?.prepareStep).toBeUndefined();
+  });
+
   it("returns cancelled for already aborted requests and abort errors", async () => {
     const controller = new AbortController();
     controller.abort();

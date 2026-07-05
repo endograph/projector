@@ -6,14 +6,11 @@ import {
   type ExecutorRunResult,
   type Frame,
   type MachineRun,
+  type ProjectorExecutor,
 } from "../../index.ts";
 
 export function charter(overrides: Partial<CharterConfig> = {}): Charter {
   return createCharter({
-    executor: {
-      run: () => ({ completionReason: "done" as const }),
-      realizePrompt: (request) => ({ provider: "test", input: request.inference }),
-    },
     nodes: [],
     tools: [],
     commands: [],
@@ -23,12 +20,19 @@ export function charter(overrides: Partial<CharterConfig> = {}): Charter {
   });
 }
 
+export function noopExecutor(): ProjectorExecutor {
+  return {
+    run: () => ({ completionReason: "done" as const }),
+    realizePrompt: (request) => ({ provider: "test", input: request.inference }),
+  };
+}
+
 export function createRecordingExecutor(
   run: (request: ExecutorRunRequest) => ExecutorRunResult | Promise<ExecutorRunResult> = () => ({
     completionReason: "done",
   }),
 ): {
-  executor: Charter["executor"];
+  executor: ProjectorExecutor;
   requests: ExecutorRunRequest[];
 } {
   const requests: ExecutorRunRequest[] = [];

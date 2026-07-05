@@ -383,6 +383,197 @@ describe("LiveKitRealtimeExecutor", () => {
     });
   });
 
+  it("forwards visible input data URLs as realtime image content", async () => {
+    const session = new FakeSession();
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session,
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const visibleFrame: Frame = {
+      id: "user-image-1",
+      messages: [
+        {
+          type: "user",
+          text: "inspect this",
+          content: [
+            { type: "text", text: "inspect this" },
+            { type: "image", data: "data:image/png;base64,abc123", mediaType: "image/png", label: "image.png" },
+          ],
+        },
+      ],
+    };
+
+    await executor.syncRuntime(syncContext({ visibleFrames: [visibleFrame] }));
+
+    expect(realtimeSession.sendEvents[0]).toMatchObject({
+      type: "conversation.item.create",
+      item: {
+        role: "user",
+        content: [
+          { type: "input_text", text: "inspect this" },
+          { type: "input_image", image_url: "data:image/png;base64,abc123" },
+        ],
+      },
+    });
+  });
+
+  it("renders visible hosted image URLs as text metadata for realtime", async () => {
+    const session = new FakeSession();
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session,
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const visibleFrame: Frame = {
+      id: "user-image-url-1",
+      messages: [
+        {
+          type: "user",
+          text: "inspect this",
+          content: [
+            { type: "text", text: "inspect this" },
+            { type: "image", data: "https://example.test/image.png", mediaType: "image/png", label: "image.png" },
+          ],
+        },
+      ],
+    };
+
+    await executor.syncRuntime(syncContext({ visibleFrames: [visibleFrame] }));
+
+    expect(realtimeSession.sendEvents[0]).toMatchObject({
+      type: "conversation.item.create",
+      item: {
+        role: "user",
+        content: [
+          { type: "input_text", text: "inspect this" },
+          {
+            type: "input_text",
+            text: "[Image content unavailable in LiveKit text prompt: image.png; mediaType=image/png; data=https://example.test/image.png]",
+          },
+        ],
+      },
+    });
+  });
+
+  it("replays missing assistant history before forwarding the next visible input", async () => {
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const firstUser = { id: "user-1", messages: [{ ...textUserMessage("what is in this image?") }] };
+    const assistantTranscript: Frame = {
+      id: "assistant-1",
+      generatorId: REALTIME_GENERATOR_ID,
+      inert: true,
+      messages: [
+        {
+          type: "assistant",
+          text: "It is a screenshot.",
+          content: [{ type: "text", text: "It is a screenshot." }],
+          audience: "self",
+        },
+      ],
+    };
+    const nextUser = {
+      id: "user-2",
+      messages: [{ ...textUserMessage("what did you just say it was?") }],
+    };
+
+    await executor.syncRuntime(syncContext({ visibleFrames: [firstUser] }));
+    realtimeSession.sendEvents.length = 0;
+
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        history: [
+          firstUser.messages[0]!,
+          assistantTranscript.messages[0]!,
+          nextUser.messages[0]!,
+        ],
+      }),
+      visibleFrames: [nextUser],
+    }));
+
+    expect(realtimeSession.sendEvents.filter((event) => event.type === "conversation.item.create"))
+      .toMatchObject([
+        {
+          item: {
+            role: "assistant",
+            content: [{ type: "output_text", text: "It is a screenshot." }],
+          },
+        },
+        {
+          item: {
+            role: "user",
+            content: [{ type: "input_text", text: "what did you just say it was?" }],
+          },
+        },
+      ]);
+  });
+
+  it("replays missing image history when the realtime chat context lost image parts", async () => {
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const imageUser = {
+      id: "user-image-1",
+      messages: [
+        {
+          type: "user",
+          text: "inspect this",
+          content: [
+            { type: "text", text: "inspect this" },
+            { type: "image", data: "data:image/png;base64,abc123", mediaType: "image/png", label: "image.png" },
+          ],
+        },
+      ],
+    } satisfies Frame;
+    const nextUser = {
+      id: "user-image-2",
+      messages: [{ ...textUserMessage("can you see the uploaded image?") }],
+    };
+
+    await executor.syncRuntime(syncContext({ visibleFrames: [imageUser] }));
+    realtimeSession.chatCtx.items = [];
+    realtimeSession.sendEvents.length = 0;
+
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        history: [
+          imageUser.messages[0]!,
+          nextUser.messages[0]!,
+        ],
+      }),
+      visibleFrames: [nextUser],
+    }));
+
+    expect(realtimeSession.sendEvents.filter((event) => event.type === "conversation.item.create"))
+      .toMatchObject([
+        {
+          item: {
+            role: "user",
+            content: [
+              { type: "input_text", text: "inspect this" },
+              { type: "input_image", image_url: "data:image/png;base64,abc123" },
+            ],
+          },
+        },
+        {
+          item: {
+            role: "user",
+            content: [{ type: "input_text", text: "can you see the uploaded image?" }],
+          },
+        },
+      ]);
+  });
+
   it("deletes the previous dynamic realtime item after the replacement is acknowledged", async () => {
     const realtimeSession = fakeRawRealtimeSession();
     const executor = new LiveKitRealtimeExecutor({
@@ -695,7 +886,7 @@ describe("LiveKitRealtimeExecutor", () => {
       text: "what should I remember?",
     });
     expectRealtimeTurnFrame(frames[1], frames[0]);
-    expect(frames[1]?.metadata).toMatchObject({
+    expect(frames[1]?.provenance?.execution).toMatchObject({
       responseDone: true,
       responseId: "response-1",
     });
@@ -732,7 +923,12 @@ describe("LiveKitRealtimeExecutor", () => {
       type: "assistant",
       text: "Got it.",
     });
-    expect(frames.filter((frame) => frame.metadata?.type === "projector.runtime-turn")).toHaveLength(1);
+    const turnFrames = frames.filter((frame) =>
+      frame.messages.some(
+        (message) => message.type === "work" && message.kind === "completion",
+      ),
+    );
+    expect(turnFrames).toHaveLength(1);
   });
 
   it("enqueues parsed LiveKit data messages as active user frames", async () => {
@@ -763,7 +959,7 @@ describe("LiveKitRealtimeExecutor", () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]?.inert).toBeUndefined();
     expect(frames[0]).toMatchObject({
-      metadata: { mode: "text", transport: "livekit" },
+      provenance: { execution: { mode: "text", transport: "livekit" } },
       messages: [
         {
           type: "user",
@@ -771,6 +967,60 @@ describe("LiveKitRealtimeExecutor", () => {
           text: "hello",
           audience: "broadcast",
           source: { external: true, transport: "livekit" },
+        },
+      ],
+    });
+  });
+
+  it("enqueues parsed LiveKit data message frame drafts", async () => {
+    const session = new FakeSession();
+    const room = new FakeRoom();
+    const frames: FrameDraft[] = [];
+    const executor = new LiveKitRealtimeExecutor({
+      session,
+      room,
+      discreteExecutor: fakeDiscreteExecutor(),
+      input: {
+        messageTopic: "demo.message.v1",
+        parseDataMessage: () => ({
+          metadata: { mode: "text", transport: "livekit" },
+          messages: [
+            {
+              type: "user",
+              content: [
+                { type: "text", text: "inspect this" },
+                { type: "image", data: "https://example.test/image.png", mediaType: "image/png", label: "image.png" },
+              ],
+              text: "inspect this",
+              audience: "broadcast",
+              source: { external: true, transport: "livekit" },
+            } as any,
+          ],
+        }),
+      },
+    });
+    await executor.syncRuntime(syncContext({}, frames));
+
+    room.emit(
+      "data_received",
+      new TextEncoder().encode(JSON.stringify({ content: "ignored" })),
+      undefined,
+      undefined,
+      "demo.message.v1",
+    );
+    await flushPromises();
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      metadata: { mode: "text", transport: "livekit" },
+      messages: [
+        {
+          type: "user",
+          text: "inspect this",
+          content: [
+            { type: "text", text: "inspect this" },
+            { type: "image", data: "https://example.test/image.png", mediaType: "image/png", label: "image.png" },
+          ],
         },
       ],
     });
@@ -1414,7 +1664,18 @@ function syncContext(
     generatorId: ROOT_GENERATOR_ID,
     inference: inference(),
     createActionContext: () => createUnboundActionContext(),
-    enqueueFrame: (frame) => machine.enqueueFrame(frame),
+    enqueueFrame: (frame, report) =>
+      machine.enqueueFrame(
+        report
+          ? {
+              ...frame,
+              provenance: {
+                ...frame.provenance,
+                execution: { ...frame.provenance?.execution, ...report },
+              },
+            }
+          : frame,
+      ),
     ...overrides,
     visibleFrames: (overrides.visibleFrames ?? []).map((frame) => ({
       ...frame,
@@ -1427,7 +1688,7 @@ function fakeMachine(frames: FrameDraft[]): RuntimeSyncContext["machine"] {
   const storedFrames: Frame[] = [];
   return {
     id: "machine",
-    root: { id: "root", node: createNode({ key: "root" }) },
+    instance: { id: "root", node: createNode({ key: "root" }) },
     charter: {} as RuntimeSyncContext["machine"]["charter"],
     frames: storedFrames,
     enqueueFrame(frame) {
@@ -1463,14 +1724,12 @@ function expectRealtimeTurnFrame(
   expect(frame).toMatchObject({
     generatorId: REALTIME_GENERATOR_ID,
     activationId: expect.stringMatching(/^activation:realtime:/),
-    metadata: {
-      type: "projector.runtime-turn",
-      generatorId: REALTIME_GENERATOR_ID,
-      sourceFrameId,
-      completionReason: "end-turn",
-      mode: "voice",
-      transport: "livekit",
-      realtimeTurn: true,
+    provenance: {
+      execution: {
+        mode: "voice",
+        transport: "livekit",
+        realtimeTurn: true,
+      },
     },
     messages: [
       {
@@ -1484,6 +1743,7 @@ function expectRealtimeTurnFrame(
       {
         type: "work",
         kind: "completion",
+        generatorId: REALTIME_GENERATOR_ID,
         sourceFrameId,
         reason: "end-turn",
       },

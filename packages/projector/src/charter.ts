@@ -1,5 +1,14 @@
-import { normalizeStateDescriptor } from "./create.ts";
+import {
+  normalizeStateDescriptor,
+  type ValidateNodeTreeParams,
+} from "./create.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
+import {
+  emptyParamsSchema,
+  normalizeParamsSchema,
+  type AnyParamsSchema,
+  type EnsureParamsSatisfy,
+} from "./params.ts";
 import type {
   AnyAction,
   Charter,
@@ -11,29 +20,52 @@ import type {
   StateDescriptor,
 } from "./types.ts";
 
-export function createCharter<TDataContent = never>(
-  config: CharterConfig<TDataContent>,
-): Charter<TDataContent> {
-  return {
+type InferCharterParamsSchema<TConfig> =
+  TConfig extends { params: infer TParams extends AnyParamsSchema }
+    ? TParams
+    : typeof emptyParamsSchema;
+
+type ValidateCharterNodeParams<TConfig> =
+  TConfig extends { nodes: readonly (infer TNode)[] }
+    ? TNode extends unknown
+      ? ValidateNodeTreeParams<InferCharterParamsSchema<TConfig>, TNode>
+      : unknown
+    : unknown;
+
+export function createCharter<
+  TDataContent = never,
+  const TConfig extends CharterConfig<TDataContent> = CharterConfig<TDataContent>,
+>(
+  config: TConfig & ValidateCharterNodeParams<TConfig>,
+): Charter<TDataContent, InferCharterParamsSchema<TConfig>> {
+  const params = normalizeParamsSchema(config.params) as InferCharterParamsSchema<TConfig>;
+  const nodes = config.nodes as readonly Node<TDataContent>[];
+  const tools = config.tools as readonly AnyAction[];
+  const commands = config.commands as readonly AnyAction[];
+  const states = config.states as readonly StateDescriptor[];
+  const projections = config.projections as readonly ProjectionFunction<TDataContent>[];
+  const historyProjections = (config.historyProjections ?? []) as readonly HistoryProjectionFunction<TDataContent>[];
+  const charter = {
     key: config.key,
     version: config.version,
-    executor: config.executor,
-    nodes: registryFrom(config.nodes, "node", (node) => node.key),
-    tools: registryFrom(config.tools, "tool", (tool) => tool.name),
-    commands: registryFrom(config.commands, "command", (command) => command.name),
+    params,
+    nodes: registryFrom(nodes, "node", (node) => node.key),
+    tools: registryFrom(tools, "tool", (tool) => tool.name),
+    commands: registryFrom(commands, "command", (command) => command.name),
     states: registryFrom(
-      config.states.map((state) => normalizeCharterStateDescriptor(state)),
+      states.map((state) => normalizeCharterStateDescriptor(state)),
       "state",
       (state) => state.key,
     ),
-    projections: projectionRegistryFrom(config.projections),
+    projections: projectionRegistryFrom(projections),
     historyProjections: registryFrom(
-      config.historyProjections ?? [],
+      historyProjections,
       "history projection function",
       (projection) => projection.name,
       { refWord: false },
     ),
   };
+  return charter;
 }
 
 type CharterRegistryValue<TDataContent> =

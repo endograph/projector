@@ -4,10 +4,17 @@ import { encodeProjectionAddress } from "./projection-address.ts";
 import { ROOT_INSTANCE_ID } from "./projection-address.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
+  Charter,
   Instance,
   Node,
   ProjectionAddress,
 } from "./types.ts";
+import {
+  resolveEffectiveParams,
+  resolveNodeParams,
+  type InputCharterParams,
+  type JsonObject,
+} from "./params.ts";
 
 export type Contributor<TDataContent = never> = {
   node: Node<TDataContent>;
@@ -62,12 +69,26 @@ export function createSourceInstance<TDataContent = never>(
   return createInstance({ ...options, isSource: true });
 }
 
-export function createRoot<TDataContent = never>(
+export function createRoot<
+  TDataContent = never,
+  TCharter extends Charter<TDataContent> = Charter<TDataContent>,
+>(
+  charter: TCharter,
   instances: Instance<TDataContent>[],
+  params: InputCharterParams<TCharter>,
+): Instance<TDataContent> {
+  const parsedParams = charter.params.parse(params);
+  return createRootInstance(instances, parsedParams);
+}
+
+export function createRootInstance<TDataContent = never>(
+  instances: Instance<TDataContent>[],
+  params?: Instance<TDataContent>["params"],
 ): Instance<TDataContent> {
   const root = {
     id: ROOT_INSTANCE_ID,
     node: rootNode as unknown as Instance<TDataContent>["node"],
+    ...(params ? { params } : {}),
     children: instances,
   } satisfies Instance<TDataContent>;
   assertUniqueInstanceIds(root);
@@ -135,6 +156,30 @@ export function directContributorChildren<TDataContent = never>(
   }
 
   return children;
+}
+
+export function instancePathForContributor<TDataContent>(
+  contributor: Contributor<TDataContent>,
+): Instance<TDataContent>[] {
+  const reversed: Instance<TDataContent>[] = [];
+  let current: Contributor<TDataContent> | undefined = contributor;
+  while (current) {
+    const instance = current.concreteInstance;
+    if (reversed[reversed.length - 1] !== instance) {
+      reversed.push(instance);
+    }
+    current = current.parent;
+  }
+  return reversed.reverse();
+}
+
+export function resolveContributorNodeParams<TDataContent>(
+  contributor: Contributor<TDataContent>,
+): JsonObject {
+  return resolveNodeParams(
+    contributor.node,
+    resolveEffectiveParams(instancePathForContributor(contributor)),
+  );
 }
 
 export function hoistStateInstance<TDataContent>(

@@ -31,6 +31,23 @@ export type AiSdkStreamUpdate<
   error?: string;
 };
 
+/**
+ * Node-level executor config, carried on `node.executorConfig.aisdk` in the
+ * charter (plain JSON) and delivered per activation via
+ * `ExecutorRunRequest.config`. Overrides the executor-level defaults.
+ */
+export type AiSdkExecutorNodeConfig = {
+  maxOutputTokens?: number;
+  maxSteps?: number;
+  temperature?: number;
+};
+
+declare module "@projectors/core" {
+  interface ExecutorConfigRegistry {
+    aisdk: AiSdkExecutorNodeConfig;
+  }
+}
+
 export type AiSdkExecutorConfig<
   TDataContent = never,
 > = {

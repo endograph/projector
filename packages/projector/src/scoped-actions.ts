@@ -46,7 +46,7 @@ export function resolveScopedAction<TDataContent>(
   throw new Error(`Unknown ${kind} ref "${name}" for node "${contributor.node.key}"`);
 }
 
-function actionBinding(
+export function actionBinding(
   node: Node<any>,
   name: string,
   kind: ActionKind,

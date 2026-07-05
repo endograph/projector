@@ -50,8 +50,9 @@ describe("conformance: projection IR", () => {
     });
     const machine = createMachine({
       id: "projection-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("summarize") }] });
 
@@ -93,8 +94,9 @@ describe("conformance: projection IR", () => {
     });
     const machine = createMachine({
       id: "hidden-boundary-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 
@@ -125,8 +127,9 @@ describe("conformance: projection IR", () => {
     });
     const machine = createMachine({
       id: "child-runtime-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("run") }] });
 

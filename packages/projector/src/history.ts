@@ -1,6 +1,5 @@
 import type {
   ActorMessage,
-  CompletionReason,
   Frame,
   FrameDraft,
   FrameMessage,
@@ -21,48 +20,10 @@ import type {
   WorkMessage,
 } from "./types.ts";
 
-export type RuntimeCompletionFrameMetadata = {
-  type: "projector.runtime-completion";
-  generatorId: GeneratorId;
-  activationId: string;
-  completionReason: CompletionReason;
-};
-
-export type RuntimeTurnFrameMetadata = {
-  type: "projector.runtime-turn";
-  generatorId: GeneratorId;
-  activationId: string;
-  sourceFrameId: string;
-  completionReason: WorkCompletionReason;
-};
-
-export function createRuntimeCompletionFrame<
-  TDataContent = never,
->({
-  generatorId,
-  activationId,
-  completionReason,
-  metadata,
-}: {
-  generatorId: GeneratorId;
-  activationId: string;
-  completionReason: CompletionReason;
-  metadata?: Record<string, unknown>;
-}): FrameDraft<TDataContent> {
-  return {
-    generatorId,
-    activationId,
-    messages: [],
-    metadata: {
-      ...metadata,
-      type: "projector.runtime-completion",
-      generatorId,
-      activationId,
-      completionReason,
-    } satisfies RuntimeCompletionFrameMetadata & Record<string, unknown>,
-  };
-}
-
+/**
+ * A self-contained turn frame: activation and completion for work that was
+ * never scheduled through the machine (e.g. realtime voice turns).
+ */
 export function createRuntimeTurnFrame<
   TDataContent = never,
 >({
@@ -72,7 +33,6 @@ export function createRuntimeTurnFrame<
   reason = "end-turn",
   concurrencyKey = generatorId,
   concurrency = "serial",
-  metadata,
 }: {
   generatorId: GeneratorId;
   activationId: string;
@@ -80,7 +40,6 @@ export function createRuntimeTurnFrame<
   reason?: WorkCompletionReason;
   concurrencyKey?: string;
   concurrency?: RuntimeConcurrency;
-  metadata?: Record<string, unknown>;
 }): FrameDraft<TDataContent> {
   return {
     generatorId,
@@ -99,25 +58,12 @@ export function createRuntimeTurnFrame<
         type: "work",
         kind: "completion",
         activationId,
+        generatorId,
         sourceFrameId,
         reason,
       } satisfies WorkCompletionMessage) as FrameMessage<TDataContent>,
     ],
-    metadata: {
-      ...metadata,
-      type: "projector.runtime-turn",
-      generatorId,
-      activationId,
-      sourceFrameId,
-      completionReason: reason,
-    } satisfies RuntimeTurnFrameMetadata & Record<string, unknown>,
   };
-}
-
-export function isRuntimeCompletionFrame(
-  frame: Pick<Frame, "metadata"> & Partial<Pick<Frame, "messages">>,
-): boolean {
-  return readCompletionMetadata(frame, undefined) !== undefined;
 }
 
 export function createActivationFrame<
@@ -154,10 +100,12 @@ export function createCompletionFrame<
   TDataContent = never,
 >({
   activationId,
+  generatorId,
   sourceFrameId,
   reason,
 }: {
   activationId: string;
+  generatorId?: GeneratorId;
   sourceFrameId?: string;
   reason: WorkCompletionReason;
 }): FrameDraft<TDataContent> {
@@ -167,6 +115,7 @@ export function createCompletionFrame<
         type: "work",
         kind: "completion",
         activationId,
+        ...(generatorId !== undefined ? { generatorId } : {}),
         ...(sourceFrameId !== undefined ? { sourceFrameId } : {}),
         reason,
       } satisfies WorkCompletionMessage) as FrameMessage<TDataContent>,
@@ -199,6 +148,7 @@ export function isWorkCompletionMessage(message: unknown): message is WorkComple
     record.type === "work" &&
     record.kind === "completion" &&
     typeof record.activationId === "string" &&
+    (record.generatorId === undefined || typeof record.generatorId === "string") &&
     (record.sourceFrameId === undefined || typeof record.sourceFrameId === "string") &&
     isWorkCompletionReason(record.reason)
   );
@@ -364,57 +314,19 @@ function lastCompletionIndex<TDataContent>(
   for (let index = 0; index < frames.length; index += 1) {
     const frame = frames[index];
     if (!frame) continue;
-    if (readCompletionMetadata(frame, generatorId)) {
-      lastIndex = index;
-    }
     for (const message of frame.messages) {
       if (isWorkActivationMessage(message)) {
         activationGeneratorIds.set(message.activationId, message.generatorId);
       }
       if (
         isWorkCompletionMessage(message) &&
-        activationGeneratorIds.get(message.activationId) === generatorId
+        (message.generatorId ?? activationGeneratorIds.get(message.activationId)) === generatorId
       ) {
         lastIndex = index;
       }
     }
   }
   return lastIndex;
-}
-
-function readCompletionMetadata(
-  frame: Pick<Frame<any>, "metadata"> | undefined,
-  generatorId: GeneratorId | undefined,
-): RuntimeCompletionFrameMetadata | undefined {
-  const metadata = frame?.metadata;
-  if (!metadata || typeof metadata !== "object") {
-    return undefined;
-  }
-
-  const record = metadata as Record<string, unknown>;
-  if (record.type !== "projector.runtime-completion") {
-    return undefined;
-  }
-  if (
-    generatorId !== undefined &&
-    record.generatorId !== generatorId
-  ) {
-    return undefined;
-  }
-  if (
-    typeof record.generatorId !== "string" ||
-    typeof record.activationId !== "string" ||
-    !isCompletionReason(record.completionReason)
-  ) {
-    return undefined;
-  }
-
-  return {
-    type: "projector.runtime-completion",
-    generatorId: record.generatorId,
-    activationId: record.activationId,
-    completionReason: record.completionReason,
-  };
 }
 
 function actorMessageFromUnknown<TDataContent>(
@@ -434,10 +346,6 @@ function actorMessageFromUnknown<TDataContent>(
   return [];
 }
 
-function isCompletionReason(value: unknown): value is CompletionReason {
-  return value === "done" || value === "cancelled" || value === "delegated" || value === "error";
-}
-
 function isWorkCompletionReason(value: unknown): value is WorkCompletionReason {
-  return value === "end-turn" || value === "done" || value === "cancelled" || value === "delegated";
+  return value === "end-turn" || value === "done" || value === "cancelled" || value === "delegated" || value === "error" || value === "terminal-action" || value === "absorbed";
 }

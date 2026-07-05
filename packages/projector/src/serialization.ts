@@ -10,6 +10,7 @@ import {
   isProjectionFunction,
 } from "./projection-functions.ts";
 import { hydrateNodeRef } from "./refs.ts";
+import { actionBinding } from "./scoped-actions.ts";
 import type {
   ActionBindings,
   ActionKind,
@@ -46,6 +47,7 @@ export function serializeInstance<TDataContent>(
     id: instance.id,
     node: serializeNode(instance.node, charter),
     ...(instance.isSource ? { isSource: true } : {}),
+    ...(instance.params ? { params: structuredClone(instance.params) } : {}),
     states: cloneStates(instance.states),
     children: instance.children?.map((child) => serializeInstance(child, charter)),
   };
@@ -59,6 +61,7 @@ export function hydrateInstance<TDataContent = never>(
     id: serialized.id,
     node: hydrateNode(serialized.node, charter),
     ...(serialized.isSource ? { isSource: true } : {}),
+    ...(serialized.params ? { params: structuredClone(serialized.params) } : {}),
     states: cloneStates(serialized.states),
     children: serialized.children?.map((child) => hydrateInstance(child, charter)),
   };
@@ -78,6 +81,7 @@ export function serializeNode<TDataContent>(
     key: node.key,
     sourceNodeKey,
     name: node.name,
+    params: serializeParams(node.params),
     instructions: node.instructions,
     tools: serializeActionRefs(node.toolRefs, node.toolBindings, charter, "tool", sourceNodeKey),
     commands: serializeActionRefs(
@@ -92,6 +96,7 @@ export function serializeNode<TDataContent>(
     output: node.output ? serializeOutputConfig(node.output) : undefined,
     projection: serializeNodeProjection(node, charter, sourceNodeKey),
     runtime: serializeRuntime(node.runtime, charter, sourceNodeKey),
+    executorConfig: node.executorConfig,
   };
 }
 
@@ -107,6 +112,7 @@ export function hydrateNode<TDataContent = never>(
     key: serialized.key,
     sourceNodeKey: serialized.sourceNodeKey,
     name: serialized.name,
+    params: serialized.params ? hydrateParams(serialized.params) : undefined,
     instructions: serialized.instructions,
     tools: hydrateActionRefs(serialized.tools, charter, "tool", serialized.sourceNodeKey),
     commands: hydrateActionRefs(
@@ -126,6 +132,7 @@ export function hydrateNode<TDataContent = never>(
     runtime: serialized.runtime
       ? hydrateRuntime(serialized.runtime, charter, serialized.sourceNodeKey)
       : undefined,
+    executorConfig: serialized.executorConfig,
   });
 }
 
@@ -138,6 +145,14 @@ export function serializeOutputConfig(output: AnyOutputConfig): SerializedOutput
     audience: output.audience,
     schema: output.schema ? z.toJSONSchema(output.schema) : undefined,
   };
+}
+
+function serializeParams(params: Node["params"]): unknown {
+  return z.toJSONSchema(params);
+}
+
+function hydrateParams(params: unknown): Node["params"] {
+  return z.fromJSONSchema(params as Parameters<typeof z.fromJSONSchema>[0]) as Node["params"];
 }
 
 export function hydrateOutputConfig(output: SerializedOutputConfig): AnyOutputConfig {
@@ -246,7 +261,7 @@ function assertProjectionSlotRef<TDataContent>(
   assertProjectionRef(projection, charter);
 }
 
-function sourceNodeProjectionSlot<TDataContent>(
+export function sourceNodeProjectionSlot<TDataContent>(
   charter: Charter<TDataContent>,
   slot: "projection" | "boundaryProjection",
   sourceNodeKey: string | undefined,
@@ -498,7 +513,7 @@ function serializeActionRef<TDataContent>(
   return key;
 }
 
-function sourceNodeKeyFor<TDataContent>(
+export function sourceNodeKeyFor<TDataContent>(
   node: Node<TDataContent>,
   charter: Pick<Charter<TDataContent>, "nodes">,
 ): string | undefined {
@@ -507,14 +522,6 @@ function sourceNodeKeyFor<TDataContent>(
   }
   const sourceNode = charter.nodes[node.key];
   return sourceNode && sourceNode !== node ? node.key : undefined;
-}
-
-function actionBinding(
-  node: Node<any>,
-  ref: string,
-  kind: ActionKind,
-): AnyAction | undefined {
-  return kind === "tool" ? node.toolBindings[ref] : node.commandBindings[ref];
 }
 
 function isActorHistoryProjection(

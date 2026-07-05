@@ -12,12 +12,13 @@ import {
   createMachine,
   actionResult,
   createHistoryProjectionFunction,
+  createInstance,
   createProjectionFunction,
   createStandardProjectionFunction,
-  createRuntimeCompletionFrame,
   createRuntimeTurnFrame,
   createNode,
   createRoot,
+  createRootInstance,
   executeCommand,
   hydrateHistoryProjection,
   hydrateInstance,
@@ -31,6 +32,7 @@ import {
   patchState,
   resolveStates,
   replaceState,
+  resolveEffectiveParams,
   runMachine,
   serializeHistoryProjection,
   serializeInstance,
@@ -70,7 +72,6 @@ function charter<TDataContent = never>(
   overrides: Partial<CharterConfig<TDataContent>> = {},
 ): Charter<TDataContent> {
   return createCharter<TDataContent>({
-    executor: executor as Charter<TDataContent>["executor"],
     nodes: [],
     tools: [],
     commands: [],
@@ -111,8 +112,7 @@ describe("actor message typing", () => {
     });
 
     const appCharter = createCharter<AppDataContent>({
-      executor: executor as Charter<AppDataContent>["executor"],
-      nodes: [appNode],
+        nodes: [appNode],
       tools: [],
       commands: [],
       states: [],
@@ -134,8 +134,7 @@ describe("actor message typing", () => {
       output: { schema: z.string() },
     });
     createCharter<AppDataContent>({
-      executor: executor as Charter<AppDataContent>["executor"],
-      nodes: [
+        nodes: [
         // @ts-expect-error registered nodes must use the charter data content type.
         stringOutputNode,
       ],
@@ -195,6 +194,302 @@ describe("node normalization", () => {
   });
 });
 
+describe("params", () => {
+  it("types charter, node, and action params compatibility", () => {
+    const action = createAction({
+      state: null,
+      name: "loadProfile",
+      params: z.object({ userId: z.string() }),
+      run: (_input, ctx) => {
+        expectTypeOf(ctx.params).toEqualTypeOf<{ userId: string }>();
+        ctx.params.userId;
+        // @ts-expect-error action params only expose action-declared keys
+        ctx.params.orgId;
+      },
+    });
+
+    const node = createNode({
+      key: "profile",
+      params: z.object({
+        userId: z.string(),
+        orgId: z.string(),
+      }),
+      tools: [action],
+    });
+
+    createCharter({
+      executor,
+      params: z.object({
+        userId: z.string(),
+        orgId: z.string(),
+      }),
+      nodes: [node],
+      tools: [],
+      commands: [],
+      states: [],
+      projections: [],
+    });
+
+    expect(() =>
+      createCharter({
+        executor,
+        params: z.object({}),
+        nodes: [
+          createNode({
+            key: "optionalProfile",
+            params: z.object({ userId: z.string().optional() }),
+          }),
+        ],
+        tools: [],
+        commands: [],
+        states: [],
+        projections: [],
+      }),
+    ).not.toThrow();
+
+    const memberNode = createNode({
+      key: "memberProfile",
+      params: z.object({ orgId: z.string() }),
+    });
+    createCharter({
+      executor,
+      params: z.object({
+        userId: z.string(),
+        orgId: z.string(),
+      }),
+      nodes: [
+        createNode({
+          key: "memberOwner",
+          params: z.object({ userId: z.string() }),
+          members: [memberNode],
+        }),
+      ],
+      tools: [],
+      commands: [],
+      states: [],
+      projections: [],
+    });
+
+    if (false) {
+      // @ts-expect-error node params must satisfy attached action params
+      createNode({
+        key: "badActionNode",
+        params: z.object({ orgId: z.string() }),
+        tools: [action],
+      });
+
+      // @ts-expect-error charter params must satisfy node params
+      createCharter({
+        executor,
+        params: z.object({ userId: z.string() }),
+        nodes: [node],
+        tools: [],
+        commands: [],
+        states: [],
+        projections: [],
+      });
+
+      // @ts-expect-error charter params must satisfy member node params
+      createCharter({
+        executor,
+        params: z.object({ userId: z.string() }),
+        nodes: [
+          createNode({
+            key: "badMemberOwner",
+            params: z.object({ userId: z.string() }),
+            members: [memberNode],
+          }),
+        ],
+        tools: [],
+        commands: [],
+        states: [],
+        projections: [],
+      });
+    }
+  });
+
+  it("parses createRoot params and validates machine params", () => {
+    const rootNode = createNode({ key: "app" });
+    const appCharter = charter({
+      params: z.object({ userId: z.string() }),
+      nodes: [rootNode],
+    });
+    const source = createInstance({ id: "app", node: rootNode, isSource: true });
+
+    expect(() => createRoot(appCharter, [source], { userId: 123 })).toThrow();
+
+    const instance = createRoot(appCharter, [source], { userId: "user_123" });
+    expect(instance.params).toEqual({ userId: "user_123" });
+
+    expect(() =>
+      createMachine({
+        charter: appCharter,
+        instance: { id: "custom", node: rootNode, isSource: true },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      createMachine({
+        charter: appCharter,
+        instance: {
+          id: "custom",
+          node: rootNode,
+          isSource: true,
+          params: { userId: "user_123" },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it("resolves shallow instance params and rejects overrides", () => {
+    const rootNode = createNode({ key: "root" });
+    const childNode = createNode({ key: "child" });
+    const child = createInstance({
+      id: "child",
+      node: childNode,
+      isSource: true,
+    });
+    child.params = { documentId: "doc_456" };
+    const instance: Instance = {
+      id: "top",
+      node: rootNode,
+      params: { userId: "user_123" },
+      children: [child],
+    };
+
+    expect(resolveEffectiveParams([instance, child])).toEqual({
+      userId: "user_123",
+      documentId: "doc_456",
+    });
+
+    child.params = { userId: "user_999" };
+    expect(() => resolveEffectiveParams([instance, child])).toThrow(
+      /Param override is not supported yet: userId/,
+    );
+  });
+
+  it("passes action-local params through command contexts", async () => {
+    let observed: unknown;
+    const command = createAction({
+      state: null,
+      name: "readParams",
+      params: z.object({ userId: z.string() }),
+      run: (_input, ctx) => {
+        observed = ctx.params;
+      },
+    });
+    const node = createNode({
+      key: "profile",
+      params: z.object({
+        userId: z.string(),
+        orgId: z.string(),
+      }),
+      commands: [command],
+    });
+    const machine = createMachine({
+      charter: charter({
+        params: z.object({
+          userId: z.string(),
+          orgId: z.string(),
+        }),
+        nodes: [node],
+      }),
+      instance: {
+        id: "profile",
+        node,
+        isSource: true,
+        params: {
+          userId: "user_123",
+          orgId: "org_456",
+        },
+      },
+    });
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "readParams",
+      input: null,
+      callId: "call-1",
+    });
+
+    expect(observed).toEqual({ userId: "user_123" });
+  });
+
+  it("provides node-scoped params to projection and history projection contexts", () => {
+    let projectionParams: unknown;
+    let historyParams: unknown;
+    const captureParams = createProjectionFunction({
+      name: "captureParams",
+      method: (ctx, draft, source) => {
+        if (ctx.callSite === "node") {
+          projectionParams = ctx.params;
+        }
+        applyStandardProjection(ctx, draft, source);
+      },
+    });
+    const captureHistoryParams = createHistoryProjectionFunction({
+      name: "captureHistoryParams",
+      method: (ctx) => {
+        historyParams = ctx.params;
+        return [];
+      },
+    });
+    const generator = createNode({
+      key: "generator",
+      params: z.object({ tone: z.string() }),
+      projection: captureParams,
+      runtime: {
+        type: "generator",
+        trigger: { type: "parent-completion" },
+        historyProjection: captureHistoryParams,
+      },
+    });
+    const root = createNode({ key: "root", members: [generator] });
+
+    compileProjection(
+      {
+        id: "r",
+        isSource: true,
+        node: root,
+        params: { tone: "wry", audience: "kids" },
+      },
+      { targetGeneratorId: "member:r/generator", frameHistory: [] },
+    );
+
+    expect(projectionParams).toEqual({ tone: "wry" });
+    expect(historyParams).toEqual({ tone: "wry" });
+  });
+
+  it("serializes and hydrates instance and node params", () => {
+    const node = createNode({
+      key: "profile",
+      params: z.object({ userId: z.string() }),
+    });
+    const appCharter = charter({
+      params: z.object({ userId: z.string() }),
+      nodes: [node],
+    });
+    const instance: Instance = {
+      id: "profile",
+      node,
+      isSource: true,
+      params: { userId: "user_123" },
+    };
+
+    const serialized = serializeInstance(instance, appCharter);
+    expect(serialized.params).toEqual({ userId: "user_123" });
+    expect(typeof serialized.node).toBe("string");
+
+    const hydrated = hydrateInstance(serialized, appCharter);
+    expect(hydrated.params).toEqual({ userId: "user_123" });
+    expect(hydrated.node.params.parse({ userId: "user_456" })).toEqual({
+      userId: "user_456",
+    });
+  });
+});
+
 describe("action state requirements", () => {
   it("types action contexts from the explicit action state descriptor", () => {
     const counterState = {
@@ -244,14 +539,14 @@ describe("action state requirements", () => {
 
     expect(() =>
       createMachine({
-        root: { id: "r", isSource: true, node: createNode({ key: "missing-state", commands: [setCounter] }) },
+        instance: { id: "r", isSource: true, node: createNode({ key: "missing-state", commands: [setCounter] }) },
         charter: charter(),
       }),
     ).toThrow(/requires state "counter" but the node has no state/);
 
     expect(() =>
       createMachine({
-        root: {
+        instance: {
           id: "r",
           isSource: true,
           node: createNode({ key: "profile", state: profileState, commands: [setCounter] }),
@@ -291,7 +586,7 @@ describe("projection traversal", () => {
     const childB = createNode({ key: "childB" });
     const rootA = createNode({ key: "rootA", members: [critic] });
     const rootB = createNode({ key: "rootB" });
-    const root = createRoot([
+    const root = createRootInstance([
       {
         id: "a",
         node: rootA,
@@ -317,17 +612,17 @@ describe("projection traversal", () => {
   it("rejects duplicate instance ids without reserving root globally", () => {
     const node = createNode({ key: "node" });
 
-    expect(() => createRoot([{ id: "root", node }])).toThrow(/Duplicate instance id "root"/);
+    expect(() => createRootInstance([{ id: "root", node }])).toThrow(/Duplicate instance id "root"/);
     expect(() => createMachine({
-      root: { id: "root", isSource: true, node },
+      instance: { id: "root", isSource: true, node },
       charter: charter(),
     })).not.toThrow();
     expect(() => createMachine({
-      root: { id: "custom", isSource: true, node },
+      instance: { id: "custom", isSource: true, node },
       charter: charter(),
     })).not.toThrow();
     expect(() => createMachine({
-      root: {
+      instance: {
         id: "custom",
         isSource: true,
         node,
@@ -753,7 +1048,7 @@ describe("state resolution and state projection", () => {
       state: { key: "hoist", scope: "hoist", schema: z.number(), init: 2 },
     });
     const app = createNode({ key: "app", members: [memory] });
-    const root = createRoot([{ id: "app", isSource: true, node: app }]);
+    const root = createRootInstance([{ id: "app", isSource: true, node: app }]);
 
     resolveStates(root);
 
@@ -873,7 +1168,7 @@ describe("retrieval aliases", () => {
         key: `${key}Node`,
         state: { key, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
       });
-    const root = createRoot([
+    const root = createRootInstance([
       { id: "a", isSource: true, node: state("shared") },
       { id: "b", isSource: true, node: state("shared") },
       { id: "c", isSource: true, node: state("unique") },
@@ -896,7 +1191,7 @@ describe("retrieval aliases", () => {
       });
     const unique = compileProjection({ id: "one", isSource: true, node: state("one", "memory") });
     const duplicate = compileProjection(
-      createRoot([
+      createRootInstance([
         { id: "a", isSource: true, node: state("a", "memory") },
         { id: "b", isSource: true, node: state("b", "memory") },
       ]),
@@ -1103,7 +1398,7 @@ describe("history projection", () => {
     });
 
     const compiled = compileProjection(
-      createRoot([
+      createRootInstance([
         { id: "a", node },
         { id: "b", node },
       ]),
@@ -1124,14 +1419,15 @@ describe("history projection", () => {
       activationId: "activation-2",
       trigger: { type: "parent-completion" as const },
       states: {},
+      params: {},
       history: [
         frame("before", [{ ...textUserMessage("old") }]),
         {
           id: "completion",
-          ...createRuntimeCompletionFrame({
+          ...createCompletionFrame({
             generatorId: "member:r/memory",
             activationId: "activation-1",
-            completionReason: "done",
+            reason: "done",
           }),
         },
         frame("after", [{ ...textUserMessage("new") }]),
@@ -1258,7 +1554,7 @@ describe("commands and instance mutations", () => {
     const root = createNode({ key: "root", members: [controls] });
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1321,7 +1617,7 @@ describe("commands and instance mutations", () => {
       }),
     };
     const machine = createMachine({
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1372,7 +1668,7 @@ describe("commands and instance mutations", () => {
       }),
     };
     const machine = createMachine({
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1415,7 +1711,7 @@ describe("commands and instance mutations", () => {
       node: createNode({ key: "root", commands: [wait] }),
     };
     const machine = createMachine({
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1474,7 +1770,7 @@ describe("commands and instance mutations", () => {
       }),
     };
     const machine = createMachine({
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1524,7 +1820,7 @@ describe("commands and instance mutations", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
       id: "spawn-demo",
-      root: instance,
+      instance: instance,
       charter: charter({ nodes: [generator] }),
     });
     const spawnFrame = machine.enqueueFrame({
@@ -1572,7 +1868,7 @@ describe("commands and instance mutations", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
       id: "member-spawn-demo",
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1609,7 +1905,7 @@ describe("commands and instance mutations", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
       id: "concrete-spawn-demo",
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1653,7 +1949,7 @@ describe("commands and instance mutations", () => {
     };
     const machine = createMachine({
       id: "cede-child-demo",
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1693,7 +1989,7 @@ describe("commands and instance mutations", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
       id: "transition-owner-demo",
-      root: instance,
+      instance: instance,
       charter: charter(),
     });
 
@@ -1733,7 +2029,7 @@ describe("commands and instance mutations", () => {
     const instance: Instance = { id: "r", isSource: true, node: root };
     const machine = createMachine({
       id: "dry-spawn-demo",
-      root: instance,
+      instance: instance,
       charter: registry,
     });
 
@@ -1801,8 +2097,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor: runtimeExecutor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     const userFrame = machine.enqueueFrame({
       messages: [{ ...textUserMessage("remember my name") }],
@@ -1890,8 +2187,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "gated-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor: runtimeExecutor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
 
@@ -1961,8 +2259,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "stop-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor: runtimeExecutor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
 
@@ -2013,7 +2312,7 @@ describe("work scheduling", () => {
 
     const first = createMachine({
       id: "demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     first.enqueueFrame({
@@ -2025,7 +2324,7 @@ describe("work scheduling", () => {
 
     const second = createMachine({
       id: "demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     second.enqueueFrame({
@@ -2046,7 +2345,7 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     machine.enqueueFrame({
@@ -2067,8 +2366,9 @@ describe("work scheduling", () => {
     };
     const machine = createMachine({
       id: "root-completion-demo",
-      root: createRoot([{ id: "r", isSource: true, node: createNode({ key: "root" }) }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: createNode({ key: "root" }) }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({
       messages: [{ ...textUserMessage("hi") }],
@@ -2106,8 +2406,9 @@ describe("work scheduling", () => {
     const root = createNode({ key: "root", members: [memory] });
     const machine = createMachine({
       id: "external-turn-demo",
-      root: createRoot([{ id: "r", isSource: true, node: root }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: root }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     const userTranscript = machine.enqueueFrame({
       id: "user-transcript",
@@ -2159,8 +2460,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "root-generator-demo",
-      root: createRoot([{ id: "r", isSource: true, node: root }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: root }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
@@ -2189,8 +2491,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "root-nearest-boundary-demo",
-      root: createRoot([{ id: "r", isSource: true, node: root }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: root }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     const userFrame = machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
     const activationId = "root-activation";
@@ -2240,8 +2543,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "root-component-child-demo",
-      root: createRoot([{ id: "r", isSource: true, node: root }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: root }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
@@ -2267,8 +2571,9 @@ describe("work scheduling", () => {
     };
     const machine = createMachine({
       id: "host-sync-demo",
-      root: createRoot([{ id: "r", isSource: true, node: createNode({ key: "root" }) }]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([{ id: "r", isSource: true, node: createNode({ key: "root" }) }]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     const transcriptFrame = machine.enqueueFrame({
       id: "transcript-1",
@@ -2313,7 +2618,7 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "inert-ingest-demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     const observed: string[] = [];
@@ -2337,7 +2642,7 @@ describe("work scheduling", () => {
     });
 
     expect(observed).toEqual([]);
-    expect(resolveStates(machine.root)[0]?.container.value).toEqual({ count: 1 });
+    expect(resolveStates(machine.instance)[0]?.container.value).toEqual({ count: 1 });
     await expect(collectFrames(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
@@ -2383,8 +2688,9 @@ describe("work scheduling", () => {
     };
     const machine = createMachine({
       id: "external-action-context-demo",
-      root: createRoot([instance]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([instance]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
 
     await syncMachineRuntime(machine, {
@@ -2392,8 +2698,8 @@ describe("work scheduling", () => {
       visibleFrames: [],
     });
 
-    expect(machine.root.states).toBeUndefined();
-    expect(machine.root.children?.[0]?.states?.counter?.value).toEqual({ count: 2 });
+    expect(machine.instance.states).toBeUndefined();
+    expect(machine.instance.children?.[0]?.states?.counter?.value).toEqual({ count: 2 });
     expect(machine.frames.map((frame) => frame.messages[0])).toMatchObject([
       { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
       { type: "instance", kind: "state.update", instanceId: "r", stateKey: "counter" },
@@ -2437,8 +2743,9 @@ describe("work scheduling", () => {
     };
     const machine = createMachine({
       id: "external-action-spawn-demo",
-      root: createRoot([instance]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([instance]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
 
     await syncMachineRuntime(machine, {
@@ -2497,8 +2804,9 @@ describe("work scheduling", () => {
     };
     const machine = createMachine({
       id: "unbound-action-context-demo",
-      root: createRoot([instance]),
-      charter: charter({ executor: runtimeExecutor }),
+      instance: createRootInstance([instance]),
+      charter: charter(),
+      executor: runtimeExecutor,
     });
 
     await syncMachineRuntime(machine, {
@@ -2541,8 +2849,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "output-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor: runtimeExecutor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 
@@ -2596,8 +2905,9 @@ describe("work scheduling", () => {
     });
     const machine = createMachine({
       id: "structured-output-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter<StructuredDataContent>({ executor: runtimeExecutor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter<StructuredDataContent>(),
+      executor: runtimeExecutor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
 

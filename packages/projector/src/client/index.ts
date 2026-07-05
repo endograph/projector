@@ -1,12 +1,12 @@
 import * as z from "zod";
 import {
   collectContributors,
-  createRoot,
+  createRootInstance,
   directContributorChildren,
   type Contributor,
 } from "../contributors.ts";
 import { encodeProjectionAddress } from "../projection-address.ts";
-import { resolveFrameCommands } from "../scoped-actions.ts";
+import { resolveFrameCommands, resolveFrameTools } from "../scoped-actions.ts";
 import { resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
@@ -25,8 +25,8 @@ export type JSONSchema = unknown;
 export type ClientMachineMessage = ActionRequestMessage & { action: "command" };
 export type { ActionRequestMessage, ExecuteActionResult };
 
-export type MachineClientSnapshot<TRoot = unknown> = {
-  root: TRoot;
+export type MachineClientSnapshot<TInstance = unknown> = {
+  instance: TInstance;
   recentCommandResidue: string[];
 };
 
@@ -74,9 +74,21 @@ export type ClientCommandMeta<
   __result?: TResult;
 };
 
+export type ClientToolMeta<
+  TName extends string = string,
+  TInput = unknown,
+> = {
+  name: TName;
+  description?: string;
+  inputSchema?: JSONSchema;
+  target?: ProjectionAddress;
+  __input?: TInput;
+};
+
 export type ClientInstance<
   TCommands extends ClientCommandMeta = ClientCommandMeta,
   TState = unknown,
+  TTools extends ClientToolMeta = ClientToolMeta,
 > = {
   kind: "instance" | "member";
   id?: string;
@@ -84,6 +96,7 @@ export type ClientInstance<
   name?: string;
   contributor: ClientContributorMeta;
   states: ClientStateView<TState>[];
+  tools: TTools[];
   commands: TCommands[];
   members: ClientInstance[];
   children: ClientInstance[];
@@ -111,6 +124,11 @@ export type ClientCommandOf<TCommand> = ClientCommandMeta<
   ClientCommandDefinitionInput<TCommand>
 >;
 
+export type ClientToolOf<TTool> = ClientToolMeta<
+  ClientCommandDefinitionName<TTool>,
+  ClientCommandDefinitionInput<TTool>
+>;
+
 export type ClientStateOf<TStateDescriptor> = TStateDescriptor extends {
   schema: z.ZodType<infer TValue>;
 }
@@ -120,9 +138,14 @@ export type ClientStateOf<TStateDescriptor> = TStateDescriptor extends {
 export type ClientInstanceOf<TNode> = TNode extends {
   state?: infer TState;
   __commands?: infer TCommand;
+  __tools?: infer TTool;
 }
   ? Omit<
-      ClientInstance<ClientCommandOf<TCommand>, ClientStateOf<NonNullable<TState>>>,
+      ClientInstance<
+        ClientCommandOf<TCommand>,
+        ClientStateOf<NonNullable<TState>>,
+        ClientToolOf<TTool>
+      >,
       "members" | "children"
     > & {
       members: [];
@@ -398,11 +421,11 @@ export function consumeCommandResidue(
 }
 
 export function createMachineClientSnapshot<TInstances>(
-  root: TInstances,
+  instance: TInstances,
   syncState: MachineSyncState = createMachineSyncState(),
 ): MachineClientSnapshot<TInstances> {
   return {
-    root,
+    instance,
     recentCommandResidue: [...syncState.recentCommandResidue],
   };
 }
@@ -412,7 +435,7 @@ export function realizeClientInstances(
   options: { charter?: Charter } = {},
 ): ClientInstance {
   const root: Instance = Array.isArray(instances)
-    ? createRoot([...instances])
+    ? createRootInstance([...instances])
     : instances as Instance;
   const states = resolveStates(root);
   const statesByContributor = groupStatesByContributor(states);
@@ -470,6 +493,9 @@ function realizeContributor(
       runtimeType: contributor.node.runtime.type,
     },
     states: (statesByContributor.get(contributor.id) ?? []).map(realizeState),
+    tools: resolveFrameTools(contributor, charter).map((tool) =>
+      realizeTool(tool, contributor.address)
+    ),
     commands: resolveFrameCommands(contributor, charter).map((command) =>
       realizeCommand(command, contributor.address)
     ),
@@ -479,6 +505,15 @@ function realizeContributor(
     children: childNodes.map((child) =>
       realizeContributor(child, statesByContributor, charter)
     ),
+  };
+}
+
+function realizeTool(tool: Action, target: ProjectionAddress): ClientToolMeta {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : undefined,
+    target,
   };
 }
 

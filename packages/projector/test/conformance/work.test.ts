@@ -9,6 +9,7 @@ import {
   textUserMessage,
   type Frame,
   type FrameMessage,
+  type ProjectorExecutor,
 } from "../../index.ts";
 import { charter, createRecordingExecutor, drain } from "./helpers.ts";
 
@@ -30,8 +31,9 @@ describe("conformance: work scheduling", () => {
     });
     const machine = createMachine({
       id: "work-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     const userFrame = machine.enqueueFrame({
       messages: [{ ...textUserMessage("remember my name") }],
@@ -94,6 +96,33 @@ describe("conformance: work scheduling", () => {
     await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
+  it("records terminal-action completions from the executor verbatim", async () => {
+    const { executor, requests } = createRecordingExecutor(() => ({
+      completionReason: "terminal-action",
+    }));
+    const root = createNode({
+      key: "root",
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
+    });
+    const machine = createMachine({
+      id: "terminal-action-demo",
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
+    });
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("finish up") }] });
+
+    const frames = await drain(runMachine(machine));
+    const completions = frames.flatMap((frame) =>
+      frame.messages.filter(
+        (message) => message.type === "work" && message.kind === "completion",
+      ),
+    );
+    expect(completions).toMatchObject([{ reason: "terminal-action" }]);
+    expect(requests).toHaveLength(1);
+    await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
+  });
+
   it("does not let actor output from a runtime trigger that same runtime again", async () => {
     const root = createNode({
       key: "root",
@@ -101,7 +130,7 @@ describe("conformance: work scheduling", () => {
     });
     const machine = createMachine({
       id: "self-trigger-demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     const assistantFrame = machine.enqueueFrame({
@@ -133,8 +162,9 @@ describe("conformance: work scheduling", () => {
     });
     const machine = createMachine({
       id: "generator-output-demo",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("remember my name") }] });
 
@@ -188,7 +218,7 @@ describe("conformance: work scheduling", () => {
     const root = createNode({ key: "root", members: [generator] });
     const machine = createMachine({
       id: "trigger-demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("visible but wrong trigger") }] });
@@ -197,7 +227,7 @@ describe("conformance: work scheduling", () => {
     expect(workActivationRuntimeIds(frames)).toEqual([]);
   });
 
-  it("recovers parent-completion activations from the latest work frame inclusively", async () => {
+  it("recovers parent-completion activations from historical work frames", async () => {
     const memory = createNode({
       key: "memory",
       runtime: { type: "generator", trigger: { type: "parent-completion" } },
@@ -217,7 +247,7 @@ describe("conformance: work scheduling", () => {
     } as Frame;
     const machine = createMachine({
       id: "inclusive-cursor-demo",
-      root: { id: "r", isSource: true, node: root },
+      instance: { id: "r", isSource: true, node: root },
       charter: charter(),
       frames: [
         { id: "user-frame", messages: [{ ...textUserMessage("hi") }] },
@@ -244,6 +274,71 @@ describe("conformance: work scheduling", () => {
     });
   });
 
+  it("absorbs immediate mid-generation messages that the generation projected", async () => {
+    let midFrame: Frame | undefined;
+    let refreshedTexts: string[] = [];
+    const { executor, requests } = createRecordingExecutor((request) => {
+      if (requests.length === 1) {
+        midFrame = machine.enqueueFrame({
+          messages: [{ ...textUserMessage("mid-generation") }],
+        });
+        refreshedTexts = userTexts(request.refreshInference?.().history ?? []);
+      }
+      return { completionReason: "done" };
+    });
+    const machine = actorFrameMachine("absorb-demo", executor);
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
+
+    const frames = await drain(runMachine(machine));
+
+    expect(requests).toHaveLength(1);
+    expect(refreshedTexts).toContain("mid-generation");
+    expect(workCompletions(frames)).toMatchObject([
+      { reason: "end-turn" },
+      { reason: "absorbed", sourceFrameId: midFrame?.id },
+    ]);
+    await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
+  });
+
+  it("triggers a new generation for immediate messages the generation did not see", async () => {
+    const { executor, requests } = createRecordingExecutor(() => {
+      if (requests.length === 1) {
+        machine.enqueueFrame({ messages: [{ ...textUserMessage("unseen") }] });
+      }
+      return { completionReason: "done" };
+    });
+    const machine = actorFrameMachine("unseen-demo", executor);
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
+
+    await drain(runMachine(machine));
+
+    expect(requests).toHaveLength(2);
+    expect(userTexts(requests[1]?.inference.history ?? [])).toContain("unseen");
+    await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
+  });
+
+  it("always schedules follow-up work for queued messages, invisible mid-generation", async () => {
+    const refreshedTextsByRun: string[][] = [];
+    const { executor, requests } = createRecordingExecutor((request) => {
+      if (requests.length === 1) {
+        machine.enqueueFrame({
+          messages: [{ ...textUserMessage("later"), delivery: "queued" }],
+        });
+      }
+      refreshedTextsByRun.push(userTexts(request.refreshInference?.().history ?? []));
+      return { completionReason: "done" };
+    });
+    const machine = actorFrameMachine("queued-demo", executor);
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("hi") }] });
+
+    await drain(runMachine(machine));
+
+    expect(requests).toHaveLength(2);
+    expect(refreshedTextsByRun[0]).not.toContain("later");
+    expect(refreshedTextsByRun[1]).toContain("later");
+    await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
+  });
+
   it("does not reschedule historical activations when frame history is forked into a new machine", async () => {
     const { executor } = createRecordingExecutor();
     const root = createNode({
@@ -252,8 +347,9 @@ describe("conformance: work scheduling", () => {
     });
     const source = createMachine({
       id: "source-session",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
     });
     source.enqueueFrame({
       id: "user-1",
@@ -263,8 +359,9 @@ describe("conformance: work scheduling", () => {
     await drain(runMachine(source));
     const fork = createMachine({
       id: "forked-session",
-      root: { id: "r", isSource: true, node: root },
-      charter: charter({ executor }),
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
       frames: source.frames.map((frame) => ({ ...frame, messages: [...frame.messages] })),
     });
 
@@ -287,12 +384,39 @@ async function activationRuntimeIdsFor(message: FrameMessage): Promise<string[]>
   });
   const machine = createMachine({
     id: "audience-demo",
-    root: { id: "r", isSource: true, node: root },
+    instance: { id: "r", isSource: true, node: root },
     charter: charter(),
   });
   machine.enqueueFrame({ messages: [message] });
 
   return workActivationRuntimeIds(await drain(runMachine(machine, { scheduleWork: false })));
+}
+
+function actorFrameMachine(id: string, executor: ProjectorExecutor) {
+  const root = createNode({
+    key: "root",
+    runtime: { type: "generator", trigger: { type: "actor-frame" } },
+  });
+  return createMachine({
+    id,
+    instance: { id: "r", isSource: true, node: root },
+    charter: charter(),
+      executor,
+  });
+}
+
+function userTexts(history: readonly FrameMessage[]): string[] {
+  return history.flatMap((message) =>
+    message.type === "user" && typeof message.text === "string" ? [message.text] : [],
+  );
+}
+
+function workCompletions(frames: readonly Frame[]): FrameMessage[] {
+  return frames.flatMap((frame) =>
+    frame.messages.filter(
+      (message) => message.type === "work" && message.kind === "completion",
+    ),
+  );
 }
 
 function workActivationRuntimeIds(frames: readonly Frame[]): string[] {
