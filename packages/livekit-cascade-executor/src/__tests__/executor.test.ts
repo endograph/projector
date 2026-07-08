@@ -9,6 +9,7 @@ import {
   textAssistantMessage,
   textUserMessage,
   type CompiledInference,
+  type CompiledPart,
   type ContentPart,
 } from "@projectors/core";
 import { z } from "zod";
@@ -146,8 +147,8 @@ describe("LiveKitCascadeExecutor", () => {
     };
     const frames: FrameDraft[] = [];
     const compiled = inference({
-      systemParts: ["You are concise."],
-      dynamicParts: ["Current mode: voice."],
+      preamble: ["You are concise."],
+      recency: ["Current mode: voice."],
       history: [{ ...textUserMessage("hello") }],
     });
     const executor = new LiveKitCascadeExecutor({
@@ -188,8 +189,8 @@ describe("LiveKitCascadeExecutor", () => {
 
     await executor.syncRuntime(syncContext({
       inference: inference({
-        systemParts: ["You are concise."],
-        dynamicParts: ["Camera data."],
+        preamble: ["You are concise."],
+        recency: ["Camera data."],
       }),
     }));
 
@@ -209,8 +210,8 @@ describe("LiveKitCascadeExecutor", () => {
     const prompt = await executor.realizePrompt(
       request({
         inference: inference({
-          systemParts: ["System A"],
-          dynamicParts: ["Dynamic B"],
+          preamble: ["System A"],
+          recency: ["Dynamic B"],
           history: [{ ...textUserMessage("Hi") }],
           tools: [createAction({ state: null, name: "lookup", description: "Lookup things" })],
         }),
@@ -766,8 +767,8 @@ describe("LiveKit prompt and tool rendering", () => {
   it("renders compiled inference without discovering runtime state", () => {
     const rendered = buildLiveKitInstructions(
       inference({
-        systemParts: ["System A"],
-        dynamicParts: ["Dynamic B"],
+        preamble: ["System A"],
+        recency: ["Dynamic B"],
         history: [
           { ...textUserMessage("Hi") },
           {
@@ -795,7 +796,7 @@ describe("LiveKit prompt and tool rendering", () => {
   it("summarizes image parts without inlining base64 data", () => {
     const rendered = buildLiveKitInstructions(
       inference({
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           {
             type: "image",
@@ -856,9 +857,9 @@ function request(overrides: Partial<ExecutorRunRequest> = {}): ExecutorRunReques
 }
 
 function inference<TDataContent = never>(
-  overrides: Partial<Omit<CompiledInference<TDataContent>, "systemParts" | "dynamicParts" | "history">> & {
-    systemParts?: Array<string | ContentPart<any>>;
-    dynamicParts?: Array<string | ContentPart<any>>;
+  overrides: Partial<Omit<CompiledInference<TDataContent>, "preamble" | "recency" | "history">> & {
+    preamble?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
+    recency?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
     history?: CompiledInference<TDataContent>["history"];
   } = {},
 ): CompiledInference<TDataContent> {
@@ -867,17 +868,25 @@ function inference<TDataContent = never>(
     tools: overrides.tools ?? [],
     retrievableStates: overrides.retrievableStates ?? [],
     history: normalizeHistory(overrides.history ?? []),
-    systemParts: normalizeParts(overrides.systemParts ?? []),
-    dynamicParts: normalizeParts(overrides.dynamicParts ?? []),
+    preamble: normalizeParts(overrides.preamble ?? [], "body", false),
+    recency: normalizeParts(overrides.recency ?? [], "context", true),
   };
 }
 
-function normalizeParts(parts: Array<string | ContentPart<any>>): ContentPart<any>[] {
-  return parts.map((part) => typeof part === "string" ? { type: "text", text: part } : part);
+function normalizeParts(
+  parts: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>,
+  slot: string,
+  volatile: boolean,
+): CompiledPart<any>[] {
+  return parts.map((part) =>
+    typeof part === "string"
+      ? { type: "text", text: part, slot, volatile }
+      : { slot, volatile, ...part },
+  );
 }
 
 function textParts(...texts: string[]): ContentPart<never>[] {
-  return normalizeParts(texts) as ContentPart<never>[];
+  return texts.map((text) => ({ type: "text" as const, text }));
 }
 
 function normalizeHistory<TDataContent>(

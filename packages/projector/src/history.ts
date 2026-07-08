@@ -1,11 +1,17 @@
+import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
+  ActorHistoryProjection,
   ActorMessage,
   Frame,
   FrameDraft,
   FrameMessage,
   GeneratorId,
+  HistoryProjection,
   HistoryProjectionContext,
+  HistoryProjectionFunction,
+  HistoryProjectionFunctionMethod,
   DataContentPart,
+  MessageHistoryProjection,
   UserMessage,
   AssistantMessage,
   Audience,
@@ -20,6 +26,56 @@ import type {
   WorkMessage,
 } from "./types.ts";
 
+export function createHistoryProjectionFunction<
+  TDataContent = never,
+>(config: {
+  name: string;
+  method: HistoryProjectionFunctionMethod<TDataContent>;
+}): HistoryProjectionFunction<TDataContent> {
+  assertProjectorIdentifier(config.name, "History projection function name");
+  return {
+    kind: "historyProjection",
+    name: config.name,
+    method: config.method,
+  };
+}
+
+export function isHistoryProjectionFunction<
+  TDataContent = never,
+>(
+  value: unknown,
+): value is HistoryProjectionFunction<TDataContent> {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as { kind?: unknown }).kind === "historyProjection" &&
+      typeof (value as { name?: unknown }).name === "string" &&
+      typeof (value as { method?: unknown }).method === "function",
+  );
+}
+
+export function isActorHistoryProjection(
+  projection: HistoryProjection<any>,
+): projection is ActorHistoryProjection {
+  return (
+    typeof projection === "object" &&
+    projection !== null &&
+    "type" in projection &&
+    projection.type === "actor"
+  );
+}
+
+export function isMessageHistoryProjection(
+  projection: HistoryProjection<any>,
+): projection is MessageHistoryProjection {
+  return (
+    typeof projection === "object" &&
+    projection !== null &&
+    "type" in projection &&
+    projection.type === "messages"
+  );
+}
+
 /**
  * A self-contained turn frame: activation and completion for work that was
  * never scheduled through the machine (e.g. realtime voice turns).
@@ -33,6 +89,7 @@ export function createRuntimeTurnFrame<
   reason = "end-turn",
   concurrencyKey = generatorId,
   concurrency = "serial",
+  metadata,
 }: {
   generatorId: GeneratorId;
   activationId: string;
@@ -40,10 +97,13 @@ export function createRuntimeTurnFrame<
   reason?: WorkCompletionReason;
   concurrencyKey?: string;
   concurrency?: RuntimeConcurrency;
+  /** App/runner frame metadata (see FrameDraft.metadata). */
+  metadata?: Record<string, unknown>;
 }): FrameDraft<TDataContent> {
   return {
     generatorId,
     activationId,
+    ...(metadata ? { metadata } : {}),
     messages: [
       ({
         type: "work",

@@ -3,22 +3,24 @@ import {
   ROOT_GENERATOR_ID,
   actionResult,
   appendState,
-  applyStandardProjection,
-  createStandardProjectionFunction,
   createAction,
   createCharter,
+  createComputedPart,
   createHistoryProjectionFunction,
+  createLayout,
   createNode,
-  createProjectionFunction,
   createRoot,
+  createSlot,
   createSourceInstance,
+  createState,
   hydrateInstance,
   inspectCompiledProjectionTree,
   imageContent,
+  messages,
   messagesBeforeLastCompletion,
   messagesSinceLastCompletion,
-  replaceProjection,
   patchState,
+  recencyRegion,
   resolveStates,
   serializeInstance,
   textAssistantMessage,
@@ -98,17 +100,17 @@ export type CameraSensorDataSource = {
 
 let cameraSensorDataSource: CameraSensorDataSource | undefined;
 
-const demoState = {
+const demoState = createState({
   key: "demo",
   schema: demoStateSchema,
   init: {
     themeHue: 126,
     turns: 0,
   } satisfies DemoState,
-  projection: "dynamic" as const,
-};
+  projection: { slot: recencyRegion },
+});
 
-const agentControlsState = {
+const agentControlsState = createState({
   key: "agentControls",
   schema: agentControlsStateSchema,
   init: {
@@ -118,15 +120,15 @@ const agentControlsState = {
     streamingEnabled: true,
     testCounter: 0,
   } satisfies AgentControlsState,
-  projection: "dynamic" as const,
-};
+  projection: { slot: recencyRegion },
+});
 
-const memoriesState = {
+const memoriesState = createState({
   key: "memories",
   schema: memoriesStateSchema,
   init: [] satisfies MemoriesState,
-  projection: "dynamic" as const,
-};
+  projection: { slot: recencyRegion },
+});
 
 export const setVoiceEnabled = createAction({
   state: agentControlsState,
@@ -152,27 +154,21 @@ export const enableLiveMode = createAction({
   },
 });
 
-export const projectCameraSensorData = createProjectionFunction({
-  name: "projectCameraSensorData",
-  method: (ctx, draft, source) => {
-    applyStandardProjection(ctx, draft, source, {
-      mode: "augment",
-      instructions: "dynamic",
-      tools: "hidden",
-    });
-
+export const cameraSnapshotPart = createComputedPart({
+  name: "cameraSnapshot",
+  slot: recencyRegion,
+  compute: () => {
     const image = cameraSensorDataSource?.latestImage();
-    if (image) {
-      draft.dynamicParts.push(textContent(renderCameraSensorImage(image)));
-      draft.dynamicParts.push(
-        imageContent(image.dataUrl, {
-          mediaType: image.mimeType,
-          label: "latest camera sensor snapshot",
-        }),
-      );
-    } else {
-      draft.dynamicParts.push(textContent("Camera sensor is enabled, but no camera snapshot has been sampled yet."));
+    if (!image) {
+      return "Camera sensor is enabled, but no camera snapshot has been sampled yet.";
     }
+    return [
+      textContent(renderCameraSensorImage(image)),
+      imageContent(image.dataUrl, {
+        mediaType: image.mimeType,
+        label: "latest camera sensor snapshot",
+      }),
+    ];
   },
 });
 
@@ -181,7 +177,7 @@ export const cameraSensorNode = createNode({
   name: "CameraSensorNode",
   instructions:
     "The user's camera is enabled. Use the latest camera snapshot only when relevant. When asked about the camera, answer directly from the currently available snapshot. Do not say you will check or look later; if no usable snapshot is available, say you cannot see the current camera view.",
-  projection: projectCameraSensorData,
+  parts: [cameraSnapshotPart],
 });
 
 export const setCameraEnabled = createAction({
@@ -336,6 +332,13 @@ export const saveMemories = createAction({
 export const memoryHistoryProjection = createHistoryProjectionFunction({
   name: "memory",
   method: (ctx) => {
+    // History rendering is layout-owned with no per-node override, so this
+    // single policy dispatches: only the memory generator (the charter's one
+    // parent-completion trigger) sees the extraction prompt; every other
+    // generator keeps plain message history.
+    if (ctx.trigger.type !== "parent-completion") {
+      return messages(ctx);
+    }
     const previousMessages = messagesBeforeLastCompletion(ctx);
     const newMessages = messagesSinceLastCompletion(ctx);
     const memories = memoriesStateSchema.safeParse(ctx.states.memories).success
@@ -372,20 +375,33 @@ export const memoryHistoryProjection = createHistoryProjectionFunction({
   },
 });
 
+// The demo layout mirrors the implicit default layout; it exists to carry the
+// memory history projection, which is layout-owned in the parts model.
+const demoLayout = createLayout({
+  name: "demo",
+  default: true,
+  historyProjection: memoryHistoryProjection,
+  regions: {
+    preamble: [createSlot("body", { default: true })],
+    recency: [createSlot("context", { default: true, volatile: true })],
+  },
+});
+
 export const memoryMemberNode = createNode({
   key: "memory",
   name: "MemoryNode",
   instructions:
     "Maintain durable user memories. Save only concise, stable, generally useful user facts. Do not create a memory for every message.",
-  state: memoriesState,
+  states: [memoriesState],
   tools: [saveMemories],
-  projection: replaceProjection,
+  // boundaryProjection defaults to "hidden": the memory generator is a
+  // private sub-machine and nothing crosses into the parent document (the
+  // replacement for the removed replaceProjection).
   runtime: {
     type: "generator",
     trigger: { type: "parent-completion" },
     concurrency: "serial",
     activationHistory: "snapshot",
-    historyProjection: "memory",
     outputAudienceDefault: "self",
   },
 });
@@ -393,9 +409,10 @@ export const memoryMemberNode = createNode({
 export const agentControlsMemberNode = createNode({
   key: "agentControls",
   name: "Agent Controls",
-  instructions:
-    "Expose client commands for voice, camera, streaming, memory, and test controls.",
-  state: agentControlsState,
+  // The old projection hid this node's dev-facing instructions from the
+  // model ("Expose client commands for voice, camera, streaming, memory, and
+  // test controls."), so it contributes no prose — just state and actions.
+  states: [agentControlsState],
   tools: [enableLiveMode, enableCamera],
   commands: [
     setVoiceEnabled,
@@ -404,11 +421,6 @@ export const agentControlsMemberNode = createNode({
     setStreamingEnabled,
     incrementTestCounter,
   ],
-  projection: createStandardProjectionFunction({
-    name: "agentControlsProjection",
-    instructions: "hidden",
-    tools: "provider-static",
-  }),
 });
 
 export const demoBaseNode = createNode({
@@ -417,7 +429,7 @@ export const demoBaseNode = createNode({
   params: demoParamsSchema,
   instructions:
     "You are a friendly conversation buddy. Be natural, concise, and curious. Do not volunteer internal state, tools, framework details, or state changes during ordinary conversation. If the user asks about your internals, capabilities, memory, tools, state, or how you work, answer directly and transparently with the information available to you.",
-  state: demoState,
+  states: [demoState],
   tools: [pingTool, echoSessionIdTool],
   commands: [pingCommand, echoSessionIdCommand, setThemeHue],
   members: [agentControlsMemberNode],
@@ -450,12 +462,9 @@ export function createDemoCharter(
       incrementTestCounter,
       setThemeHue,
     ],
-    states: [
-      demoBaseNode.state!,
-      memoryMemberNode.state!,
-      agentControlsMemberNode.state!,
-    ],
-    projections: [projectCameraSensorData],
+    states: [demoState, memoriesState, agentControlsState],
+    layouts: [demoLayout],
+    computedParts: [cameraSnapshotPart],
     historyProjections: [memoryHistoryProjection],
   });
 }

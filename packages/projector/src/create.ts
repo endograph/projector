@@ -1,16 +1,18 @@
 import type {
   ActionConfigEntry,
-  ActionBindings,
   AnyAction,
+  BoundaryProjection,
+  MemberEntry,
   Node,
   NodeConfig,
   NormalizedRuntime,
   NormalizedStateDescriptor,
-  Projection,
+  Part,
   Runtime,
   StateDescriptor,
 } from "./types.ts";
-import { defaultProjection, hiddenProjection, isProjectionFunction } from "./projection-functions.ts";
+import { command, normalizePartEntries, text, tool } from "./parts.ts";
+import { isMemberSelect } from "./discriminators.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import {
   emptyParamsSchema,
@@ -35,10 +37,6 @@ type ActionEntryMeta<TEntry> = TEntry extends AnyAction
 type InferActionMetas<TConfig, TKey extends "tools" | "commands"> = ActionEntryMeta<
   InferActions<TConfig, TKey>[number]
 >;
-
-type InferState<TConfig> = TConfig extends { state: StateDescriptor<infer S> }
-  ? NormalizedStateDescriptor<S>
-  : undefined;
 
 type InferParamsSchema<TConfig> = TConfig extends { params: infer TParams extends AnyParamsSchema }
   ? TParams
@@ -87,7 +85,6 @@ export type CreatedNode<
   TDataContent,
   TConfig extends NodeConfig<TDataContent>,
 > = Node<TDataContent, InferParamsSchema<TConfig>> & {
-  state: InferState<TConfig>;
   __tools?: InferActionMetas<TConfig, "tools">;
   __commands?: InferActionMetas<TConfig, "commands">;
   __config: TConfig;
@@ -107,10 +104,18 @@ export function isNode<TDataContent = never>(value: unknown): value is Node<TDat
   );
 }
 
-export function normalizeProjection<TDataContent = never>(
-  projection: Projection<TDataContent> | undefined,
-): Projection<TDataContent> {
-  return normalizeProjectionValue(projection, defaultProjection, "Node projection");
+/**
+ * Declares a state descriptor: validates the key and applies scope and
+ * onInitConflict defaults. Inline object literals on nodes/actions/charters
+ * remain valid; this exists for parity with the other create helpers and for
+ * descriptors shared across declarations (action-state binding compares
+ * schemas by reference, so sharing one created descriptor is the way to
+ * satisfy it).
+ */
+export function createState<S>(
+  descriptor: StateDescriptor<S>,
+): NormalizedStateDescriptor<S> {
+  return normalizeStateDescriptor(descriptor);
 }
 
 export function normalizeStateDescriptor<S>(
@@ -119,12 +124,7 @@ export function normalizeStateDescriptor<S>(
   assertProjectorIdentifier(descriptor.key, "State key");
   const scope = descriptor.scope ?? "hoist";
   const onInitConflict = descriptor.onInitConflict ?? "replace";
-  const projection = descriptor.projection ?? "hidden";
-  if (
-    descriptor.scope === scope &&
-    descriptor.onInitConflict === onInitConflict &&
-    descriptor.projection === projection
-  ) {
+  if (descriptor.scope === scope && descriptor.onInitConflict === onInitConflict) {
     return descriptor as NormalizedStateDescriptor<S>;
   }
 
@@ -132,13 +132,12 @@ export function normalizeStateDescriptor<S>(
     ...descriptor,
     scope,
     onInitConflict,
-    projection,
   };
 }
 
-export function normalizeRuntime<TDataContent = never>(
-  runtime: Runtime<TDataContent> | undefined,
-): NormalizedRuntime<TDataContent> {
+export function normalizeRuntime(
+  runtime: Runtime | undefined,
+): NormalizedRuntime {
   if (!runtime || runtime.type === "component" || !("trigger" in runtime)) {
     return { type: "component" };
   }
@@ -148,29 +147,20 @@ export function normalizeRuntime<TDataContent = never>(
     type: "generator",
     concurrency: runtime.concurrency ?? "serial",
     activationHistory: runtime.activationHistory ?? "live",
-    historyProjection: runtime.historyProjection ?? { type: "messages" },
-    boundaryProjection: normalizeProjectionValue(
-      runtime.boundaryProjection,
-      hiddenProjection,
-      "Boundary projection",
-    ),
+    boundaryProjection: normalizeBoundaryProjection(runtime.boundaryProjection),
   };
 }
 
-function normalizeProjectionValue<TDataContent = never>(
-  projection: Projection<TDataContent> | undefined,
-  fallback: Projection,
-  label: string,
-): Projection<TDataContent> {
-  if (!projection) {
-    return fallback as Projection<TDataContent>;
+function normalizeBoundaryProjection(
+  value: BoundaryProjection | undefined,
+): BoundaryProjection {
+  if (value === undefined) {
+    return "hidden";
   }
-
-  if (isProjectionFunction<TDataContent>(projection) || typeof projection === "string") {
-    return projection;
+  if (value !== "hidden" && value !== "augment") {
+    throw new Error(`Boundary projection must be "hidden" or "augment", got "${String(value)}"`);
   }
-
-  throw new Error(`${label} must be a projection function or ref`);
+  return value;
 }
 
 export function createNode<
@@ -186,8 +176,6 @@ export function createNode<
     throw new Error("Node requires key or name");
   }
   assertProjectorIdentifier(key, "Node key");
-  const tools = normalizeActionEntries(config.tools ?? []);
-  const commands = normalizeActionEntries(config.commands ?? []);
 
   return {
     [NODE_BRAND]: true,
@@ -195,58 +183,89 @@ export function createNode<
     sourceNodeKey: config.sourceNodeKey,
     name: config.name,
     params: normalizeParamsSchema(config.params),
-    instructions: config.instructions,
-    toolBindings: tools.bindings,
-    toolRefs: tools.refs,
-    commandBindings: commands.bindings,
-    commandRefs: commands.refs,
-    state: config.state ? normalizeStateDescriptor(config.state) : undefined,
-    members: normalizeMembers(config.members ?? []),
+    parts: desugarParts<TDataContent>(config),
+    states: normalizeStates(config),
+    memberEntries: normalizeMemberEntries(config.members ?? []),
     output: config.output,
-    projection: normalizeProjection(config.projection),
     runtime: normalizeRuntime(config.runtime),
     executorConfig: config.executorConfig,
   } as unknown as CreatedNode<TDataContent, TConfig>;
 }
 
-function normalizeActionEntries(entries: readonly ActionConfigEntry[]): {
-  bindings: ActionBindings;
-  refs: string[];
-} {
-  const bindings: ActionBindings = {};
-  const refs: string[] = [];
-
-  for (const entry of entries) {
-    if (typeof entry === "string") {
-      assertProjectorIdentifier(entry, "Action ref");
-      refs.push(entry);
-      continue;
-    }
-
-    assertProjectorIdentifier(entry.name, "Action name");
-    bindings[entry.name] = entry;
-    refs.push(entry.name);
+/**
+ * Desugars the sugar fields into the parts list: `instructions` becomes an
+ * anonymous text part in the preamble default slot, `tools`/`commands` become
+ * action parts with their respective callers, followed by explicit `parts`.
+ */
+function desugarParts<TDataContent>(config: NodeConfig<TDataContent>): Part<TDataContent>[] {
+  const parts: Part<TDataContent>[] = [];
+  if (config.instructions) {
+    parts.push(text(config.instructions));
   }
-
-  return { bindings, refs };
+  for (const entry of config.tools ?? []) {
+    assertActionEntry(entry);
+    parts.push(tool(entry));
+  }
+  for (const entry of config.commands ?? []) {
+    assertActionEntry(entry);
+    parts.push(command(entry));
+  }
+  parts.push(...normalizePartEntries(config.parts ?? []));
+  return parts;
 }
 
-function normalizeMembers<TDataContent>(
-  configs: Node<TDataContent>[],
-): Node<TDataContent>[] {
-  const members: Node<TDataContent>[] = [];
+/**
+ * One declaration carries both the state and its projection config: `states`
+ * normalize into the node's declarations, deduped by key (same key twice on
+ * one node is an authoring error).
+ */
+function normalizeStates<TDataContent>(config: NodeConfig<TDataContent>): NormalizedStateDescriptor[] {
   const keys = new Set<string>();
+  return (config.states ?? []).map((descriptor) => {
+    if (keys.has(descriptor.key)) {
+      throw new Error(`Duplicate state "${descriptor.key}" declared on one node`);
+    }
+    keys.add(descriptor.key);
+    return normalizeStateDescriptor(descriptor);
+  });
+}
 
-  for (const node of configs) {
-    const key = node.key;
+function assertActionEntry(entry: ActionConfigEntry): void {
+  if (typeof entry === "string") {
+    assertProjectorIdentifier(entry, "Action ref");
+    return;
+  }
+  assertProjectorIdentifier(entry.name, "Action name");
+}
 
+function normalizeMemberEntries<TDataContent>(
+  entries: MemberEntry<TDataContent>[],
+): MemberEntry<TDataContent>[] {
+  const keys = new Set<string>();
+  const claim = (key: string) => {
     if (keys.has(key)) {
       throw new Error(`Duplicate member key "${key}"`);
     }
     keys.add(key);
+  };
 
-    members.push(node);
+  for (const entry of entries) {
+    if (isMemberSelect(entry)) {
+      // A select's branches may reuse one key across branches (that is the
+      // point); distinct entries may not claim the same key.
+      const branchKeys = new Set<string>();
+      for (const branch of Object.values(entry.branches)) {
+        for (const member of branch ?? []) {
+          branchKeys.add(member.key);
+        }
+      }
+      for (const key of branchKeys) {
+        claim(key);
+      }
+      continue;
+    }
+    claim(entry.key);
   }
 
-  return members;
+  return entries;
 }

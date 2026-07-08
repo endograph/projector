@@ -1,5 +1,6 @@
 import type { Contributor } from "./contributors.ts";
 import { hoistStateInstance, collectContributors } from "./contributors.ts";
+import { encodeProjectionAddress } from "./projection-address.ts";
 import type {
   Instance,
   NormalizedStateDescriptor,
@@ -46,23 +47,20 @@ export function resolveStates<TDataContent>(
   const groups = new Map<string, StateGroup<TDataContent>>();
 
   for (const contributor of collectContributors(root)) {
-    const descriptor = contributor.node.state;
-    if (!descriptor) {
-      continue;
+    for (const descriptor of contributor.node.states) {
+      const targetInstance =
+        descriptor.scope === "local" ? contributor.concreteInstance : hoistStateInstance(contributor);
+      const groupKey = `${targetInstance.id}\u0000${descriptor.key}`;
+      const group =
+        groups.get(groupKey) ??
+        ({
+          targetInstance,
+          stateKey: descriptor.key,
+          entries: [],
+        } satisfies StateGroup<TDataContent>);
+      group.entries.push({ descriptor, contributor });
+      groups.set(groupKey, group);
     }
-
-    const targetInstance =
-      descriptor.scope === "local" ? contributor.concreteInstance : hoistStateInstance(contributor);
-    const groupKey = `${targetInstance.id}\u0000${descriptor.key}`;
-    const group =
-      groups.get(groupKey) ??
-      ({
-        targetInstance,
-        stateKey: descriptor.key,
-        entries: [],
-      } satisfies StateGroup<TDataContent>);
-    group.entries.push({ descriptor, contributor });
-    groups.set(groupKey, group);
   }
 
   const resolved: ResolvedState<TDataContent>[] = [];
@@ -141,6 +139,71 @@ function resolveStateGroup<TDataContent>(
     container,
     sourceContributor,
   };
+}
+
+/**
+ * Derives the projection-wide alias for each entry: the bare state key when
+ * unique, `key:instanceId` when several instances carry the same key. One
+ * scheme for every consumer (getState addresses, history state values) so
+ * their naming can never drift. Throws when two distinct addresses still
+ * collide on one alias.
+ */
+export function deriveStateAliases<T>(
+  entries: readonly T[],
+  addressOf: (entry: T) => StateAddress,
+): Map<T, string> {
+  const keyCounts = new Map<string, number>();
+  for (const entry of entries) {
+    const { stateKey } = addressOf(entry);
+    keyCounts.set(stateKey, (keyCounts.get(stateKey) ?? 0) + 1);
+  }
+
+  const aliases = new Map<T, string>();
+  const used = new Map<string, StateAddress>();
+  for (const entry of entries) {
+    const address = addressOf(entry);
+    const duplicate = (keyCounts.get(address.stateKey) ?? 0) > 1;
+    const alias = duplicate ? `${address.stateKey}:${address.instanceId}` : address.stateKey;
+    const collision = used.get(alias);
+    if (
+      collision &&
+      (collision.instanceId !== address.instanceId || collision.stateKey !== address.stateKey)
+    ) {
+      throw new Error(`Generated state alias collision for "${alias}"`);
+    }
+    used.set(alias, address);
+    aliases.set(entry, alias);
+  }
+  return aliases;
+}
+
+/**
+ * Groups resolved states under the contributor that presents them: hoist
+ * states at their owning instance's contributor, local states at the declaring
+ * contributor.
+ */
+export function groupStatesByContributor(
+  states: ResolvedState[],
+): Map<string, ResolvedState[]> {
+  const grouped = new Map<string, ResolvedState[]>();
+  for (const state of states) {
+    const contributorKey = stateContributorKey(state);
+    const list = grouped.get(contributorKey) ?? [];
+    list.push(state);
+    grouped.set(contributorKey, list);
+  }
+  return grouped;
+}
+
+function stateContributorKey(state: ResolvedState): string {
+  if (state.descriptor.scope === "hoist") {
+    return encodeProjectionAddress({
+      type: "instance",
+      instanceId: state.targetInstance.id,
+    });
+  }
+
+  return state.sourceContributor.id;
 }
 
 function mergeDescriptors(

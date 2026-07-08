@@ -10,6 +10,7 @@ import {
   textAssistantMessage,
   textUserMessage,
   type CompiledInference,
+  type CompiledPart,
   type ContentPart,
 } from "@projectors/core";
 import { z } from "zod";
@@ -144,8 +145,8 @@ describe("LiveKitRealtimeExecutor", () => {
     };
     const frames: FrameDraft[] = [];
     const compiled = inference({
-      systemParts: ["You are concise."],
-      dynamicParts: ["Current mode: voice."],
+      preamble: ["You are concise."],
+      recency: ["Current mode: voice."],
       history: [{ ...textUserMessage("hello") }],
     });
     const executor = new LiveKitRealtimeExecutor({
@@ -184,8 +185,8 @@ describe("LiveKitRealtimeExecutor", () => {
 
     await executor.syncRuntime(syncContext({
       inference: inference({
-        systemParts: ["You are concise."],
-        dynamicParts: ["Camera data."],
+        preamble: ["You are concise."],
+        recency: ["Camera data."],
       }),
     }));
 
@@ -221,8 +222,8 @@ describe("LiveKitRealtimeExecutor", () => {
     const prompt = await executor.realizePrompt(
       request({
         inference: inference({
-          systemParts: ["System A"],
-          dynamicParts: ["Dynamic B"],
+          preamble: ["System A"],
+          recency: ["Dynamic B"],
           history: [{ ...textUserMessage("Hi") }],
           tools: [createAction({ state: null, name: "lookup", description: "Lookup things" })],
         }),
@@ -289,8 +290,8 @@ describe("LiveKitRealtimeExecutor", () => {
     await executor.syncRuntime(
       syncContext({
         inference: inference({
-          systemParts: ["You are concise."],
-          dynamicParts: [
+          preamble: ["You are concise."],
+          recency: [
             { type: "text", text: "Known memories:" },
             { type: "data", data: ["User likes tea"], label: "memories" },
           ],
@@ -322,9 +323,9 @@ describe("LiveKitRealtimeExecutor", () => {
     await executor.syncRuntime(
       syncContext({
         inference: inference({
-          systemParts: ["You are concise."],
+          preamble: ["You are concise."],
           history: [{ ...textUserMessage("previous text") }],
-          dynamicParts: [
+          recency: [
             { type: "text", text: "Latest camera snapshot:" },
             {
               type: "image",
@@ -584,7 +585,7 @@ describe("LiveKitRealtimeExecutor", () => {
 
     await executor.syncRuntime(syncContext({
       inference: inference({
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           { type: "image", data: "data:image/jpeg;base64,first", mediaType: "image/jpeg" },
         ],
@@ -598,7 +599,7 @@ describe("LiveKitRealtimeExecutor", () => {
 
     await executor.syncRuntime(syncContext({
       inference: inference({
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           { type: "image", data: "data:image/jpeg;base64,second", mediaType: "image/jpeg" },
         ],
@@ -633,7 +634,7 @@ describe("LiveKitRealtimeExecutor", () => {
     });
     const context = syncContext({
       inference: inference({
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           { type: "image", data: "data:image/jpeg;base64,same", mediaType: "image/jpeg" },
         ],
@@ -654,6 +655,117 @@ describe("LiveKitRealtimeExecutor", () => {
     }));
   });
 
+  it("publishes one dynamic item per slot and resyncs only the slot that changed", async () => {
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const cameraParts = (frame: string): Array<ContentPart<never> & { slot?: string }> => [
+      { type: "text", text: "Latest camera snapshot:", slot: "camera" },
+      { type: "image", data: `data:image/jpeg;base64,${frame}`, mediaType: "image/jpeg", slot: "camera" },
+    ];
+
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        recency: [...cameraParts("one"), { type: "text", text: "Mode: voice.", slot: "status" }],
+      }),
+    }));
+
+    const dynamicCreates = () =>
+      realtimeSession.sendEvents.filter((event) =>
+        event.type === "conversation.item.create" && event.item.id.startsWith("prj_d_"),
+      );
+    expect(dynamicCreates()).toHaveLength(2);
+    const [cameraItem, statusItem] = dynamicCreates().map((event) => event.item);
+    expect(cameraItem.id).not.toBe(statusItem.id);
+    expect(cameraItem.content[0]?.text).toContain('section "camera"');
+    expect(statusItem.content[0]?.text).toContain('section "status"');
+    expect(statusItem.content[0]?.text).toContain("Mode: voice.");
+
+    // Same compiled surface again: nothing to sync.
+    const eventCount = realtimeSession.sendEvents.length;
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        recency: [...cameraParts("one"), { type: "text", text: "Mode: voice.", slot: "status" }],
+      }),
+    }));
+    expect(realtimeSession.sendEvents).toHaveLength(eventCount);
+
+    // One slot changes: exactly one replacement create and one delete of that
+    // slot's previous item; the other slot's item is untouched.
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        recency: [...cameraParts("one"), { type: "text", text: "Mode: text.", slot: "status" }],
+      }),
+    }));
+    expect(dynamicCreates()).toHaveLength(3);
+    const replacement = dynamicCreates()[2]?.item;
+    expect(replacement.content[0]?.text).toContain("Mode: text.");
+    expect(realtimeSession.sendEvents).toContainEqual({
+      type: "conversation.item.delete",
+      item_id: statusItem.id,
+    });
+    expect(realtimeSession.sendEvents).not.toContainEqual({
+      type: "conversation.item.delete",
+      item_id: cameraItem.id,
+    });
+    expectRealtimeItemIdsWithinOpenAILimit(realtimeSession);
+  });
+
+  it("deletes a slot's dynamic item when the slot leaves the compiled surface", async () => {
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+    const camera: Array<ContentPart<never> & { slot?: string }> = [
+      { type: "image", data: "data:image/jpeg;base64,one", mediaType: "image/jpeg", slot: "camera" },
+    ];
+
+    await executor.syncRuntime(syncContext({
+      inference: inference({
+        recency: [...camera, { type: "text", text: "Mode: voice.", slot: "status" }],
+      }),
+    }));
+    const statusItem = realtimeSession.sendEvents
+      .filter((event) => event.type === "conversation.item.create" && event.item.id.startsWith("prj_d_"))
+      .map((event) => event.item)
+      .find((item) => item.content[0]?.text?.includes('section "status"'));
+
+    await executor.syncRuntime(syncContext({ inference: inference({ recency: camera }) }));
+
+    expect(realtimeSession.sendEvents).toContainEqual({
+      type: "conversation.item.delete",
+      item_id: statusItem?.id,
+    });
+    const creates = realtimeSession.sendEvents.filter((event) =>
+      event.type === "conversation.item.create" && event.item.id.startsWith("prj_d_"),
+    );
+    expect(creates).toHaveLength(2);
+  });
+
+  it("skips instruction pushes when the rendered instructions are unchanged", async () => {
+    const realtimeSession = fakeRawRealtimeSession();
+    const executor = new LiveKitRealtimeExecutor({
+      session: new FakeSession(),
+      discreteExecutor: fakeDiscreteExecutor(),
+      agent: { _agentActivity: { realtimeLLMSession: realtimeSession } },
+    });
+
+    await executor.syncRuntime(syncContext({ inference: inference({ preamble: ["Charter A"] }) }));
+    await executor.syncRuntime(syncContext({ inference: inference({ preamble: ["Charter A"] }) }));
+    expect(realtimeSession.updateInstructions).toHaveBeenCalledTimes(1);
+
+    await executor.syncRuntime(syncContext({ inference: inference({ preamble: ["Charter B"] }) }));
+    expect(realtimeSession.updateInstructions).toHaveBeenCalledTimes(2);
+    expect(realtimeSession.updateInstructions).toHaveBeenLastCalledWith(
+      expect.stringContaining("Charter B"),
+    );
+  });
+
   it("keeps dynamic realtime content before a visible user message already present in history", async () => {
     const realtimeSession = fakeRawRealtimeSession();
     const executor = new LiveKitRealtimeExecutor({
@@ -666,7 +778,7 @@ describe("LiveKitRealtimeExecutor", () => {
     await executor.syncRuntime(syncContext({
       inference: inference({
         history: [userMessage],
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           { type: "image", data: "data:image/jpeg;base64,abc123", mediaType: "image/jpeg" },
         ],
@@ -1398,8 +1510,8 @@ describe("LiveKit prompt and tool rendering", () => {
   it("renders compiled inference without discovering runtime state", () => {
     const rendered = buildLiveKitInstructions(
       inference({
-        systemParts: ["System A"],
-        dynamicParts: ["Dynamic B"],
+        preamble: ["System A"],
+        recency: ["Dynamic B"],
         history: [
           { ...textUserMessage("Hi") },
           {
@@ -1427,7 +1539,7 @@ describe("LiveKit prompt and tool rendering", () => {
   it("summarizes image parts without inlining base64 data", () => {
     const rendered = buildLiveKitInstructions(
       inference({
-        dynamicParts: [
+        recency: [
           { type: "text", text: "Latest camera snapshot:" },
           {
             type: "image",
@@ -1608,9 +1720,9 @@ function request(overrides: Partial<ExecutorRunRequest> = {}): ExecutorRunReques
 }
 
 function inference<TDataContent = never>(
-  overrides: Partial<Omit<CompiledInference<TDataContent>, "systemParts" | "dynamicParts" | "history">> & {
-    systemParts?: Array<string | ContentPart<any>>;
-    dynamicParts?: Array<string | ContentPart<any>>;
+  overrides: Partial<Omit<CompiledInference<TDataContent>, "preamble" | "recency" | "history">> & {
+    preamble?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
+    recency?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
     history?: CompiledInference<TDataContent>["history"];
   } = {},
 ): CompiledInference<TDataContent> {
@@ -1619,17 +1731,27 @@ function inference<TDataContent = never>(
     tools: overrides.tools ?? [],
     retrievableStates: overrides.retrievableStates ?? [],
     history: normalizeHistory(overrides.history ?? []),
-    systemParts: normalizeParts(overrides.systemParts ?? []),
-    dynamicParts: normalizeParts(overrides.dynamicParts ?? []),
+    preamble: normalizeParts(overrides.preamble ?? [], "body", false),
+    recency: normalizeParts(overrides.recency ?? [], "context", true),
   };
 }
 
-function normalizeParts(parts: Array<string | ContentPart<any>>): ContentPart<any>[] {
-  return parts.map((part) => typeof part === "string" ? { type: "text", text: part } : part);
+// Stamps the region's implicit-layout defaults; part-level slot/volatile
+// overrides survive so slot-keyed sync tests can address multiple slots.
+function normalizeParts(
+  parts: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>,
+  slot: string,
+  volatile: boolean,
+): CompiledPart<any>[] {
+  return parts.map((part) =>
+    typeof part === "string"
+      ? { type: "text", text: part, slot, volatile }
+      : { slot, volatile, ...part },
+  );
 }
 
 function textParts(...texts: string[]): ContentPart<never>[] {
-  return normalizeParts(texts) as ContentPart<never>[];
+  return texts.map((text) => ({ type: "text" as const, text }));
 }
 
 function normalizeHistory<TDataContent>(

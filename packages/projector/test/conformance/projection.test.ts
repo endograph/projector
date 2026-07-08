@@ -4,7 +4,6 @@ import {
   createActivationFrame,
   createMachine,
   createNode,
-  createProjectionFunction,
   runMachine,
   textAssistantMessage,
   textUserMessage,
@@ -12,25 +11,17 @@ import {
 } from "../../index.ts";
 import { charter, createRecordingExecutor, drain, requestForRuntime } from "./helpers.ts";
 
+// Implicit-layout preamble parts: merged into the default "body" slot, stable.
 function textParts(...texts: string[]) {
-  return texts.map((text) => ({ type: "text" as const, text }));
+  return texts.length <= 1
+    ? texts.map((text) => ({ type: "text" as const, text, slot: "body", volatile: false }))
+    : [{ type: "text" as const, text: texts.join("\n\n"), slot: "body", volatile: false }];
 }
 
 describe("conformance: projection IR", () => {
-  it("projects component descendants upward and exports runtime aggregates through boundaryProjection", async () => {
+  it("projects component descendants upward and forwards augment boundaries as-is", async () => {
     const { executor, requests } = createRecordingExecutor();
     const memory = createNode({ key: "memory", instructions: "memory" });
-    const exportRuntimeBoundary = createProjectionFunction({
-      name: "exportRuntimeBoundary",
-      method: (_ctx, draft, source) => {
-        const promptParts = [
-          ...(source.ir?.systemParts ?? []),
-          ...(source.ir?.dynamicParts ?? []),
-        ];
-        draft.dynamicParts.push(...promptParts);
-        draft.tools.push(...(source.ir?.tools ?? []));
-      },
-    });
     const generator = createNode({
       key: "summarizer",
       instructions: "generator",
@@ -38,7 +29,7 @@ describe("conformance: projection IR", () => {
       runtime: {
         type: "generator",
         trigger: { type: "parent-completion" },
-        boundaryProjection: exportRuntimeBoundary,
+        boundaryProjection: "augment",
       },
     });
     const policy = createNode({ key: "policy", instructions: "policy" });
@@ -59,8 +50,8 @@ describe("conformance: projection IR", () => {
     await drain(runMachine(machine));
 
     const parent = requestForRuntime(requests, "instance:r");
-    expect(parent.inference.systemParts).toEqual(textParts("root", "policy"));
-    expect(parent.inference.dynamicParts).toEqual(textParts("generator", "memory"));
+    expect(parent.inference.preamble).toEqual(textParts("root", "policy", "generator", "memory"));
+    expect(parent.inference.recency).toEqual([]);
     expect(parent.inference.history).toMatchObject([
       { ...textUserMessage("summarize") },
       {
@@ -103,8 +94,8 @@ describe("conformance: projection IR", () => {
     await drain(runMachine(machine));
 
     const parent = requestForRuntime(requests, "instance:r");
-    expect(parent.inference.systemParts).toEqual(textParts("root"));
-    expect(parent.inference.dynamicParts).toEqual([]);
+    expect(parent.inference.preamble).toEqual(textParts("root"));
+    expect(parent.inference.recency).toEqual([]);
     expect(parent.inference.tools.map((tool) => tool.name)).toEqual([]);
     expect(parent.inference.retrievableStates).toEqual([]);
   });
@@ -136,10 +127,11 @@ describe("conformance: projection IR", () => {
     await drain(runMachine(machine));
 
     const child = requestForRuntime(requests, "member:r/generator");
-    expect(child.inference.systemParts).toEqual(textParts("generator", "memory"));
-    expect(child.inference.dynamicParts).toEqual([]);
-    expect(child.inference.systemParts).not.toContainEqual({ type: "text", text: "root" });
-    expect(child.inference.systemParts).not.toContainEqual({ type: "text", text: "policy" });
+    expect(child.inference.preamble).toEqual(textParts("generator", "memory"));
+    expect(child.inference.recency).toEqual([]);
+    const childTexts = child.inference.preamble.map((part) => (part.type === "text" ? part.text : ""));
+    expect(childTexts.join("\n")).not.toContain("root");
+    expect(childTexts.join("\n")).not.toContain("policy");
   });
 
   it("filters frame history by default, self, and explicit audiences", () => {

@@ -25,7 +25,6 @@ type SendClientMessageAction = (args: {
 const EMPTY_CLIENT_SNAPSHOT: DemoClientSnapshot = {
   instance: null,
   recentCommandResidue: [],
-  projectionTree: { roots: [] },
 };
 
 type ProjectorContextValue = {

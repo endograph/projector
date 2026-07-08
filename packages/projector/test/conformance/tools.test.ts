@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createMachine, createNode, createAction, runMachine, textUserMessage } from "../../index.ts";
-import { charter, createRecordingExecutor, drain, requestForRuntime, toolByNameLastWins } from "./helpers.ts";
+import { collectAllNodeActions, createMachine, createNode, createAction, runMachine, textUserMessage } from "../../index.ts";
+import { charter, createRecordingExecutor, drain, requestForRuntime } from "./helpers.ts";
 
 describe("conformance: projected tools", () => {
-  it("preserves duplicate tool order so provider assembly can use last definition wins", async () => {
+  it("dedupes duplicate tools with deepest contributor winning", async () => {
     const { executor, requests } = createRecordingExecutor();
     const baseSearch = createAction({ state: null, name: "search", description: "base" });
     const overrideSearch = createAction({ state: null, name: "search", description: "override" });
@@ -25,19 +25,22 @@ describe("conformance: projected tools", () => {
     await drain(runMachine(machine));
 
     const request = requestForRuntime(requests, "instance:r");
-    expect(request.inference.tools.map((tool) => tool.description)).toEqual(["base", "override"]);
-    expect(toolByNameLastWins(request).get("search")).toBe(request.inference.tools[1]);
+    expect(request.inference.tools).toHaveLength(1);
+    expect(request.inference.tools[0]?.description).toBe("override");
+    expect(request.inference.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "shadowed-action" }),
+    );
   });
 
   it("resolves string tool refs through self, source node, then charter", async () => {
     const { executor, requests } = createRecordingExecutor();
-    const charterSearch = createAction({ state: null, name: "search", description: "charter" });
-    const sourceSearch = createAction({ state: null, name: "search", description: "source" });
-    const selfSearch = createAction({ state: null, name: "search", description: "self" });
+    const charterSearch = createAction({ state: null, name: "charterSearch", description: "charter" });
+    const sourceSearch = createAction({ state: null, name: "sourceSearch", description: "source" });
+    const selfSearch = createAction({ state: null, name: "selfSearch", description: "self" });
     const source = createNode({ key: "source", tools: [sourceSearch] });
-    const self = createNode({ key: "self", sourceNodeKey: "source", tools: [selfSearch] });
-    const sourced = createNode({ key: "sourced", sourceNodeKey: "source", tools: ["search"] });
-    const global = createNode({ key: "global", tools: ["search"] });
+    const self = createNode({ key: "self", sourceNodeKey: "source", tools: [selfSearch, "selfSearch"] });
+    const sourced = createNode({ key: "sourced", sourceNodeKey: "source", tools: ["sourceSearch"] });
+    const global = createNode({ key: "global", tools: ["charterSearch"] });
     const root = createNode({
       key: "root",
       members: [self, sourced, global],
@@ -84,11 +87,30 @@ describe("conformance: projected tools", () => {
     await drain(runMachine(machine));
 
     const request = requestForRuntime(requests, "instance:r");
-    expect(request.inference.tools.map((tool) => tool.description)).toEqual([
-      "base",
-      "refined",
-      "base",
-    ]);
+    expect(request.inference.tools).toHaveLength(1);
+    expect(request.inference.tools[0]?.description).toBe("base");
+    expect(request.inference.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "shadowed-action" }),
+    );
+  });
+
+  it("resolves a shared action name through self parts, then source parts, then charter", () => {
+    const charterSearch = createAction({ state: null, name: "search", description: "charter" });
+    const sourceSearch = createAction({ state: null, name: "search", description: "source" });
+    const selfSearch = createAction({ state: null, name: "search", description: "self" });
+    const source = createNode({ key: "source", tools: [sourceSearch] });
+    // A string ref alongside a same-named inline action resolves to the
+    // inline one (self tier), before the source node or the charter.
+    const self = createNode({ key: "self", sourceNodeKey: "source", tools: [selfSearch, "search"] });
+    const sourced = createNode({ key: "sourced", sourceNodeKey: "source", tools: ["search"] });
+    const global = createNode({ key: "global", tools: ["search"] });
+    const testCharter = charter({ nodes: [source, self, sourced, global], tools: [charterSearch] });
+
+    const descriptionsFor = (node: ReturnType<typeof createNode>) =>
+      collectAllNodeActions(node, testCharter).map((entry) => entry.action.description);
+    expect(descriptionsFor(self)).toEqual(["self", "self"]);
+    expect(descriptionsFor(sourced)).toEqual(["source"]);
+    expect(descriptionsFor(global)).toEqual(["charter"]);
   });
 
   it("falls back to charter tools when a string ref has no mounted binding", async () => {

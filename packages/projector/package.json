@@ -26,6 +26,8 @@
     "typecheck": "tsgo"
   },
   "devDependencies": {
+    "@projectors/aisdk-executor": "workspace:*",
+    "@projectors/livekit-realtime-executor": "workspace:*",
     "@types/bun": "latest",
     "vitest": "^4.0.17"
   },

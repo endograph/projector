@@ -16,20 +16,91 @@ Future work is tracked separately in [`FUTURE_WORK.md`](./FUTURE_WORK.md).
 ## Core Types
 
 ```ts
-type ProjectionMode = "hidden" | "augment" | "replace";
-
 type Ref = string;
-type ProjectionFunctionRef = Ref;
-type StateDescriptorRef = Ref;
 type HistoryProjectionFunctionRef = Ref;
 
-type StandardProjectionConfig = {
-  mode?: ProjectionMode;
-  instructions?: "system" | "dynamic" | "hidden";
-  tools?: "provider-static" | "hidden";
+// --- Parts: a node's configuration is an ordered list of typed, addressed
+// contributions. ---
+
+type ActionCaller = "generator" | "external" | "any";
+type Exposure = "native" | "deferred";
+
+type SlotDef = {
+  kind: "slot";
+  name: string;
+  title?: string; // rendered heading; omitted = bare content
+  merge: "block" | "list"; // how appended text parts combine within the slot
+  volatile: boolean; // computed parts may only target volatile slots
+  default: boolean; // anonymous/unslotted parts land in the region's default slot
 };
 
-type ResolvedStandardProjectionConfig = Required<StandardProjectionConfig>;
+type LayoutRegionName = "preamble" | "recency";
+
+type RegionAddress = { kind: "region"; region: LayoutRegionName };
+
+type SlotAddress = SlotDef | string | RegionAddress;
+
+type LayoutDef = {
+  kind: "layout";
+  name: string;
+  strict: boolean; // unknown slot names error instead of overflowing
+  regions: Record<LayoutRegionName, SlotDef[]>;
+  historyProjection?: HistoryProjection<any>; // layout-owned; no per-node overrides
+};
+
+type Discriminator<TValue extends string = string> = {
+  kind: "discriminator";
+  name: string;
+  values: readonly TValue[];
+  state: StateDescriptor | null;
+  derive: (env: { state: unknown; params: JsonObject }) => TValue;
+};
+
+type ComputedPartDef<TDataContent = never> = {
+  kind: "computedPart";
+  name: string;
+  slot: SlotAddress;
+  compute: (env: ComputedPartEnv) => string | ContentPart<TDataContent>[];
+};
+
+type TextPart = { kind: "text"; slot?: SlotAddress; text: string };
+
+type ActionPart = {
+  kind: "action";
+  caller: ActionCaller;
+  exposure?: Exposure; // default native
+  action: ActionConfigEntry;
+  guidance?: TextPart[]; // companion prose owned by this contribution
+};
+
+type ComputedPartRef<TDataContent = never> = {
+  kind: "computed";
+  part: ComputedPartDef<TDataContent> | Ref;
+};
+
+type SelectPart<TDataContent = never> = {
+  kind: "select";
+  discriminator: Discriminator | Ref;
+  partial: boolean; // missing keys legal only for when() partial selects
+  branches: Record<string, Part<TDataContent>[] | null>;
+};
+
+type Part<TDataContent = never> =
+  | TextPart
+  | ActionPart
+  | ComputedPartRef<TDataContent>
+  | SelectPart<TDataContent>;
+
+type MemberSelect<TDataContent = never> = {
+  kind: "memberSelect";
+  discriminator: Discriminator | Ref;
+  partial: boolean;
+  branches: Record<string, Node<TDataContent>[] | null>;
+};
+
+type MemberEntry<TDataContent = never> =
+  | Node<TDataContent>
+  | MemberSelect<TDataContent>;
 
 type TextContentPart = { type: "text"; text: string };
 
@@ -50,110 +121,62 @@ type ContentPart<TDataContent = never> =
   | TextContentPart
   | ImageContentPart
   | DataContentPart<TDataContent>;
-
-type ProjectionTextPart = TextContentPart;
-type ProjectionImagePart = ImageContentPart;
-type ProjectionDataPart<TDataContent = never> = DataContentPart<TDataContent>;
-
-type ProjectionStatePart = {
-  type: "state";
-  section: "system" | "dynamic" | "retrieval";
-  stateKey: string;
-  target: StateAddress;
-  value: unknown;
-};
-
-type ProjectionPart<TDataContent = never> =
-  | ContentPart<TDataContent>
-  | ProjectionStatePart;
-
-type ProjectionIR<TDataContent = never> = {
-  systemParts: ProjectionPart<TDataContent>[];
-  dynamicParts: ProjectionPart<TDataContent>[];
-  tools: Action[];
-  states: ProjectionStatePart[];
-};
-
-type ReadonlyProjectionIR<TDataContent = never> = {
-  readonly systemParts: readonly ProjectionPart<TDataContent>[];
-  readonly dynamicParts: readonly ProjectionPart<TDataContent>[];
-  readonly tools: readonly Action[];
-  readonly states: readonly ProjectionStatePart[];
-};
-
-type ProjectionSource<TDataContent = never> = {
-  readonly node?: Node<TDataContent>;
-  readonly ir?: ReadonlyProjectionIR<TDataContent>;
-};
-
-type ProjectionCallSite = "node" | "boundary";
-
-type ProjectionContext<TDataContent = never> = {
-  callSite: ProjectionCallSite;
-  generatorId: GeneratorId;
-  address: ProjectionAddress;
-  targetGeneratorId?: GeneratorId;
-  originNode: Node<TDataContent>;
-  createNodeIR(): ProjectionIR<TDataContent>;
-};
-
-type ProjectionFunctionMethod<TDataContent = never> = (
-  ctx: ProjectionContext<TDataContent>,
-  draft: ProjectionIR<TDataContent>,
-  source: ProjectionSource<TDataContent>,
-) => void;
-
-type ProjectionFunction<TDataContent = never> = {
-  kind: "projection";
-  name: string;
-  standard?: ResolvedStandardProjectionConfig;
-  method: ProjectionFunctionMethod<TDataContent>;
-};
-
-type Projection<TDataContent = never> =
-  | ProjectionFunctionRef
-  | ProjectionFunction<TDataContent>;
 ```
 
-Projection defaults:
+Nodes are ordered lists of typed parts. `instructions`, `tools`, and
+`commands` survive on `NodeConfig` as authoring sugar that desugars into parts
+at `createNode`: `instructions` becomes an anonymous text part in the preamble
+region's default slot, `tools` become action parts with caller `"generator"`,
+and `commands` become action parts with caller `"external"`.
 
-- `node.projection` defaults to `defaultProjection`.
-- `runtime.boundaryProjection` defaults to `hiddenProjection` for generator
-  runtimes.
-- `StateDescriptor.projection` defaults to `"hidden"`.
+There is a single render path. Node-level custom projection functions are
+removed — a node cannot rewrite what other nodes contributed. Contributions
+are additive-only, and all variation is expressed at the owning node via
+selects over charter-registered discriminators. The only remaining projection
+escape hatch is the generator boundary: `runtime.boundaryProjection` is a
+plain enum — `"hidden"` (default; nothing crosses the boundary) or
+`"augment"` (every compiled part of the child aggregate forwards to the
+parent as-is). Selective export between those poles (surface manifests,
+activity digests) is future work that extends the enum with declarative data,
+never arbitrary code at the boundary.
 
-Projection policy is always executable. `defaultProjection`, `hiddenProjection`,
-`augmentProjection`, and `replaceProjection` are ordinary projection functions
-exported by the library. `createStandardProjectionFunction({ name, ... })`
-builds the same standard behavior from `StandardProjectionConfig`; the `name`
-is required because projection functions are ref-addressable executable values.
+Placement is by slot. Slots are first-class charter-registered definitions
+(like state descriptors and actions) that parts address by identity; bare
+string slot names remain the tolerated "proposal tier" for novel or
+data-loaded parts. One layout per compiled document arranges slots into two
+regions — `preamble` (durable framing, cache-stable) and `recency`
+(freshness) — which render directly to `CompiledInference.preamble` and
+`CompiledInference.recency`, every compiled part stamped with its resolved
+slot identity and volatility (`CompiledPart`). The `preambleRegion`/
+`recencyRegion` sentinels are the layout-free placement API: a part addressed
+to a region resolves to the active layout's default slot for that region and
+stays valid across layout changes. A charter that registers no layout uses
+the built-in default layout.
 
-Projection functions are low-level compile-time hooks. They receive the current
-destination IR and a source that may contain a node, an IR aggregate, or both,
-then mutate the destination IR directly. The IR intentionally exposes projection
-parts instead of flattened strings so state metadata can survive until final
-render and retrieval alias generation.
-Finalization treats state parts in `systemParts` and `dynamicParts` as projected
-state metadata, so projection functions can move prompt parts between sections
-without separately maintaining `draft.states`. A function may still push directly
-to `draft.states` for metadata-only retrieval exposure.
+Discriminators are charter-defined and contributor-resolved: a select
+resolves its discriminator against the contributing node's own state/params
+environment (`derive({ state, params })` must return one of `values`).
+Selects swap parts — and, through `ActionPart.guidance`, a tool and its prose
+atomically. Member selects (`selectMember`/`whenMember`) express derived
+membership the same way: branches are `Node | Node[] | null`, so the member
+surface follows the derivation while state containers provision across all
+branches (state follows the skeleton).
 
-In the current framework:
+Computed parts are registered, named code (`createComputedPart`) referenced
+from nodes by identity or ref. They may only target volatile slots
+(prompt-cache hygiene), and like all part code they never serialize — an
+unregistered computed part in a serialized machine throws.
 
-- node projection calls receive `source.node` and no `source.ir`;
-- boundary projection calls receive `source.ir` and no `source.node`;
-- projection functions should still tolerate both fields being present.
-
-Conceptually, standard projection starts from the source IR when provided,
-materializes source node content when provided, then merges the resulting IR into
-the destination IR according to `mode`.
-
-Projection functions follow the same charter ref rules as other registered
-objects. Standard functions have no reserved refs: if registered in
-`charter.projections`, or available through the source node slot, they serialize
-by ref. Inline projection functions are executable in memory but are not
-serializable; serialization should throw if an unregistered projection function
-is encountered.
+Action parts unify tools and commands under one registry with a `caller`
+field, enforced at compile (generator surface), `executeCommand` (external
+dispatch), and the client snapshot. Same-name action collisions resolve by
+deterministic deepest-contributor last-write-wins with a `shadowed-action`
+diagnostic. `exposure: "deferred"` keeps a tool off the always-loaded
+surface: the compile emits an overridable availability note (explicit
+`guidance` replaces it) and the executor lowers the deferred set to its
+provider's tool-search idiom; an executor with no lowering for its model
+errors rather than silently loading the tool natively. Exposure never enters
+history — the log records logical actions.
 
 ```ts
 type GeneratorId = string;
@@ -274,20 +297,21 @@ type HistoryProjectionFunction<TDataContent = never> = {
   method: HistoryProjectionFunctionMethod<TDataContent>;
 };
 
-type TriggeredRuntimeOptions<TDataContent = never> = {
+type BoundaryProjection = "hidden" | "augment";
+
+type TriggeredRuntimeOptions = {
   trigger: RuntimeTrigger;
   concurrency?: RuntimeConcurrency; // default "serial"
   activationHistory?: ActivationHistory; // default "live"
-  historyProjection?: HistoryProjection<TDataContent>; // default { type: "messages" }
-  boundaryProjection?: Projection<TDataContent>; // default hiddenProjection
+  boundaryProjection?: BoundaryProjection; // default "hidden"
   outputAudienceDefault?: "self" | "broadcast";
 };
 
-type Runtime<TDataContent = never> =
+type Runtime =
   | { type?: "component" } // default
   | ({
       type?: "generator";
-    } & TriggeredRuntimeOptions<TDataContent>);
+    } & TriggeredRuntimeOptions);
 ```
 
 App-supplied actor messages may be text-only, content-part-only, or both.
@@ -322,8 +346,11 @@ messages produced by that same activation. This is especially useful for
 parallel generators whose mid-loop context should not be steered by unrelated
 frames arriving after the activation starts.
 
-`runtime.historyProjection` controls how a runtime converts its visible frame
-history into `CompiledInference.history`. The default `{ type: "messages" }`
+`layout.historyProjection` owns how visible frame history converts into
+`CompiledInference.history`, per compiled document. History is
+wire-structural: the layout picks WHICH named policy, never placement, and
+there are no per-node or per-runtime overrides (`runtime.historyProjection`
+was removed outright); variation, if ever needed, is a different layout. The default `{ type: "messages" }`
 projection keeps all visible `FrameMessage`s in durable frame/message order after
 the normal audience, delivery, activation-history, and runtime-metadata filtering
 has selected the visible frames. The built-in `{ type: "actor" }` projection is a
@@ -342,13 +369,22 @@ history projection function is encountered.
 ## States
 
 ```ts
+type StateProjection = {
+  // Slot the rendered value (or deferred-availability note) addresses;
+  // absent = the preamble region's default slot.
+  slot?: SlotAddress;
+  exposure?: Exposure; // native renders the value; deferred exposes getState
+  render?: (value: unknown) => string; // code — registered descriptors only
+  note?: (address: string) => string; // code — registered descriptors only
+};
+
 type StateDescriptor<S = unknown> = {
   key: string;
   schema: Schema<S>;
   init?: S | (() => S);
   scope?: "hoist" | "local"; // default "hoist"
   onInitConflict?: "error" | "replace"; // default "replace"
-  projection?: "system" | "dynamic" | "retrieval" | "hidden"; // default "hidden"
+  projection?: StateProjection; // absent = hidden (declaration/binding only)
 };
 
 type StateContainer<S = unknown> = {
@@ -375,7 +411,9 @@ State rules:
 - A machine tree must contain at least one source instance.
 - Hoisted state resolution throws when no source instance exists for the current
   projection node.
-- Each node may attach at most one state descriptor through `node.state`.
+- Nodes attach state through the plural `states: [a, b]` list; the singular
+  node-level `state:` spelling was removed (action-level `state:` bindings
+  are unrelated and stay).
 - The same `StateDescriptor.key` may still appear on multiple nodes. It means
   shared access to the same resolved state container.
 - State containers are resolved by target instance plus state key.
@@ -401,12 +439,19 @@ State rules:
 - If an existing value validates against the descriptor schema, reuse it.
 - If validation fails, apply `onInitConflict`: `"replace"` resets to `init`,
   `"error"` throws.
-- Default state projection is `"hidden"`.
+- Absent `projection` means hidden: the state exists for declaration and
+  action binding only. `projection.exposure: "deferred"` replaces the old
+  `"retrieval"` policy — the compile emits a getState availability note
+  (overridable via `note`). One declaration carries both the state and its
+  projection config, and state projections route through slots and the layout
+  like all other content.
 
 State descriptors follow the same charter ref and inline serialization rules as
 nodes. If registered in `charter.states`, serialize by ref. Otherwise serialize
 inline. Inline state descriptors use `z.toJSONSchema` and `z.fromJSONSchema` so
 their schemas can round-trip through serialized machines.
+`projection.render` and `projection.note` are code and never serialize;
+descriptors carrying them must be registered.
 
 The internal state model is always plural and keyed. Runtime state containers are
 stored by state key, and every durable state mutation message must include the
@@ -417,21 +462,24 @@ target `stateKey` even when a public helper infers that key.
 ```ts
 type ActionRef = string;
 type ActionConfigEntry = Action | ActionRef;
-type ActionBindings = Record<string, Action>;
+
+type PartEntry<TDataContent = never> =
+  | Part<TDataContent>
+  | ComputedPartDef<TDataContent>; // inline defs normalize to computed refs
 
 type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
   params?: AnyParamsSchema;
-  instructions?: string;
-  tools?: ActionConfigEntry[];
-  commands?: ActionConfigEntry[];
-  state?: StateDescriptor;
-  members?: Node<TDataContent>[]; // required/static compositional members
+  instructions?: string; // sugar: anonymous preamble text part
+  tools?: ActionConfigEntry[]; // sugar: action parts, caller "generator"
+  commands?: ActionConfigEntry[]; // sugar: action parts, caller "external"
+  parts?: PartEntry<TDataContent>[];
+  states?: StateDescriptor[];
+  members?: MemberEntry<TDataContent>[]; // nodes or member selects
   output?: OutputConfig<TDataContent>;
-  projection?: Projection<TDataContent>;
-  runtime?: Runtime<TDataContent>;
+  runtime?: Runtime;
   executorConfig?: ExecutorConfig; // per-executor config, namespaced by executor identity name
 };
 
@@ -440,16 +488,11 @@ type Node<TDataContent = never> = {
   sourceNodeKey?: string;
   name?: string;
   params: AnyParamsSchema;
-  instructions?: string;
-  toolBindings: ActionBindings;
-  toolRefs: ActionRef[];
-  commandBindings: ActionBindings;
-  commandRefs: ActionRef[];
-  state?: StateDescriptor;
-  members: Node<TDataContent>[];
+  parts: Part<TDataContent>[];
+  states: NormalizedStateDescriptor[];
+  memberEntries: MemberEntry<TDataContent>[];
   output?: OutputConfig<TDataContent>;
-  projection: Projection<TDataContent>;
-  runtime: Runtime<TDataContent>;
+  runtime: NormalizedRuntime;
   executorConfig?: ExecutorConfig;
 };
 ```
@@ -460,15 +503,19 @@ type Node<TDataContent = never> = {
   serialization.
 - `Instance.id` is the concrete runtime instance identity.
 
-`projection` is optional in `NodeConfig`, but required on normalized `Node`.
+`createNode` normalizes the authoring sugar and inline part entries into the
+ordered `parts` list; there is no node-level projection field.
 
-Members are direct nodes. A member's stable path segment is its `Node.key`, and
+A member entry is a direct `Node` or a member select
+(`selectMember`/`whenMember`) whose branches are `Node | Node[] | null`,
+resolved against the contributing node's discriminator environment. A
+member's stable path segment is its `Node.key`, and
 duplicate sibling member keys are an error. If an app needs the same logical
 node twice under one parent, it should create distinct wrapper nodes with unique
 keys.
 
-Only keep `createNode<TDataContent>(config)` for the first pass. A node may
-attach at most one state descriptor through `config.state`. Do not add
+Only keep `createNode<TDataContent>(config)` for the first pass. Nodes attach
+state through the plural `states` list. Do not add
 `createSkillNode`, `createWorkerNode`, or `createPrimaryNode` initially. Most
 apps should anchor the data content type at `createCharter<TDataContent>()`;
 `createNode<TDataContent>()` is available when a node is authored away from that
@@ -485,10 +532,13 @@ type Charter<TDataContent = never> = {
   version?: string;
   params: AnyParamsSchema;
   nodes: Record<string, Node<TDataContent>>;
-  tools: Record<string, Action>;
-  commands: Record<string, Action>;
-  states: Record<string, StateDescriptor>;
-  projections: Record<string, ProjectionFunction<TDataContent>>;
+  actions: Record<string, Action>; // unified; tools and commands share one namespace
+  states: Record<string, NormalizedStateDescriptor>;
+  slots: Record<string, SlotDef>;
+  layouts: Record<string, LayoutDef>;
+  computedParts: Record<string, ComputedPartDef>;
+  discriminators: Record<string, Discriminator>;
+  defaultLayout: LayoutDef; // built-in unless the charter registers its own
   historyProjections: Record<string, HistoryProjectionFunction<TDataContent>>;
 };
 
@@ -497,10 +547,14 @@ type CharterConfig<TDataContent = never> = {
   version?: string;
   params?: AnyParamsSchema;
   nodes: readonly Node<TDataContent>[];
-  tools: readonly Action[];
-  commands: readonly Action[];
-  states: readonly StateDescriptor[];
-  projections: readonly ProjectionFunction<TDataContent>[];
+  tools?: readonly Action[]; // sugar: registered into `actions`
+  commands?: readonly Action[]; // sugar: registered into `actions`
+  actions?: readonly Action[];
+  states?: readonly StateDescriptor[];
+  slots?: readonly SlotDef[];
+  layouts?: readonly LayoutDef[];
+  computedParts?: readonly ComputedPartDef[];
+  discriminators?: readonly Discriminator[];
   historyProjections?: readonly HistoryProjectionFunction<TDataContent>[];
 };
 ```
@@ -658,10 +712,12 @@ by a generic namespaced grammar:
 
 ```ts
 "checkout" // node field
-"search" // tool field
-"approve" // command field
+"search" // action field (tools and commands share one namespace)
 "thread" // state field
-"summary" // projection field
+"context" // slot field
+"chat" // layout field
+"cameraSnapshot" // computedPart field
+"interactionMode" // discriminator field
 "memory" // historyProjection field
 ```
 
@@ -672,7 +728,7 @@ Action refs use the same compact strings but resolve at runtime in this order:
 
 1. the current node's local binding;
 2. the registered `sourceNodeKey` node's local binding;
-3. the charter's top-level `tools` or `commands` registry.
+3. the charter's unified `actions` registry.
 
 For the first implementation pass, an action ref is also the action name:
 `ref === action.name`. Hydration must reject a tool or command ref if it resolves
@@ -746,8 +802,9 @@ to the current concrete instance. Members cannot have runtime children. If a
 member action spawns a child, the child is spawned onto the nearest concrete
 instance.
 
-Members always participate in traversal and cannot be removed via runtime child
-mutation. They may still be superseded by a later `replace` projection.
+Members always participate in traversal and cannot be removed via runtime
+child mutation; derived membership (member selects) is how a member surface
+varies.
 
 Members must not be materialized as durable child instances during serialization
 or deserialization. This distinction is intentional: members represent current
@@ -793,11 +850,38 @@ The projection compiler produces an executor-neutral shape:
 
 ```ts
 type CompiledInference<TDataContent = never> = {
-  systemParts: ContentPart<TDataContent>[];
+  /** The rendered `preamble` region: durable framing, stable-first. */
+  preamble: CompiledPart<TDataContent>[];
   history: FrameMessage<TDataContent>[];
-  dynamicParts: ContentPart<TDataContent>[];
+  /** The rendered `recency` region: attention-adjacent freshness. */
+  recency: CompiledPart<TDataContent>[];
   tools: Action[];
   retrievableStates: RetrievableState[];
+  diagnostics?: CompileDiagnostic[];
+};
+
+/**
+ * Slot identity + volatility stamped on every compiled region part by the
+ * layout render. Executors key caching (cache breakpoints at the first
+ * volatile part) and session sync (slot-granular diffing) off these; draft
+ * placement never leaves compile. The cache boundary is always INFERRED from
+ * SlotDef.volatile + slot order (lint-backed), never an explicit marker part;
+ * there are no content hashes in the IR — consumers diff by slot key + plain
+ * equality.
+ */
+type CompiledPart<TDataContent = never> = ContentPart<TDataContent> & {
+  slot: string;
+  volatile: boolean;
+};
+
+type CompileDiagnostic = {
+  severity: "warning" | "error";
+  code:
+    | "unknown-slot"
+    | "shadowed-action"
+    | "volatile-order"
+    | "invalid-discriminator-value";
+  message: string;
 };
 ```
 
@@ -811,82 +895,75 @@ inference:
 - if a projected `stateKey` appears more than once, use
   `${stateKey}:${instanceId}` for each duplicate.
 
-The alias map is scoped to one compiled inference. It must not be serialized into
-durable frames, exposed through client state mutation APIs, or accepted anywhere
-except the inference `getState` tool. `retrievableStates` contains only the alias
-entries that `getState` may retrieve. The `target` field is runtime metadata and
-must not be rendered into prompts or provider tool schemas. The runtime treats
-aliases as exact map keys; it does not parse arbitrary model-supplied strings
-into state targets. If generated aliases collide, projection compilation throws.
+The alias map is scoped to one compiled inference. It must not be serialized
+into durable frames, exposed through client state mutation APIs, or accepted
+anywhere except the inference `getState` tool. `retrievableStates` contains
+only the alias entries that `getState` may retrieve. The `target` field is
+runtime metadata and must not be rendered into prompts or provider tool
+schemas. The runtime treats aliases as exact map keys; it does not parse
+arbitrary model-supplied strings into state targets. If generated aliases
+collide, projection compilation throws.
 
-Projection compilation uses an internal `ProjectionIR`. `CompiledInference`
-still renders executor-facing prompt parts to `string[]` after aliases and
-retrievable states are finalized.
+### The render path
 
-Compilation rule for projection-owned sections:
+Compilation is a single deterministic pass from contributed parts to rendered
+sections. There are no projection functions anywhere on the path; the compile
+consumes only declarative data (parts, slots, layouts, discriminators,
+registered part code).
+
+1. **Contribution.** Traverse projection nodes in pre-order (see Projection
+   Nodes And Runtime Frames). Each contributor evaluates its parts: selects
+   resolve their discriminator against the contributor's own state/params
+   environment and contribute only the chosen branch (a value outside the
+   discriminator's declared `values` is an `invalid-discriminator-value`
+   error); computed parts run their registered `compute` with the
+   contributor's params/state env; state projections contribute the rendered
+   value (native exposure, via `projection.render` or default JSON) or a
+   deferred-availability note (deferred exposure, via `projection.note` or
+   the default getState note), addressed to `projection.slot`; action parts
+   contribute their action to the tool/command surface plus their `guidance`
+   text parts.
+2. **Placement.** Every contributed part carries a placement tag: a slot
+   name, a region (resolved to the active layout's default slot for that
+   region at render), or nothing (preamble region default slot). The compile
+   resolves one layout per document: an explicit compile option, else the
+   charter's `defaultLayout`, else the built-in implicit default. Under a
+   `strict` layout, unknown slot names are `unknown-slot` errors; otherwise
+   they overflow into the default slot.
+3. **Render.** Each region renders its slots in layout order: parts group by
+   slot, text merges per the slot's `merge` policy under the slot's optional
+   `title`, and each region renders to its `CompiledInference` section
+   (`preamble`/`recency`), every part stamped with its resolved slot identity
+   and volatility (`CompiledPart`). Stable slots ordered after volatile slots in a
+   region draw a `volatile-order` diagnostic (forfeited prompt-cache prefix
+   stability).
+
+Duplicate action names resolve by deterministic last-write-wins — the deepest
+contributor in traversal order wins — with a `shadowed-action` diagnostic for
+each shadowed contribution. This is the same override shape as provider tool
+assembly and command resolution.
+
+### Generator boundaries
+
+Generator runtimes are projection boundaries. When compiling a generator
+outside that boundary, the compiler does not traverse the boundary's
+descendants directly; it compiles the boundary's owned aggregate, then applies
+`runtime.boundaryProjection`:
 
 ```ts
-const history = compileVisibleHistory(frames, targetGenerator);
-const rootContributor = directRootContributor(root);
-const sectionRoot = targetGeneratorId
-  ? findContributorById(root, targetGeneratorId) ?? rootContributor
-  : rootContributor;
-const draft =
-  targetGeneratorId && isGeneratorBoundary(sectionRoot)
-    ? compileTargetGeneratorProjection(sectionRoot, targetGeneratorId)
-    : compileProjectionSubtree(sectionRoot, targetGenerator);
-
-return finalizeSections(draft, history);
-
-function compileTargetGeneratorProjection(contributor, targetGeneratorId) {
-  return compileOwnedGeneratorProjection(contributor, targetGeneratorId);
-}
-
-function compileBoundaryGeneratorProjection(contributor) {
-  return compileOwnedGeneratorProjection(contributor, contributor.id);
-}
-
-function compileOwnedGeneratorProjection(contributor, targetGeneratorId) {
-  const draft = emptyProjectionIR();
-  applyProjection(
-    draft,
-    { node: contributor.node },
-    contributor.node.projection,
-    projectionContext(contributor, "node", targetGeneratorId),
-  );
-  for (const child of directContributorChildren(contributor)) {
-    visitContributor(draft, child, targetGeneratorId);
-  }
-  return draft;
-}
-
-function compileProjectionSubtree(contributor, targetGeneratorId) {
-  const draft = emptyProjectionIR();
-  visitContributor(draft, contributor, targetGeneratorId);
-  return draft;
-}
-
 function visitContributor(draft, contributor, targetGeneratorId) {
   if (
     isGeneratorBoundary(contributor) &&
     !belongsToGenerator(contributor, targetGeneratorId)
   ) {
-    const exported = compileBoundaryGeneratorProjection(contributor);
-    applyProjection(
-      draft,
-      { ir: readonlyProjectionIR(exported) },
-      contributor.node.runtime.boundaryProjection,
-      projectionContext(contributor, "boundary"),
-    );
-    return; // do not directly traverse descendants across a runtime boundary
+    if (contributor.node.runtime.boundaryProjection === "augment") {
+      mergeCompiledAggregate(draft, compileOwnedAggregate(contributor));
+    }
+    // "hidden" (default): nothing crosses the boundary.
+    return;
   }
 
-  applyProjection(
-    draft,
-    { node: contributor.node },
-    contributor.node.projection,
-    projectionContext(contributor, "node", targetGeneratorId),
-  );
+  contributeParts(draft, contributor);
 
   for (const child of directContributorChildren(contributor)) {
     visitContributor(draft, child, targetGeneratorId);
@@ -894,70 +971,42 @@ function visitContributor(draft, contributor, targetGeneratorId) {
 }
 ```
 
-`compileTargetGeneratorProjection` preserves the scheduler-supplied
-`Generator.id`, which may be activation-specific for parallel runtimes.
-`compileBoundaryGeneratorProjection` deliberately synthesizes a generator from
-the runtime projection node because boundary aggregate compilation is an internal
-ownership pass, not a real activation target.
-
-`sectionRoot` is the target runtime projection node when compiling a generator.
-For a `createRoot(...)` tree, the root generator is the projection node for the
-returned root instance.
-
-Generator runtimes are projection boundaries. When compiling a generator outside
-that runtime boundary, the compiler must not traverse the boundary's descendants
-directly. It first compiles the boundary's owned projection using that runtime's
-own `node.projection`, then calls `runtime.boundaryProjection` with
-`source.ir` set to the resulting aggregate before adding it to the parent
-compilation.
+`"hidden"` drops the child runtime aggregate. `"augment"` forwards every
+compiled part as-is: child preamble parts remain preamble parts, child
+recency parts remain recency parts, and child tools/retrievable state
+metadata are exported. There is no `"replace"` and no boundary projection
+function; selective export between the two poles is future declarative work
+(export manifests, activity digests).
 
 When compiling a specific target generator, that runtime's projection node is
-the root of the projection section pass. Ancestor runtime
-boundaries are not traversed through to reach the target, and ancestor
-instructions/tools do not implicitly project downward into the child generator.
-A child generator's fully compiled projection projects upward to its nearest
-owning generator only through that child's `boundaryProjection` policy.
+the root of the projection section pass. Ancestor runtime boundaries are not
+traversed through to reach the target, and ancestor parts do not implicitly
+project downward into the child generator. A child generator's compiled
+projection reaches its nearest owning generator only through that child's
+`boundaryProjection`.
 
 A runtime's owned projection includes that runtime's own projection node plus
 its member and child descendants until another generator runtime boundary is
 reached. Nested runtime boundaries are exported to the owning runtime through
-their own `boundaryProjection` policy using the same rule.
+their own `boundaryProjection` using the same rule.
 
 State projection follows state ownership before runtime boundary traversal:
 hoisted state is grouped under the resolved source instance projection node,
 while local state is grouped under the descriptor's source projection node. A
-member inside a generator runtime can contribute a descriptor for hoisted state
-owned by the nearest source instance; that state may project from that owner
-without exporting the generator runtime's aggregate. Hidden boundaries still
-hide the generator's own instructions, tools, local state, and descendant
+member inside a generator runtime can contribute a descriptor for hoisted
+state owned by the nearest source instance; that state may project from that
+owner without exporting the generator runtime's aggregate. Hidden boundaries
+still hide the generator's own parts, tools, local state, and descendant
 aggregate.
 
-Standard node projection materializes a node source into IR: node instructions,
-projected state parts, and node tools. Standard boundary projection receives a
-child runtime source that has already been compiled into IR. `hiddenProjection`
-drops the child runtime aggregate. `augmentProjection` merges it as compiled.
-`replaceProjection` clears the parent
-IR before merging it as compiled. Child system parts remain system parts,
-child dynamic parts remain dynamic parts, and child tools/retrievable state
-metadata are exported. If a boundary needs to export prompt without tools,
-re-channel system parts to dynamic, filter retrieval metadata, summarize, or
-otherwise transform the aggregate, use a projection function.
-
-`replace` clears all previously accumulated instructions, dynamic parts, tools,
-rendered states, and retrievable states at that call site. Projection traversal
-is still node-before-children, so a node `replace` clears projections accumulated
-before that node and then that node's children still apply afterward. A boundary
-`replace` clears the parent IR accumulated before that child boundary and
-later siblings still apply afterward. `replace` does not delete, hide, reorder,
-or otherwise affect history. History is compiled independently from durable
-frames by the generator history policy.
+### History compilation
 
 History compilation is a separate pass from projection section compilation:
 
 ```ts
 const visibleFrames = compileVisibleFrameHistory(frames, targetGenerator);
 const history = applyHistoryProjection(
-  targetRuntime.historyProjection ?? { type: "messages" },
+  layout.historyProjection ?? { type: "messages" },
   {
     target: targetGenerator,
     generatorId: targetGenerator.id,
@@ -971,38 +1020,35 @@ const history = applyHistoryProjection(
 
 The built-in `{ type: "messages" }` history projection preserves all visible
 frame messages in durable frame/message order. The built-in `{ type: "actor" }`
-history projection extracts only actor messages from that visible frame history.
-Executors are responsible for rendering `CompiledInference.history` into the
-provider-visible conversation format they need; most LLM executors will filter
-to actor messages before rendering. Custom history projection output is not
-durable runtime state; it is recomputed for the compiled inference. Frames in
-`HistoryProjectionContext.history` have `provenance` stripped: history
-projections are fold code, and the fold never reads provenance.
+history projection extracts only actor messages from that visible frame
+history. Executors are responsible for rendering `CompiledInference.history`
+into the provider-visible conversation format they need; most LLM executors
+will filter to actor messages before rendering. Custom history projection
+output is not durable runtime state; it is recomputed for the compiled
+inference. Frames in `HistoryProjectionContext.history` have `provenance`
+stripped: history projections are fold code, and the fold never reads
+provenance.
 
-Core should provide small helper functions for common history projections, such
-as `messages(ctx)`, `actorMessages(ctx)`, `messagesSinceLastCompletion(ctx)`,
+Core should provide small helper functions for common history projections,
+such as `messages(ctx)`, `actorMessages(ctx)`, `messagesSinceLastCompletion(ctx)`,
 and `messagesBeforeLastCompletion(ctx)`. These helpers are pure views over the
 filtered frame history supplied in `HistoryProjectionContext`.
 
-Duplicate tool names are intentionally supported as an override mechanism. When
-an executor assembles provider tool definitions from the compiled `tools` list,
-the last tool with a given name wins.
-
 Runtime projection resolution:
 
-- `component`: use `node.projection`.
+- `component`: contribute the node's parts inline.
 - `generator` when compiling parent inference: compile the runtime's owned
-  projection aggregate, then export it through
-  `runtime.boundaryProjection`.
-- `generator` when compiling its own inference: use `node.projection`.
+  aggregate, then export it through `runtime.boundaryProjection`.
+- `generator` when compiling its own inference: contribute the node's parts
+  as the section root.
 
 All generator inference points are equal and can receive input when their
 configured trigger matches the source frame. Typical agents only have the
-de-facto root generator from `createRoot(...)`, but multiple generator nodes are
-in scope because generator identity, audience filtering, activation routing, and
-history compilation need to be designed around independent inference points from
-the start. The first-pass routing policy may be broad, but the abstraction must
-not assume a single generator.
+de-facto root generator from `createRoot(...)`, but multiple generator nodes
+are in scope because generator identity, audience filtering, activation
+routing, and history compilation need to be designed around independent
+inference points from the start. The first-pass routing policy may be broad,
+but the abstraction must not assume a single generator.
 
 ## Executor Contract
 
@@ -1010,17 +1056,27 @@ Executors receive the compiled sections and own provider-specific assembly:
 
 ```ts
 executor.run({
-  systemParts,
+  preamble,
   history,
-  dynamicParts,
+  recency,
   tools,
   retrievableStates,
   output,
 });
 ```
 
-Executors decide how to serialize system/dynamic content and provider tool
-configuration. Work messages are runtime metadata and should be filtered out of
+Executors decide how to serialize region content and provider tool
+configuration, under the lowering laws: given one IR, every executor's
+realization preserves part order within regions, all content, and the tool
+surface — executors re-encode, never author; degradations are declared, fixed
+rules. The laws are conformance (`test/conformance/lowering.test.ts`), run
+against the real executor packages. Concrete lowerings shipped on them: the
+aisdk executor lowers the preamble to `SystemModelMessage[]` with one
+Anthropic `cacheControl` breakpoint on the last stable block (configurable
+via `promptCache`; non-Anthropic providers keep the byte-identical single
+string), and the realtime executor keys dynamic-context conversation items by
+slot — only changed slots create/delete items, with per-slot version notes —
+and skips unchanged instruction pushes. Work messages are runtime metadata and should be filtered out of
 executor-visible history unless a future explicit projection policy allows them.
 Commands are host/client actions, not executor-visible inference tools. They
 should stay out of `CompiledInference` until a future explicit command projection
@@ -1156,6 +1212,21 @@ The schema of `getState` must remain stable across steps for prompt caching:
 projected aliases. Access is runtime-checked against the compiled
 `retrievableStates` alias map.
 
+Deferred-exposure tools are the executor's side of the exposure contract. An
+executor lowers `exposure: "deferred"` actions to its provider's idiomatic
+tool-search mechanism — the aisdk executor ships built-in lowerings for
+Anthropic (`deferLoading` + BM25 tool search) and OpenAI Responses
+(`deferLoading` + `tool_search`), selected by the model's provider id and
+overridable via its `deferredTools` config hook. A deferred tool an executor
+cannot lower is an ERROR, never a silent native degradation — the compiled
+availability note promises tool search, so a surface that cannot honor it
+must not run (the realtime executor rejects deferred tools outright). The
+provider search-tool names are reserved against projected action names, like
+`getState`. Model-capability compat is the CHARTER's job, not an executor
+toggle: a charter that must run on both search-capable and search-less models
+makes deferred-tool support a param and selects exposure with a
+discriminator, so prompt and surface can never disagree.
+
 State rendering and state-access notes should not expose node mechanics to the
 model. The prompt should address the model as the actor. For any projected state,
 append a short note to the relevant instruction text, such as:
@@ -1164,26 +1235,27 @@ append a short note to the relevant instruction text, such as:
 You have access to state at address `<stateAddress>` if you need it.
 ```
 
-For `projection: "retrieval"`, mention that the model can call `getState` with
-that exact address string. For `system` and `dynamic`, render the inference
-state address and JSON in the corresponding compiled section so duplicate state
-keys on different instances remain distinguishable without exposing structured
-runtime targets.
+For `projection: { exposure: "deferred" }`, mention that the model can call
+`getState` with that exact address string (the descriptor's `note` overrides
+the default wording). For native exposure, render the inference state address
+and value (via `projection.render` or default JSON) into the state's slot so
+duplicate state keys on different instances remain distinguishable without
+exposing structured runtime targets.
 
-Actions use singular public state ergonomics in the first pass. A node-local tool
-or command automatically binds to its owner node's `state`, if present, and
-receives a typed `ctx.state` and `ctx.updateState(update)` API for that state.
+Actions use singular public state ergonomics in the first pass. An action
+binds the state descriptor it declares (`state: descriptor`), and receives a
+typed `ctx.state` and `ctx.updateState(update)` API for that state.
 Conventional updates are constructed with helpers such as
 `replaceState(value)`, `patchState(patch)`, and `appendState(...values)`. If the
 owner node has no state, the action receives no state binding. State projection
 does not affect mutation access.
 
-Type safety flows from the action's declared state requirement. A stateful action
-declares the descriptor it expects, and `createNode({ state, tools, commands })`
-keeps the action handle typed from that declaration. Machine creation and
-projection compilation validate that the action's declared state is compatible
-with the owner node's state before execution. Stateless actions use
-`state: null` and receive no mutation helpers.
+Type safety flows from the action's declared state requirement. A stateful
+action declares the descriptor it expects, and `createNode({ states, tools,
+commands })` keeps the action handle typed from that declaration. Machine
+creation and projection compilation validate that the action's declared state
+is provisioned among the owner node's `states` before execution. Stateless
+actions use `state: null` and receive no state context.
 
 Actions may also declare `params`. Action contexts always include `ctx.params`,
 typed from the action's own params schema. The action does not receive the full
@@ -1912,10 +1984,10 @@ that are runnable.
 Compiling the root generator does not require compiling child generators first.
 For any generator target, the projection section pass starts at that target
 runtime projection node. Within any section pass, if a
-`ProjectionNode` belongs to the target generator, the compiler uses that
-projection node's `node.projection`; if a non-target projection node is a
-generator runtime, the compiler compiles that runtime's generator projection and
-exports it through `runtime.boundaryProjection`.
+`ProjectionNode` belongs to the target generator, the compiler contributes
+that projection node's parts; if a non-target projection node is a generator
+runtime, the compiler compiles that runtime's owned aggregate and exports it
+through `runtime.boundaryProjection`.
 
 For the first pass, every generator receives the frame log filtered by message
 audience, message delivery, runtime activation history, and runtime metadata
@@ -2351,17 +2423,18 @@ The framework should not require users to author a separate client contract.
 Type safety should flow from the actual machine declarations.
 
 ```ts
-const setLiveMode = createCommand({
+const setLiveMode = createAction({
+  state: agentState,
   name: "setLiveMode",
-  input: z.object({ enabled: z.boolean() }),
-  execute: async (input, ctx) => {
+  inputSchema: z.object({ enabled: z.boolean() }),
+  run: async (input, ctx) => {
     ctx.updateState(patchState({ liveMode: input.enabled }));
   },
 });
 
 const agentNode = createNode({
   key: "agent",
-  state: agentState,
+  states: [agentState],
   commands: [setLiveMode],
 });
 
@@ -2465,7 +2538,7 @@ optimistic updates, or retire optimism from residue. It is only a type-safe
 message constructor. The server still resolves the command against the hydrated
 machine and validates the input before executing it.
 
-To support this mode, `createCommand` must preserve literal command names and
+To support this mode, `createAction` must preserve literal command names and
 schema-derived input types in its return type. For example, the type of
 `setLiveMode.name` should remain `"setLiveMode"` rather than widening to
 `string`.
@@ -2638,7 +2711,7 @@ constituent inside an inline definition must be represented by a ref that can
 hydrate back to an executable value.
 
 Durable instance snapshots must never silently drop executable behavior. If
-serialization encounters a function, closure, schema, projection function, action
+serialization encounters a function, closure, schema, computed part, discriminator, action
 executor, or other non-serializable value that cannot be represented by a valid
 ref, it must throw with a useful path to the failing field.
 
@@ -2662,10 +2735,11 @@ type SerializedNodeRef<TDataContent = never> =
   | Ref;
 ```
 
-Before a frame is appended to the durable frame log, any hydrated node, state,
-action, or projection references in `InstanceMessage`s must be canonicalized into
-`SerializedNodeRef` or another dry ref form. The frame log must not contain live
-`Node`, `Action`, `StateDescriptor`, or projection function objects.
+Before a frame is appended to the durable frame log, any hydrated node,
+state, or action references in `InstanceMessage`s must be canonicalized into
+`SerializedNodeRef` or another dry ref form. The frame log must not contain
+live `Node`, `Action`, `StateDescriptor`, or other executable part-code
+objects (computed parts, discriminators).
 
 This applies to:
 
@@ -2673,7 +2747,7 @@ This applies to:
 - `InstanceMessage.kind: "transition".node`
 - `SpawnChild.node`
 - attached serialized subtrees
-- any queued or emitted framework message that contains node/state/action/projection refs
+- any queued or emitted framework message that contains node/state/action/part refs
 
 ### Inline Definitions
 
@@ -2690,27 +2764,60 @@ refs.
 ```ts
 type DryRuntime =
   | { type?: "component" }
-  | ({
-      type: "generator";
-      boundaryProjection?: Ref;
-      outputAudienceDefault?: "self" | "broadcast";
-    } & DryTriggeredRuntimeOptions);
+  | ({ type: "generator" } & TriggeredRuntimeOptions);
+// boundaryProjection is a plain enum, so DryRuntime carries it as data.
+
+type DryPart =
+  | { kind: "text"; slot?: string; region?: LayoutRegionName; text: string }
+  | {
+      kind: "action";
+      caller: ActionCaller;
+      exposure?: Exposure;
+      ref: Ref;
+      guidance?: Array<{ slot?: string; region?: LayoutRegionName; text: string }>;
+    }
+  | { kind: "computed"; ref: Ref }
+  | {
+      kind: "select";
+      discriminator: Ref;
+      partial: boolean;
+      branches: Record<string, DryPart[] | null>;
+    };
+
+type DryMemberSelect<TDataContent = never> = {
+  kind: "select";
+  discriminator: Ref;
+  partial: boolean;
+  branches: Record<string, Array<DryNode<TDataContent> | Ref> | null>;
+};
+
+type DryMemberEntry<TDataContent = never> =
+  | DryNode<TDataContent>
+  | Ref
+  | DryMemberSelect<TDataContent>;
 
 type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
   params?: unknown;
-  instructions?: string;
-  tools?: Ref[];
-  commands?: Ref[];
-  state?: DryStateDescriptor | Ref;
-  members?: Array<DryNode<TDataContent> | Ref>;
+  parts?: DryPart[];
+  states?: Array<SerializedStateDescriptor | Ref>;
+  members?: DryMemberEntry<TDataContent>[];
   output?: SerializedOutputConfig;
-  projection?: Ref;
   runtime?: DryRuntime;
   executorConfig?: Record<string, unknown>; // plain JSON, round-trips as-is
 };
+```
+
+Inline and de novo nodes serialize as pure data: parts round-trip as `DryPart`
+(text and guidance as literal data, actions/computed parts/discriminators as
+refs), and region addresses serialize as region names that re-enter through
+the `preambleRegion`/`recencyRegion` sentinels at hydration. Behavioral refs
+recover branch-scoped through `sourceNodeKey` or the charter; code never
+serializes.
+
+```ts
 ```
 
 `sourceNodeKey` records the registered node an inline node was derived from, when
@@ -2721,7 +2828,7 @@ registered node. Inline node action refs then stay compact names and resolve via
 
 `forceInline` only changes the node serialization boundary. It does not permit
 dropping unregistered executable values. If a force-inlined node contains an
-unregistered action, projection function, state init function, or schema that
+unregistered action, computed part, discriminator, state init function, or schema that
 cannot round-trip, serialization must throw.
 
 ### Actions And Commands
@@ -2751,7 +2858,7 @@ schema, and execute function. Hydration eagerly resolves inline node tool and
 command refs through `sourceNodeKey` and the charter, and rejects refs that are
 unknown or whose resolved action has `action.name !== ref`.
 
-### States, Schemas, And Projection Functions
+### States, Schemas, And Registered Part Code
 
 State descriptors follow the same rule as nodes:
 
@@ -2762,17 +2869,18 @@ State descriptors follow the same rule as nodes:
   `z.fromJSONSchema`.
 - `init` functions are executable values and must serialize by ref or throw.
 
-Projection functions are executable values. Registered projection functions
-serialize by ref from both `projection` and `boundaryProjection` fields. Inline
-projection functions may execute in memory, but machine serialization must throw
-if one is encountered. Default `node.projection` and default
-`runtime.boundaryProjection` serialize by omission.
+Registered part code — computed parts and discriminators — serializes by
+ref. Inline instances may execute in memory, but machine serialization must
+throw if an unregistered one is encountered. `runtime.boundaryProjection` is
+a plain enum and serializes as data, omitted when it is the default
+`"hidden"`. `StateProjection` placement (`slot`, `region`, `exposure`)
+serializes as data; `projection.render` and `projection.note` are code, never
+serialize, and therefore require registered descriptors.
 
-Projection refs resolve from the source node slot first, then from
-`charter.projections`. This lets an inline node keep compact projection refs
-when it was derived from a registered source node with local projection
-functions. Standard projection functions follow the same rule as every other
-projection function; they have no reserved refs.
+Part refs on inline nodes resolve branch-scoped through `sourceNodeKey`
+first, then through the charter registries — the same rule as action refs.
+Slots and layouts are data definitions registered in the charter; parts
+reference slots by name.
 
 History projection functions follow the same executable-value rule. Registered
 history projection functions serialize by bare string ref. Inline history
@@ -2790,12 +2898,12 @@ round-trip must throw.
 
 Hydrating a dry inline node must recursively hydrate:
 
-- action and command refs
+- action refs (tools and commands, one namespace)
 - state descriptors and schemas
-- member nodes
-- node projection refs
-- runtime boundary projection refs
-- runtime history projection refs
+- member entries (nodes and member selects)
+- part refs: computed parts and select discriminators
+- slot addresses (region addresses re-enter by sentinel identity)
+- history projection refs (via layouts)
 
 After hydration, the machine must be executable without consulting the original
 live objects that produced the snapshot.
@@ -2810,18 +2918,24 @@ projection, resumability, state conflict handling, work scheduling, or another
 critical behavior. Avoid tests that only restate a type shape, constructor
 default, or one field assignment unless that detail changes runtime behavior.
 
+The conformance suites under `packages/projector/test/conformance/`
+(projection, layout, selects, state projections, serialization of parts,
+provenance, state, and lowering — which runs against the real executor
+packages) are the canonical executable form of this list.
+
 Add focused tests for:
 
 - Projection compiler behavior: `ProjectionNode` traversal is pre-order and
-  left-to-right, members project before runtime children, `augment` accumulates
-  sections, `replace` clears previously accumulated projection sections, and
-  `replace` does not affect compiled history. A node `replace` still allows that
-  node's children to project afterward.
+  left-to-right, members project before runtime children, parts render into
+  slots per the active layout (regions rendering to `preamble`/`recency` as
+  slot-stamped `CompiledPart`s), select branches resolve against the
+  contributor's discriminator environment, guidance travels atomically with
+  its action part, and same-name action collisions resolve deepest-wins with
+  `shadowed-action` diagnostics.
 - Runtime projection boundaries: generator runtimes default
-  `boundaryProjection` to hidden, hidden boundaries prevent descendant leakage,
-  standard boundary projection exports the runtime's whole owned aggregate as
-  compiled, and custom projection functions can selectively transform that
-  aggregate.
+  `boundaryProjection` to `"hidden"`, hidden boundaries prevent descendant
+  leakage, and `"augment"` exports the runtime's whole owned aggregate as
+  compiled.
 - State projection ownership: hoisted state contributed behind a runtime
   boundary projects from the nearest source instance without exporting the hidden
   runtime aggregate, while local state remains behind that boundary.
@@ -2830,9 +2944,10 @@ Add focused tests for:
   ownership anchor, hoisted state below each direct source instance is owned by
   that source instance, and hoisted state resolution throws when no source
   instance is available.
-- Projection functions: node projection receives `source.node`, boundary
-  projection receives `source.ir`, both use the same `(ctx, draft, source)`
-  signature, and functions can mutate the destination IR directly.
+- Parts and selects: computed parts evaluate with the contributor's
+  params/state environment and may only target volatile slots, member selects
+  derive membership per branch while state containers provision across all
+  branches, and partial selects require `when()`/`whenMember()`.
 - Member semantics: members are not serialized as durable children, reload uses
   current registered member definitions, member node keys produce deterministic
   virtual projection addresses, duplicate sibling member node keys throw, member
@@ -2870,8 +2985,9 @@ Add focused tests for:
   ref, inline Zod state schemas round-trip, force-inlined registered nodes keep
   executable node-local tools through `sourceNodeKey`, durable frames
   canonicalize hydrated node/action/state/projection inputs before persistence,
-  projection and history projection functions serialize by ref or throw, unknown
-  refs throw, and unregistered executable inline values throw instead of being
+  registered part code (computed parts, discriminators) and history projection
+  functions serialize by ref or throw, parts round-trip as pure data
+  (guidance included), unknown refs throw, and unregistered executable inline values throw instead of being
   dropped.
 - Executor-visible compilation: commands stay out of compiled inference, tool
   order is preserved so provider assembly can resolve duplicate tool names with

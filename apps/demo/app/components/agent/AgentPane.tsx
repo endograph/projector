@@ -302,8 +302,8 @@ type CompiledIrResult = {
   runtimes: Array<
     RuntimeInspectionBase & {
       inference: {
-        systemParts: string[];
-        dynamicParts: string[];
+        preamble: string[];
+        recency: string[];
         tools: string[];
         retrievableStates: unknown[];
       };
@@ -340,16 +340,16 @@ function CompiledIrTree({ sessionId }: { sessionId: Id<"sessions"> | null }) {
           key={runtime.generatorId}
           runtime={runtime}
           defaultExpanded={index === 0}
-          summary={`system ${runtime.inference.systemParts.length} / dynamic ${runtime.inference.dynamicParts.length} / tools ${runtime.inference.tools.length}`}
+          summary={`system ${runtime.inference.preamble.length} / dynamic ${runtime.inference.recency.length} / tools ${runtime.inference.tools.length}`}
         >
           <TreeSection title="compiled inference">
             <JsonDisclosure
-              title={`system ${runtime.inference.systemParts.length}`}
-              value={runtime.inference.systemParts}
+              title={`system ${runtime.inference.preamble.length}`}
+              value={runtime.inference.preamble}
             />
             <JsonDisclosure
-              title={`dynamic ${runtime.inference.dynamicParts.length}`}
-              value={runtime.inference.dynamicParts}
+              title={`dynamic ${runtime.inference.recency.length}`}
+              value={runtime.inference.recency}
             />
             <NameList
               title={`tools ${runtime.inference.tools.length}`}
@@ -2258,8 +2258,8 @@ function Contributor({
           {node.id}
         </span>
         <span className="ml-auto shrink-0 text-terminal-green-dim">
-          system {node.compiled.systemParts.length} / dynamic{" "}
-          {node.compiled.dynamicParts.length} / tools{" "}
+          system {node.compiled.preamble.length} / dynamic{" "}
+          {node.compiled.recency.length} / tools{" "}
           {node.compiled.tools.length}
         </span>
       </button>
@@ -2273,11 +2273,7 @@ function Contributor({
               ["address", addressLabel(node.address)],
               ["concurrency", node.runtime.concurrency],
               ["history", node.runtime.activationHistory],
-              ["own projection", projectionLabel(node.projection.own)],
-              [
-                "boundary projection",
-                projectionLabel(node.projection.boundary),
-              ],
+              ["boundary projection", node.boundaryProjection],
               ...(node.parentId
                 ? ([["parent generator", node.parentId]] as Array<
                     [string, ReactNode]
@@ -2308,8 +2304,8 @@ function Contributor({
 
 function CompiledPayload({ node }: { node: CompiledContributor }) {
   const empty =
-    node.compiled.systemParts.length === 0 &&
-    node.compiled.dynamicParts.length === 0 &&
+    node.compiled.preamble.length === 0 &&
+    node.compiled.recency.length === 0 &&
     node.compiled.tools.length === 0 &&
     node.compiled.retrievableStates.length === 0;
 
@@ -2320,12 +2316,12 @@ function CompiledPayload({ node }: { node: CompiledContributor }) {
   return (
     <TreeSection title="compiled payload">
       <JsonDisclosure
-        title={`system ${node.compiled.systemParts.length}`}
-        value={node.compiled.systemParts}
+        title={`system ${node.compiled.preamble.length}`}
+        value={node.compiled.preamble}
       />
       <JsonDisclosure
-        title={`dynamic ${node.compiled.dynamicParts.length}`}
-        value={node.compiled.dynamicParts}
+        title={`dynamic ${node.compiled.recency.length}`}
+        value={node.compiled.recency}
       />
       <JsonDisclosure
         title={`tools ${node.compiled.tools.length}`}
@@ -2369,10 +2365,7 @@ function ContributorList({
               </span>
             </div>
             <KeyValueRows
-              rows={[
-                ["address", addressLabel(contributor.address)],
-                ["projection", projectionLabel(contributor.projection)],
-              ]}
+              rows={[["address", addressLabel(contributor.address)]]}
             />
             <StateList states={contributor.states} />
             <ActionList title="tools" actions={contributor.tools} />
@@ -2384,13 +2377,29 @@ function ContributorList({
   );
 }
 
+type StateProjectionMeta = {
+  slot?: string;
+  region?: string;
+  exposure?: string;
+};
+
+function stateProjectionLabel(projection: StateProjectionMeta): string {
+  return [
+    projection.exposure,
+    projection.slot ? `slot:${projection.slot}` : undefined,
+    projection.region ? `region:${projection.region}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function StateList({
   states,
 }: {
   states: Array<{
     key: string;
     address: unknown;
-    projection?: string;
+    projection?: StateProjectionMeta;
     value: unknown;
   }>;
 }) {
@@ -2418,7 +2427,7 @@ function StateTreeItem({
   state: {
     key: string;
     address: unknown;
-    projection?: string;
+    projection?: StateProjectionMeta;
     value: unknown;
   };
 }) {
@@ -2428,7 +2437,9 @@ function StateTreeItem({
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-terminal-green">{state.key}</span>
           {state.projection && (
-            <span className="text-terminal-yellow">{state.projection}</span>
+            <span className="text-terminal-yellow">
+              {stateProjectionLabel(state.projection)}
+            </span>
           )}
           <span className="truncate text-terminal-green-dim">
             {addressLabel(state.address)}
@@ -2658,26 +2669,6 @@ function MutedLine({ children }: { children: ReactNode }) {
   return (
     <div className="text-xs italic text-terminal-green-dim">{children}</div>
   );
-}
-
-function projectionLabel(projection: unknown) {
-  if (!projection || typeof projection !== "object") {
-    return String(projection);
-  }
-  const record = projection as Record<string, unknown>;
-  if (typeof record.name === "string") {
-    return `function ${record.name}`;
-  }
-
-  const mode = typeof record.mode === "string" ? record.mode : "unknown";
-  const parts = [mode];
-  if ("instructions" in record) {
-    parts.push(`instructions ${String(record.instructions)}`);
-  }
-  if ("tools" in record) {
-    parts.push(`tools ${String(record.tools)}`);
-  }
-  return parts.join(" / ");
 }
 
 function addressLabel(value: unknown): string {

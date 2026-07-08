@@ -17,13 +17,13 @@ describe("conformance: state access", () => {
     const { executor, requests } = createRecordingExecutor();
     const child = createNode({
       key: "child",
-      state: {
+      states: [{
         key: "localSecret",
         scope: "local",
         schema: z.object({ owner: z.string() }),
         init: { owner: "child" },
-        projection: "retrieval",
-      },
+        projection: { exposure: "deferred" },
+      }],
       runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const root = createNode({
@@ -58,16 +58,16 @@ describe("conformance: state access", () => {
 
   it("resolves hoist state to the real root instance for tools below that root", async () => {
     const { executor, requests } = createRecordingExecutor();
-    const readA = createAction({ state: null, name: "readA" });
-    const readB = createAction({ state: null, name: "readB" });
     const state = {
       key: "session",
       scope: "hoist" as const,
       schema: z.object({ owner: z.string() }),
       init: { owner: "root" },
     };
-    const memberA = createNode({ key: "memberA", state, tools: [readA] });
-    const memberB = createNode({ key: "memberB", state, tools: [readB] });
+    const readA = createAction({ state, name: "readA" });
+    const readB = createAction({ state, name: "readB" });
+    const memberA = createNode({ key: "memberA", states: [state], tools: [readA] });
+    const memberB = createNode({ key: "memberB", states: [state], tools: [readB] });
     const root = createNode({
       key: "root",
       members: [memberA, memberB],
@@ -98,12 +98,12 @@ describe("conformance: state access", () => {
     const second = createRecordingExecutor();
     const node = createNode({
       key: "root",
-      state: {
+      states: [{
         key: "session",
         scope: "hoist",
         schema: z.object({ owner: z.string() }),
-        projection: "retrieval",
-      },
+        projection: { exposure: "deferred" },
+      }],
       runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machineA = createMachine({

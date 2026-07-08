@@ -3,51 +3,43 @@ import { z } from "zod";
 import {
   actorMessages,
   appendState,
-  applyStandardProjection,
   compileProjection,
   createActivationFrame,
   createCompletionFrame,
   createCharter,
   createAction,
+  createLayout,
   createMachine,
   actionResult,
   createHistoryProjectionFunction,
   createInstance,
-  createProjectionFunction,
-  createStandardProjectionFunction,
   createRuntimeTurnFrame,
   createNode,
   createRoot,
   createRootInstance,
+  createSlot,
   executeCommand,
-  hydrateHistoryProjection,
   hydrateInstance,
   hydrateNode,
-  hydrateProjection,
   hydrateStateDescriptor,
   inspectCompiledProjectionTree,
   isActorMessage,
   messagesBeforeLastCompletion,
   messagesSinceLastCompletion,
   patchState,
+  recencyRegion,
   resolveStates,
   replaceState,
   resolveEffectiveParams,
   runMachine,
-  serializeHistoryProjection,
   serializeInstance,
   serializeNode,
-  serializeProjection,
   serializeStateDescriptor,
   syncMachineRuntime,
   textAssistantMessage,
   textUserMessage,
   ROOT_GENERATOR_ID,
   collectContributors,
-  augmentProjection,
-  defaultProjection,
-  hiddenProjection,
-  replaceProjection,
   type Action,
   type ActorMessage,
   type Charter,
@@ -65,7 +57,19 @@ const executor = {
 };
 
 function textParts(...texts: string[]) {
-  return texts.map((text) => ({ type: "text" as const, text }));
+  return texts.length <= 1
+    ? texts.map((text) => ({ type: "text" as const, text }))
+    : [{ type: "text" as const, text: texts.join("\n\n") }];
+}
+
+// Compiled-region fixtures carry the implicit-layout stamp: preamble parts
+// merge into the stable default "body" slot, recency into volatile "context".
+function preambleParts(...texts: string[]) {
+  return textParts(...texts).map((part) => ({ ...part, slot: "body", volatile: false }));
+}
+
+function recencyParts(...texts: string[]) {
+  return textParts(...texts).map((part) => ({ ...part, slot: "context", volatile: true }));
 }
 
 function charter<TDataContent = never>(
@@ -76,8 +80,19 @@ function charter<TDataContent = never>(
     tools: [],
     commands: [],
     states: [],
-    projections: [],
     ...overrides,
+  });
+}
+
+/** A one-off layout whose only job is to carry a history projection. */
+function historyLayout(historyProjection: Parameters<typeof createLayout>[0]["historyProjection"]) {
+  return createLayout({
+    name: "historyLayout",
+    historyProjection,
+    regions: {
+      preamble: [createSlot("body", { default: true })],
+      recency: [createSlot("context", { default: true, volatile: true })],
+    },
   });
 }
 
@@ -116,7 +131,6 @@ describe("actor message typing", () => {
       tools: [],
       commands: [],
       states: [],
-      projections: [],
     });
 
     expectTypeOf(appCharter).toMatchTypeOf<Charter<AppDataContent>>();
@@ -141,7 +155,6 @@ describe("actor message typing", () => {
       tools: [],
       commands: [],
       states: [],
-      projections: [],
     });
   });
 
@@ -164,25 +177,26 @@ describe("node normalization", () => {
     const member = createNode({ key: "member" });
     const node = createNode({
       key: "root",
-      state,
+      states: [state],
       members: [member],
       runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
 
-    expect(node.projection).toBe(defaultProjection);
+    expect(node.parts).toEqual([]);
     expect(node.runtime).toMatchObject({
       type: "generator",
       concurrency: "serial",
       activationHistory: "live",
-      boundaryProjection: hiddenProjection,
+      boundaryProjection: "hidden",
     });
-    expect(node.state).toMatchObject({
+    expect(node.states).toHaveLength(1);
+    expect(node.states[0]).toMatchObject({
       key: "memory",
       scope: "hoist",
       onInitConflict: "replace",
-      projection: "hidden",
     });
-    expect(node.members).toEqual([member]);
+    expect(node.states[0]?.projection).toBeUndefined();
+    expect(node.memberEntries).toEqual([member]);
   });
 
   it("rejects duplicate member keys", () => {
@@ -227,7 +241,6 @@ describe("params", () => {
       tools: [],
       commands: [],
       states: [],
-      projections: [],
     });
 
     expect(() =>
@@ -243,7 +256,6 @@ describe("params", () => {
         tools: [],
         commands: [],
         states: [],
-        projections: [],
       }),
     ).not.toThrow();
 
@@ -267,7 +279,6 @@ describe("params", () => {
       tools: [],
       commands: [],
       states: [],
-      projections: [],
     });
 
     if (false) {
@@ -286,7 +297,6 @@ describe("params", () => {
         tools: [],
         commands: [],
         states: [],
-        projections: [],
       });
 
       // @ts-expect-error charter params must satisfy member node params
@@ -303,7 +313,6 @@ describe("params", () => {
         tools: [],
         commands: [],
         states: [],
-        projections: [],
       });
     }
   });
@@ -417,18 +426,8 @@ describe("params", () => {
     expect(observed).toEqual({ userId: "user_123" });
   });
 
-  it("provides node-scoped params to projection and history projection contexts", () => {
-    let projectionParams: unknown;
+  it("provides node-scoped params to history projection contexts", () => {
     let historyParams: unknown;
-    const captureParams = createProjectionFunction({
-      name: "captureParams",
-      method: (ctx, draft, source) => {
-        if (ctx.callSite === "node") {
-          projectionParams = ctx.params;
-        }
-        applyStandardProjection(ctx, draft, source);
-      },
-    });
     const captureHistoryParams = createHistoryProjectionFunction({
       name: "captureHistoryParams",
       method: (ctx) => {
@@ -439,11 +438,9 @@ describe("params", () => {
     const generator = createNode({
       key: "generator",
       params: z.object({ tone: z.string() }),
-      projection: captureParams,
       runtime: {
         type: "generator",
         trigger: { type: "parent-completion" },
-        historyProjection: captureHistoryParams,
       },
     });
     const root = createNode({ key: "root", members: [generator] });
@@ -455,10 +452,13 @@ describe("params", () => {
         node: root,
         params: { tone: "wry", audience: "kids" },
       },
-      { targetGeneratorId: "member:r/generator", frameHistory: [] },
+      {
+        targetGeneratorId: "member:r/generator",
+        frameHistory: [],
+        layout: historyLayout(captureHistoryParams),
+      },
     );
 
-    expect(projectionParams).toEqual({ tone: "wry" });
     expect(historyParams).toEqual({ tone: "wry" });
   });
 
@@ -516,8 +516,8 @@ describe("action state requirements", () => {
       },
     });
 
-    const node = createNode({ key: "counter", state: counterState, commands: [setCounter] });
-    expect(node.commandBindings.setCounter).toBe(setCounter);
+    const node = createNode({ key: "counter", states: [counterState], commands: [setCounter] });
+    expect(node.parts).toEqual([{ kind: "action", caller: "external", action: setCounter }]);
   });
 
   it("rejects stateful actions on missing or mismatched owner state", () => {
@@ -542,18 +542,18 @@ describe("action state requirements", () => {
         instance: { id: "r", isSource: true, node: createNode({ key: "missing-state", commands: [setCounter] }) },
         charter: charter(),
       }),
-    ).toThrow(/requires state "counter" but the node has no state/);
+    ).toThrow(/requires state "counter" but the node declares: none/);
 
     expect(() =>
       createMachine({
         instance: {
           id: "r",
           isSource: true,
-          node: createNode({ key: "profile", state: profileState, commands: [setCounter] }),
+          node: createNode({ key: "profile", states: [profileState], commands: [setCounter] }),
         },
         charter: charter(),
       }),
-    ).toThrow(/requires state "counter" but the node owns state "profile"/);
+    ).toThrow(/requires state "counter" but the node declares: "profile"/);
   });
 
   it("rejects matching state keys with different schema objects", () => {
@@ -571,7 +571,7 @@ describe("action state requirements", () => {
       state: actionState,
       name: "readCounter",
     });
-    const node = createNode({ key: "counter", state: ownerState, tools: [readCounter] });
+    const node = createNode({ key: "counter", states: [ownerState], tools: [readCounter] });
 
     expect(() => compileProjection({ id: "r", isSource: true, node })).toThrow(
       /requires a different schema for state "counter"/,
@@ -659,149 +659,7 @@ describe("projection traversal", () => {
 });
 
 describe("projection compilation", () => {
-  it("supports augment, replace, hidden, ordering, dynamic instructions, and tool order", () => {
-    const firstTool: Action = { state: null, name: "dup" };
-    const secondTool: Action = { state: null, name: "dup" };
-    const hidden = createNode({
-      key: "hidden",
-      instructions: "hidden",
-      tools: [{ state: null, name: "hiddenTool" }],
-      projection: hiddenProjection,
-    });
-    const first = createNode({
-      key: "first",
-      instructions: "first",
-      tools: [firstTool],
-    });
-    const replace = createNode({
-      key: "replace",
-      instructions: "replace",
-      tools: [secondTool],
-      projection: createStandardProjectionFunction({
-        name: "replaceDynamicProjection",
-        mode: "replace",
-        instructions: "dynamic",
-      }),
-      members: [hidden, createNode({ key: "replaceChild", instructions: "replace child" })],
-    });
-    const root = createNode({ key: "root", instructions: "root", members: [first, replace] });
-
-    const compiled = compileProjection(
-      { id: "i", isSource: true, node: root },
-      { history: [{ ...textUserMessage("kept") }] },
-    );
-
-    expect(compiled.systemParts).toEqual(textParts("replace child"));
-    expect(compiled.dynamicParts).toEqual(textParts("replace"));
-    expect(compiled.history).toEqual([{ ...textUserMessage("kept") }]);
-    expect(compiled.tools.map((tool) => tool.name)).toEqual(["dup"]);
-  });
-
-  it("lets projection functions mutate the projection draft", () => {
-    let callSite: string | undefined;
-    let generatorId: string | undefined;
-    const hiddenTool: Action = { state: null, name: "hiddenTool" };
-    const projectSensor = createProjectionFunction({
-      name: "projectSensor",
-      method: (ctx, draft, source) => {
-        callSite = ctx.callSite;
-        generatorId = ctx.generatorId;
-        applyStandardProjection(ctx, draft, source, { tools: "hidden" });
-        draft.dynamicParts.push({
-          type: "text",
-          text: "Camera sees: a red marker",
-        });
-      },
-    });
-    const sensor = createNode({
-      key: "sensor",
-      instructions: "base",
-      tools: [hiddenTool],
-      projection: projectSensor,
-    });
-
-    const compiled = compileProjection({ id: "sensor-instance", isSource: true, node: sensor });
-
-    expect(callSite).toBe("node");
-    expect(generatorId).toBe("instance:sensor-instance");
-    expect(compiled.systemParts).toEqual(textParts("base"));
-    expect(compiled.dynamicParts).toEqual(textParts("Camera sees: a red marker"));
-    expect(compiled.tools).toEqual([]);
-  });
-
-  it("passes source.node for node projections and source.ir for boundary projections", () => {
-    const seen: Array<{
-      callSite: string;
-      nodeKey?: string;
-      hasIr: boolean;
-      irText?: string[];
-    }> = [];
-    const captureNodeSource = createProjectionFunction({
-      name: "captureNodeSource",
-      method: (ctx, draft, source) => {
-        seen.push({
-          callSite: ctx.callSite,
-          nodeKey: source.node?.key,
-          hasIr: Boolean(source.ir),
-        });
-        applyStandardProjection(ctx, draft, source);
-      },
-    });
-    const captureBoundarySource = createProjectionFunction({
-      name: "captureBoundarySource",
-      method: (_ctx, draft, source) => {
-        seen.push({
-          callSite: "boundary",
-          nodeKey: source.node?.key,
-          hasIr: Boolean(source.ir),
-          irText: source.ir?.systemParts.flatMap((part) => part.type === "text" ? [part.text] : []),
-        });
-        if (source.ir) {
-          draft.systemParts.push(...source.ir.systemParts);
-        }
-      },
-    });
-    const generator = createNode({
-      key: "generator",
-      instructions: "generator",
-      projection: captureNodeSource,
-      runtime: {
-        type: "generator",
-        trigger: { type: "spawn" },
-        boundaryProjection: captureBoundarySource,
-      },
-    });
-    const root = createNode({ key: "root", members: [generator] });
-
-    compileProjection({ id: "r", isSource: true, node: root });
-
-    expect(seen).toEqual([
-      { callSite: "node", nodeKey: "generator", hasIr: false },
-      { callSite: "boundary", nodeKey: undefined, hasIr: true, irText: ["generator"] },
-    ]);
-  });
-
-  it("rejects object projection policies", () => {
-    expect(() =>
-      createNode({
-        key: "generator",
-        runtime: {
-          type: "generator",
-          trigger: { type: "spawn" },
-          boundaryProjection: { mode: "augment", instructions: "dynamic" } as any,
-        },
-      }),
-    ).toThrow(/projection function or ref/);
-
-    expect(() =>
-      createNode({
-        key: "node",
-        projection: { mode: "replace" } as any,
-      }),
-    ).toThrow(/projection function or ref/);
-  });
-
-  it("hides runtime boundaries by default and exports standard boundaryProjection aggregates as compiled", () => {
+  it("hides runtime boundaries by default and forwards augment boundaries as compiled", () => {
     const inside = createNode({ key: "inside", instructions: "inside" });
     const generator = createNode({
       key: "generator",
@@ -810,7 +668,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: augmentProjection,
+        boundaryProjection: "augment",
       },
     });
     const hiddenWorker = createNode({
@@ -825,9 +683,9 @@ describe("projection compilation", () => {
     });
 
     const parent = compileProjection({ id: "r", isSource: true, node: root });
-    expect(parent.systemParts).toEqual(textParts("root", "generator", "inside"));
-    expect(parent.dynamicParts).toEqual([]);
-    expect(parent.systemParts).not.toContainEqual({ type: "text", text: "hiddenWorker" });
+    expect(parent.preamble).toEqual(preambleParts("root", "generator", "inside"));
+    expect(parent.recency).toEqual([]);
+    expect(parent.preamble.map((part) => (part.type === "text" ? part.text : "")).join("\n")).not.toContain("hiddenWorker");
 
     const own = compileProjection(
       { id: "r", isSource: true, node: root },
@@ -835,22 +693,7 @@ describe("projection compilation", () => {
         targetGeneratorId: "member:r/generator",
       },
     );
-    expect(own.systemParts).toEqual(textParts("generator", "inside"));
-  });
-
-  it("lets boundaryProjection replace clear previous parent sections", () => {
-    const generator = createNode({
-      key: "generator",
-      instructions: "generator",
-      runtime: {
-        type: "generator",
-        trigger: { type: "spawn" },
-        boundaryProjection: replaceProjection,
-      },
-    });
-    const root = createNode({ key: "root", instructions: "root", members: [generator] });
-
-    expect(compileProjection({ id: "r", isSource: true, node: root }).systemParts).toEqual(textParts("generator"));
+    expect(own.preamble).toEqual(preambleParts("generator", "inside"));
   });
 
   it("inspects nested runtime boundaries and their compiled projection payloads", () => {
@@ -862,7 +705,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: augmentProjection,
+        boundaryProjection: "augment",
       },
     });
     const root = createNode({
@@ -877,12 +720,14 @@ describe("projection compilation", () => {
     const generatorProjection = rootProjection?.children[0];
 
     expect(rootProjection?.nodeKey).toBe("root");
-    expect(rootProjection?.compiled.systemParts).toEqual(textParts("root", "generator", "inside"));
-    expect(rootProjection?.compiled.dynamicParts).toEqual([]);
+    expect(rootProjection?.boundaryProjection).toBe("hidden");
+    expect(generatorProjection?.boundaryProjection).toBe("augment");
+    expect(rootProjection?.compiled.preamble).toEqual(preambleParts("root", "generator", "inside"));
+    expect(rootProjection?.compiled.recency).toEqual([]);
     expect(rootProjection?.contributors.map((contributor) => contributor.nodeKey)).toEqual(["root"]);
     expect(generatorProjection?.nodeKey).toBe("generator");
     expect(generatorProjection?.kind).toBe("generator");
-    expect(generatorProjection?.compiled.systemParts).toEqual(textParts("generator", "inside"));
+    expect(generatorProjection?.compiled.preamble).toEqual(preambleParts("generator", "inside"));
     expect(generatorProjection?.contributors.map((contributor) => contributor.nodeKey)).toEqual([
       "generator",
       "inside",
@@ -906,32 +751,8 @@ describe("projection compilation", () => {
     const tree = inspectCompiledProjectionTree({ id: "r", isSource: true, node: root });
 
     expect(tree.roots[0]?.children[0]?.nodeKey).toBe("hiddenWorker");
-    expect(tree.roots[0]?.compiled.systemParts).toEqual(textParts("root"));
-    expect(tree.roots[0]?.compiled.systemParts).not.toContainEqual({ type: "text", text: "hiddenWorker" });
-  });
-
-  it("inspects replace projection output after previous sections are cleared", () => {
-    const generator = createNode({
-      key: "generator",
-      instructions: "generator",
-      runtime: {
-        type: "generator",
-        trigger: { type: "spawn" },
-        boundaryProjection: replaceProjection,
-      },
-    });
-    const root = createNode({
-      key: "root",
-      instructions: "root",
-      members: [generator],
-      runtime: { type: "generator", trigger: { type: "actor-frame" } },
-    });
-
-    const tree = inspectCompiledProjectionTree({ id: "r", isSource: true, node: root });
-
-    expect(tree.roots[0]?.compiled.systemParts).toEqual(textParts("generator"));
-    expect(tree.roots[0]?.projection.own.mode).toBe("augment");
-    expect(tree.roots[0]?.children[0]?.projection.boundary.mode).toBe("replace");
+    expect(tree.roots[0]?.compiled.preamble).toEqual(preambleParts("root"));
+    expect(tree.roots[0]?.compiled.preamble.map((part) => (part.type === "text" ? part.text : "")).join("\n")).not.toContain("hiddenWorker");
   });
 
   it("compiles nested target generators from their own runtime boundary", () => {
@@ -954,38 +775,8 @@ describe("projection compilation", () => {
       { targetGeneratorId: "member:r/generator" },
     );
 
-    expect(compiled.systemParts).toEqual(textParts("generator"));
+    expect(compiled.preamble).toEqual(preambleParts("generator"));
     expect(compiled.tools.map((entry) => entry.name)).toEqual(["save"]);
-  });
-
-  it("preserves the supplied target generator id in projection context", () => {
-    const seenTargets: string[] = [];
-    const captureTarget = createProjectionFunction({
-      name: "captureTarget",
-      method: (ctx, draft, source) => {
-        seenTargets.push(ctx.targetGeneratorId ?? "");
-        applyStandardProjection(ctx, draft, source);
-      },
-    });
-    const generator = createNode({
-      key: "generator",
-      projection: captureTarget,
-      runtime: { type: "generator", trigger: { type: "parent-completion" } },
-    });
-    const root = createNode({
-      key: "root",
-      members: [generator],
-      runtime: { type: "generator", trigger: { type: "actor-frame" } },
-    });
-
-    compileProjection(
-      { id: "r", isSource: true, node: root },
-      {
-        targetGeneratorId: "member:r/generator",
-      },
-    );
-
-    expect(seenTargets).toEqual(["member:r/generator"]);
   });
 
   it("projects fully compiled child generators through their boundaryProjection", () => {
@@ -995,7 +786,7 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "parent-completion" },
-        boundaryProjection: augmentProjection,
+        boundaryProjection: "augment",
       },
     });
     const generator = createNode({
@@ -1005,15 +796,15 @@ describe("projection compilation", () => {
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: augmentProjection,
+        boundaryProjection: "augment",
       },
     });
     const root = createNode({ key: "root", instructions: "root", members: [generator] });
 
     const compiled = compileProjection({ id: "r", isSource: true, node: root });
 
-    expect(compiled.systemParts).toEqual(textParts("root", "generator", "leaf"));
-    expect(compiled.dynamicParts).toEqual([]);
+    expect(compiled.preamble).toEqual(preambleParts("root", "generator", "leaf"));
+    expect(compiled.recency).toEqual([]);
   });
 });
 
@@ -1021,13 +812,13 @@ describe("state resolution and state projection", () => {
   it("initializes local state on the owner and hoist state on a direct root", () => {
     const local = createNode({
       key: "local",
-      state: { key: "local", scope: "local", schema: z.number(), init: 1 },
+      states: [{ key: "local", scope: "local", schema: z.number(), init: 1 }],
     });
     const hoist = createNode({
       key: "hoist",
-      state: { key: "hoist", scope: "hoist", schema: z.number(), init: 2 },
+      states: [{ key: "hoist", scope: "hoist", schema: z.number(), init: 2 }],
     });
-    const root = createNode({ key: "root", members: [local], state: undefined });
+    const root = createNode({ key: "root", members: [local], states: undefined });
     const childRoot = createNode({ key: "childRoot", members: [hoist] });
     const instance: Instance = {
       id: "root",
@@ -1045,7 +836,7 @@ describe("state resolution and state projection", () => {
   it("skips the non-source createRoot wrapper for hoist state ownership", () => {
     const memory = createNode({
       key: "memory",
-      state: { key: "hoist", scope: "hoist", schema: z.number(), init: 2 },
+      states: [{ key: "hoist", scope: "hoist", schema: z.number(), init: 2 }],
     });
     const app = createNode({ key: "app", members: [memory] });
     const root = createRootInstance([{ id: "app", isSource: true, node: app }]);
@@ -1056,56 +847,56 @@ describe("state resolution and state projection", () => {
     expect(root.children?.[0]?.states?.hoist?.value).toBe(2);
   });
 
-  it("shares compatible state keys and applies latest projection policy", () => {
+  it("shares compatible state keys and applies latest projection config", () => {
     const stateA = {
       key: "shared",
       schema: z.object({ value: z.number() }),
       init: { value: 1 },
-      projection: "system" as const,
+      projection: {},
     };
     const stateB = {
       key: "shared",
       schema: z.object({ value: z.number() }),
       init: { value: 1 },
-      projection: "dynamic" as const,
+      projection: { slot: recencyRegion },
     };
-    const a = createNode({ key: "a", state: stateA });
-    const b = createNode({ key: "b", state: stateB });
+    const a = createNode({ key: "a", states: [stateA] });
+    const b = createNode({ key: "b", states: [stateB] });
     const root = createNode({ key: "root", members: [a, b] });
     const instance: Instance = { id: "r", isSource: true, node: root };
 
     const states = resolveStates(instance);
     expect(states).toHaveLength(1);
-    expect(states[0]?.descriptor.projection).toBe("dynamic");
-    expect(compileProjection(instance).dynamicParts).toEqual(textParts('State `shared`: {"value":1}'));
+    expect(states[0]?.descriptor.projection).toBe(stateB.projection);
+    expect(compileProjection(instance).recency).toEqual(recencyParts('State `shared`: {"value":1}'));
   });
 
   it("detects incompatible descriptors and init conflicts", () => {
     const local = createNode({
       key: "local",
-      state: { key: "x", scope: "local", schema: z.number(), init: 1 },
+      states: [{ key: "x", scope: "local", schema: z.number(), init: 1 }],
     });
     const hoist = createNode({
       key: "hoist",
-      state: { key: "x", scope: "hoist", schema: z.number(), init: 1 },
+      states: [{ key: "x", scope: "hoist", schema: z.number(), init: 1 }],
     });
     expect(() => resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [local, hoist] }) }))
       .toThrow(/scopes differ/);
 
     const number = createNode({
       key: "number",
-      state: { key: "x", schema: z.number(), init: 1 },
+      states: [{ key: "x", schema: z.number(), init: 1 }],
     });
     const string = createNode({
       key: "string",
-      state: { key: "x", schema: z.string(), init: "1" },
+      states: [{ key: "x", schema: z.string(), init: "1" }],
     });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [number, string] }) }),
     ).toThrow(/Conflicting init|schema validation/);
 
-    const one = createNode({ key: "one", state: { key: "x", schema: z.number(), init: 1 } });
-    const two = createNode({ key: "two", state: { key: "x", schema: z.number(), init: 2 } });
+    const one = createNode({ key: "one", states: [{ key: "x", schema: z.number(), init: 1 }] });
+    const two = createNode({ key: "two", states: [{ key: "x", schema: z.number(), init: 2 }] });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [one, two] }) }),
     ).toThrow(/Conflicting init/);
@@ -1115,23 +906,23 @@ describe("state resolution and state projection", () => {
     const init = () => 1;
     const jsonA = createNode({
       key: "jsonA",
-      state: { key: "x", schema: z.object({ a: z.number(), b: z.number() }), init: { a: 1, b: 2 } },
+      states: [{ key: "x", schema: z.object({ a: z.number(), b: z.number() }), init: { a: 1, b: 2 } }],
     });
     const jsonB = createNode({
       key: "jsonB",
-      state: { key: "x", schema: z.object({ a: z.number(), b: z.number() }), init: { b: 2, a: 1 } },
+      states: [{ key: "x", schema: z.object({ a: z.number(), b: z.number() }), init: { b: 2, a: 1 } }],
     });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [jsonA, jsonB] }) }),
     ).not.toThrow();
 
-    const fnA = createNode({ key: "fnA", state: { key: "x", schema: z.number(), init } });
-    const fnB = createNode({ key: "fnB", state: { key: "x", schema: z.number(), init } });
+    const fnA = createNode({ key: "fnA", states: [{ key: "x", schema: z.number(), init }] });
+    const fnB = createNode({ key: "fnB", states: [{ key: "x", schema: z.number(), init }] });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [fnA, fnB] }) }),
     ).not.toThrow();
 
-    const fnC = createNode({ key: "fnC", state: { key: "x", schema: z.number(), init: () => 1 } });
+    const fnC = createNode({ key: "fnC", states: [{ key: "x", schema: z.number(), init: () => 1 }] });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: createNode({ key: "root", members: [fnA, fnC] }) }),
     ).toThrow(/Conflicting init/);
@@ -1140,7 +931,7 @@ describe("state resolution and state projection", () => {
   it("replaces or rejects invalid existing state according to the strictest policy", () => {
     const replacing = createNode({
       key: "replace",
-      state: { key: "x", schema: z.number(), init: 1, onInitConflict: "replace" },
+      states: [{ key: "x", schema: z.number(), init: 1, onInitConflict: "replace" }],
     });
     const replaceInstance: Instance = {
       id: "r",
@@ -1153,7 +944,7 @@ describe("state resolution and state projection", () => {
 
     const erroring = createNode({
       key: "error",
-      state: { key: "x", schema: z.number(), init: 1, onInitConflict: "error" },
+      states: [{ key: "x", schema: z.number(), init: 1, onInitConflict: "error" }],
     });
     expect(() =>
       resolveStates({ id: "r", isSource: true, node: erroring, states: { x: { value: "bad" } } }),
@@ -1166,7 +957,7 @@ describe("retrieval aliases", () => {
     const state = (key: string) =>
       createNode({
         key: `${key}Node`,
-        state: { key, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
+        states: [{ key, schema: z.number(), init: 1, projection: { exposure: "deferred" }, scope: "local" }],
       });
     const root = createRootInstance([
       { id: "a", isSource: true, node: state("shared") },
@@ -1187,7 +978,7 @@ describe("retrieval aliases", () => {
     const state = (nodeKey: string, stateKey: string) =>
       createNode({
         key: nodeKey,
-        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
+        states: [{ key: stateKey, schema: z.number(), init: 1, projection: { exposure: "deferred" }, scope: "local" }],
       });
     const unique = compileProjection({ id: "one", isSource: true, node: state("one", "memory") });
     const duplicate = compileProjection(
@@ -1208,7 +999,7 @@ describe("retrieval aliases", () => {
     const retrieval = (nodeKey: string, stateKey: string) =>
       createNode({
         key: nodeKey,
-        state: { key: stateKey, schema: z.number(), init: 1, projection: "retrieval", scope: "local" },
+        states: [{ key: stateKey, schema: z.number(), init: 1, projection: { exposure: "deferred" }, scope: "local" }],
       });
 
     expect(() => retrieval("collision", "a:x")).toThrow(/cannot contain/);
@@ -1219,64 +1010,39 @@ describe("retrieval aliases", () => {
     const root = createNode({
       key: "root",
       tools: [{ state: null, name: "getState" }],
-      state: { key: "memory", schema: z.number(), init: 1, projection: "retrieval" },
+      states: [{ key: "memory", schema: z.number(), init: 1, projection: { exposure: "deferred" } }],
     });
 
     expect(() => compileProjection({ id: "r", isSource: true, node: root })).toThrow(/reserved for state retrieval/);
   });
 
-  it("omits retrieval aliases and notes when tools are hidden", () => {
-    const retriever = createNode({
-      key: "retriever",
-      state: { key: "secret", schema: z.number(), init: 1, projection: "retrieval" },
-      projection: createStandardProjectionFunction({
-        name: "hideRetrieverTools",
-        tools: "hidden",
-      }),
-    });
-
-    const compiled = compileProjection({ id: "r", isSource: true, node: retriever });
-    expect(compiled.retrievableStates).toEqual([]);
-    expect(compiled.systemParts).toEqual([]);
-
-    const omitRetrievalBoundary = createProjectionFunction({
-      name: "omitRetrievalBoundary",
-      method: (_ctx, draft, source) => {
-        const promptParts = [
-          ...(source.ir?.systemParts ?? []),
-          ...(source.ir?.dynamicParts ?? []),
-        ].filter(
-          (part) => !(part.type === "state" && part.section === "retrieval"),
-        );
-        draft.systemParts.push(...promptParts);
-      },
-    });
+  it("keeps retrieval aliases behind hidden boundaries", () => {
     const boundary = createNode({
       key: "boundary",
-      state: { key: "hidden", schema: z.number(), init: 2, projection: "retrieval", scope: "local" },
+      states: [{ key: "hidden", schema: z.number(), init: 2, projection: { exposure: "deferred" as const }, scope: "local" }],
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection: omitRetrievalBoundary,
       },
     });
     const root = createNode({ key: "root", members: [boundary] });
 
     const parentCompiled = compileProjection({ id: "parent", isSource: true, node: root });
     expect(parentCompiled.retrievableStates).toEqual([]);
-    expect(parentCompiled.systemParts).toEqual([]);
+    expect(parentCompiled.preamble).toEqual([]);
+    expect(parentCompiled.tools).toEqual([]);
   });
 
   it("projects hoist-scoped generator member state from the owner while hiding generator tools", () => {
     const generatorTool = createAction({ state: null, name: "generatorTool" });
     const generator = createNode({
       key: "generator",
-      state: {
+      states: [{
         key: "memories",
         schema: z.array(z.object({ text: z.string() })),
         init: [],
-        projection: "dynamic",
-      },
+        projection: { slot: recencyRegion },
+      }],
       tools: [generatorTool],
       runtime: {
         type: "generator",
@@ -1294,7 +1060,7 @@ describe("retrieval aliases", () => {
       { targetGeneratorId: "instance:r" },
     );
 
-    expect(compiled.dynamicParts).toContainEqual({ type: "text", text: "State `memories`: []" });
+    expect(compiled.recency).toContainEqual({ type: "text", text: "State `memories`: []", slot: "context", volatile: true });
     expect(compiled.tools).toEqual([]);
   });
 });
@@ -1338,7 +1104,7 @@ describe("history projection", () => {
     ]);
   });
 
-  it("lets runtime history projection return synthetic messages from frames and state", () => {
+  it("lets layout history projection return synthetic messages from frames and state", () => {
     const projection = createHistoryProjectionFunction({
       name: "syntheticHistory",
       method: (ctx) => {
@@ -1352,15 +1118,14 @@ describe("history projection", () => {
     });
     const generator = createNode({
       key: "generator",
-      state: {
+      states: [{
         key: "memory",
         schema: z.object({ memories: z.array(z.string()) }),
         init: { memories: ["existing"] },
-      },
+      }],
       runtime: {
         type: "generator",
         trigger: { type: "parent-completion" },
-        historyProjection: projection,
       },
     });
     const root = createNode({ key: "root", members: [generator] });
@@ -1369,6 +1134,7 @@ describe("history projection", () => {
     const compiled = compileProjection(instance, {
       targetGeneratorId: "member:r/generator",
       frameHistory: [frame("one", [{ ...textUserMessage("remember tea") }])],
+      layout: historyLayout(projection),
     });
 
     expect(compiled.history).toEqual([
@@ -1389,11 +1155,10 @@ describe("history projection", () => {
     });
     const node = createNode({
       key: "agent",
-      state: { key: "shared", schema: z.number(), init: 1, scope: "local" },
+      states: [{ key: "shared", schema: z.number(), init: 1, scope: "local" }],
       runtime: {
         type: "generator",
         trigger: { type: "actor-frame" },
-        historyProjection: projection,
       },
     });
 
@@ -1405,6 +1170,7 @@ describe("history projection", () => {
       {
         targetGeneratorId: "instance:a",
         frameHistory: [],
+        layout: historyLayout(projection),
       },
     );
 
@@ -1442,27 +1208,29 @@ describe("history projection", () => {
     ]);
   });
 
-  it("serializes registered history projection functions by ref", () => {
+  it("resolves layout history projection refs through the charter registry", () => {
     const historyProjection = createHistoryProjectionFunction({
       name: "memory",
-      method: () => [],
+      method: () => [textUserMessage("from-registry")],
     });
-    const registry = charter({ historyProjections: [historyProjection] });
+    const generator = createNode({
+      key: "generator",
+      runtime: { type: "generator", trigger: { type: "parent-completion" } },
+    });
+    const root = createNode({ key: "root", members: [generator] });
+    const registry = charter({ nodes: [root], historyProjections: [historyProjection] });
 
-    expect(serializeHistoryProjection({ type: "messages" }, registry)).toEqual({ type: "messages" });
-    expect(hydrateHistoryProjection({ type: "messages" }, registry)).toEqual({ type: "messages" });
-    expect(serializeHistoryProjection({ type: "actor" }, registry)).toEqual({ type: "actor" });
-    expect(hydrateHistoryProjection({ type: "actor" }, registry)).toEqual({ type: "actor" });
-    expect(serializeHistoryProjection(historyProjection, registry)).toBe("memory");
-    expect(hydrateHistoryProjection("memory", registry)).toBe(historyProjection);
-    expect(() =>
-      serializeHistoryProjection(
-        createHistoryProjectionFunction({ name: "missing", method: () => [] }),
-        registry,
-      )
-    ).toThrow(
-      /unregistered history projection/,
+    const compiled = compileProjection(
+      { id: "r", isSource: true, node: root },
+      {
+        charter: registry,
+        targetGeneratorId: "member:r/generator",
+        frameHistory: [frame("one", [{ ...textUserMessage("ignored") }])],
+        layout: historyLayout("memory"),
+      },
     );
+
+    expect(compiled.history).toEqual([textUserMessage("from-registry")]);
   });
 
   it("filters durable history by audience, delivery, and snapshot activation policy", () => {
@@ -1548,7 +1316,7 @@ describe("commands and instance mutations", () => {
     });
     const controls = createNode({
       key: "controls",
-      state: counterState,
+      states: [counterState],
       commands: [setCounter],
     });
     const root = createNode({ key: "root", members: [controls] });
@@ -1612,7 +1380,7 @@ describe("commands and instance mutations", () => {
       isSource: true,
       node: createNode({
         key: "root",
-        state: counterState,
+        states: [counterState],
         commands: [announceCounter],
       }),
     };
@@ -1663,7 +1431,7 @@ describe("commands and instance mutations", () => {
       isSource: true,
       node: createNode({
         key: "logger",
-        state: logState,
+        states: [logState],
         commands: [appendLog],
       }),
     };
@@ -1765,7 +1533,7 @@ describe("commands and instance mutations", () => {
       isSource: true,
       node: createNode({
         key: "root",
-        state: counterState,
+        states: [counterState],
         commands: [increment],
       }),
     };
@@ -1809,11 +1577,11 @@ describe("commands and instance mutations", () => {
   it("folds spawn messages and derives spawn-triggered runtime work", async () => {
     const generator = createNode({
       key: "generator",
-      state: {
+      states: [{
         key: "spawned",
         schema: z.object({ ready: z.boolean() }),
         init: { ready: false },
-      },
+      }],
       runtime: { type: "generator", trigger: { type: "spawn" } },
     });
     const root = createNode({ key: "root" });
@@ -2044,11 +1812,13 @@ describe("commands and instance mutations", () => {
       ],
     });
 
-    expect(instance.children?.[0]?.node.toolRefs).toEqual(["search"]);
+    expect(instance.children?.[0]?.node.parts).toEqual([
+      { kind: "action", caller: "generator", action: search },
+    ]);
     expect(machine.frames[0]?.messages[0]).toMatchObject({
       type: "instance",
       kind: "spawn",
-      children: [{ node: { tools: ["search"] } }],
+      children: [{ node: { parts: [{ kind: "action", caller: "generator", ref: "search" }] } }],
     });
   });
 
@@ -2066,13 +1836,12 @@ describe("commands and instance mutations", () => {
     expect(serialized).toMatchObject({
       key: "inline",
       sourceNodeKey: "source",
-      tools: ["search"],
+      parts: [{ kind: "action", caller: "generator", ref: "search" }],
     });
     const hydrated = hydrateNode(serialized, registry);
     const compiled = compileProjection({ id: "i", isSource: true, node: hydrated }, { charter: registry });
     expect(compiled.tools.map((tool) => tool.description)).toEqual(["source"]);
-    expect(hydrated.toolBindings.search).toBe(search);
-    expect(hydrated.toolRefs).toEqual(["search"]);
+    expect(hydrated.parts).toEqual([{ kind: "action", caller: "generator", action: search }]);
   });
 });
 
@@ -2609,11 +2378,11 @@ describe("work scheduling", () => {
   it("ingests inert frames without enqueue notifications or pending yields", async () => {
     const root = createNode({
       key: "root",
-      state: {
+      states: [{
         key: "counter",
         schema: z.object({ count: z.number() }),
         init: { count: 0 },
-      },
+      }],
       runtime: { type: "generator", trigger: { type: "actor-frame" } },
     });
     const machine = createMachine({
@@ -2661,12 +2430,12 @@ describe("work scheduling", () => {
       isSource: true,
       node: createNode({
         key: "root",
-        state: counterState,
+        states: [counterState],
         tools: [updateCounter],
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: augmentProjection,
+          boundaryProjection: "augment",
         },
       }),
     };
@@ -2724,7 +2493,7 @@ describe("work scheduling", () => {
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: augmentProjection,
+          boundaryProjection: "augment",
         },
       }),
     };
@@ -2771,7 +2540,7 @@ describe("work scheduling", () => {
       key: "memory",
       schema: z.object({ text: z.string() }),
       init: { text: "hello" },
-      projection: "retrieval" as const,
+      projection: { exposure: "deferred" } as const,
       scope: "local" as const,
     };
     const child = createNode({ key: "child" });
@@ -2780,11 +2549,11 @@ describe("work scheduling", () => {
       isSource: true,
       node: createNode({
         key: "root",
-        state,
+        states: [state],
         runtime: {
           type: "generator",
           trigger: { type: "actor-frame" },
-          boundaryProjection: augmentProjection,
+          boundaryProjection: "augment",
         },
       }),
     };
@@ -2923,25 +2692,6 @@ describe("work scheduling", () => {
 });
 
 describe("serialization and refs", () => {
-  it("serializes registered projection functions by name and rejects unregistered functions", () => {
-    const projection = createProjectionFunction({
-      name: "summary",
-      method: () => {},
-    });
-    const registry = charter({ projections: [projection] });
-
-    expect(serializeProjection(projection, registry)).toBe("summary");
-    expect(hydrateProjection("summary", registry)).toBe(projection);
-    expect(() =>
-      serializeProjection(
-        createProjectionFunction({ name: "missing", method: () => {} }),
-        registry,
-      ),
-    ).toThrow(
-      /unregistered projection function "missing"/,
-    );
-  });
-
   it("serializes default projections by omission", () => {
     const node = createNode({
       key: "generator",
@@ -2961,40 +2711,25 @@ describe("serialization and refs", () => {
         trigger: { type: "spawn" },
       },
     });
-    expect(serialized.projection).toBeUndefined();
     expect(serialized.runtime?.type === "generator" ? serialized.runtime.boundaryProjection : undefined).toBeUndefined();
   });
 
-  it("serializes projection refs from source node slots", () => {
-    const nodeProjection = createProjectionFunction({
-      name: "sourceNodeProjection",
-      method: (ctx, draft, source) => applyStandardProjection(ctx, draft, source),
-    });
-    const boundaryProjection = createProjectionFunction({
-      name: "sourceBoundaryProjection",
-      method: (_ctx, draft, source) => {
-        if (source.ir) {
-          draft.systemParts.push(...source.ir.systemParts);
-        }
-      },
-    });
+  it("round-trips an augment boundary projection literal", () => {
     const source = createNode({
       key: "source",
-      projection: nodeProjection,
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection,
+        boundaryProjection: "augment",
       },
     });
     const derived = createNode({
       key: "source",
       sourceNodeKey: "source",
-      projection: nodeProjection,
       runtime: {
         type: "generator",
         trigger: { type: "spawn" },
-        boundaryProjection,
+        boundaryProjection: "augment",
       },
     });
     const registry = charter({ nodes: [source] });
@@ -3006,34 +2741,11 @@ describe("serialization and refs", () => {
     if (typeof serialized === "string") {
       throw new Error("Expected inline serialized node");
     }
-    expect(serialized.projection).toBe("sourceNodeProjection");
     expect(serialized.runtime?.type === "generator" ? serialized.runtime.boundaryProjection : undefined).toBe(
-      "sourceBoundaryProjection",
+      "augment",
     );
-    expect(hydrated.projection).toBe(nodeProjection);
     expect(hydrated.runtime.type === "generator" ? hydrated.runtime.boundaryProjection : undefined).toBe(
-      boundaryProjection,
-    );
-  });
-
-  it("rejects duplicate projection function names", () => {
-    const method = () => {};
-    const projection = createProjectionFunction({ name: "same", method });
-    expect(charter({ projections: [projection, projection] }).projections.same).toBe(projection);
-
-    expect(() =>
-      charter({
-        projections: [
-          createProjectionFunction({ name: "duplicate", method: () => {} }),
-          createProjectionFunction({ name: "duplicate", method: () => {} }),
-        ],
-      }),
-    ).toThrow(/Duplicate projection function "duplicate" with different methods/);
-  });
-
-  it("requires standard projection function names", () => {
-    expect(() => createStandardProjectionFunction({ mode: "replace" } as any)).toThrow(
-      /Projection function name must be non-empty/,
+      "augment",
     );
   });
 
@@ -3043,7 +2755,6 @@ describe("serialization and refs", () => {
     const registry = charter({ nodes: [node], tools: [tool] });
 
     expect(hydrateNode("agent", registry)).toBe(node);
-    expect(() => hydrateProjection("search", registry)).toThrow(/Unknown projection ref/);
     expect(() => hydrateNode("missing", registry)).toThrow(/Unknown node ref/);
   });
 
@@ -3057,43 +2768,47 @@ describe("serialization and refs", () => {
       {
         key: "inline",
         sourceNodeKey: "source",
-        tools: ["search"],
-        commands: ["approve"],
+        parts: [
+          { kind: "action", caller: "generator", ref: "search" },
+          { kind: "action", caller: "external", ref: "approve" },
+        ],
       },
       registry,
     );
 
-    expect(hydrated.toolBindings.search).toBe(search);
-    expect(hydrated.commandBindings.approve).toBe(approve);
+    expect(hydrated.parts).toEqual([
+      { kind: "action", caller: "generator", action: search },
+      { kind: "action", caller: "external", action: approve },
+    ]);
     expect(() =>
-      hydrateNode({ key: "missingTool", tools: ["missing"] }, registry),
-    ).toThrow(/Unknown tool ref "missing"/);
+      hydrateNode({ key: "missingTool", parts: [{ kind: "action", caller: "generator", ref: "missing" }] }, registry),
+    ).toThrow(/Unknown action ref "missing" for node hydration/);
     expect(() =>
-      hydrateNode({ key: "missingCommand", commands: ["missing"] }, registry),
-    ).toThrow(/Unknown command ref "missing"/);
+      hydrateNode({ key: "missingCommand", parts: [{ kind: "action", caller: "external", ref: "missing" }] }, registry),
+    ).toThrow(/Unknown action ref "missing" for node hydration/);
   });
 
   it("rejects duplicate charter action refs", () => {
     const first: Action = { state: null, name: "search", description: "first" };
     const second: Action = { state: null, name: "search", description: "second" };
 
-    expect(() => charter({ tools: [first, second] })).toThrow(
-      /Duplicate tool ref "search"/,
+    expect(() => charter({ tools: [first], commands: [second] })).toThrow(
+      /Duplicate action ref "search"/,
     );
   });
 
   it("serializes registered states by ref, inline states by schema, and keeps members out of durable children", () => {
     const registeredState = createNode({
       key: "registeredState",
-      state: { key: "thread", schema: z.object({ title: z.string() }), init: { title: "x" } },
-    }).state!;
+      states: [{ key: "thread", schema: z.object({ title: z.string() }), init: { title: "x" } }],
+    }).states[0]!;
     const member = createNode({ key: "member" });
     const inline = createNode({
       key: "inline",
       members: [member],
-      state: { key: "count", schema: z.number(), init: 1 },
+      states: [{ key: "count", schema: z.number(), init: 1 }],
     });
-    const registered = createNode({ key: "registered", state: registeredState });
+    const registered = createNode({ key: "registered", states: [registeredState] });
     const registry = charter({ states: [registeredState], nodes: [registered] });
 
     expect(serializeStateDescriptor(registeredState, registry)).toBe("thread");
@@ -3103,10 +2818,10 @@ describe("serialization and refs", () => {
     if (typeof serializedInline.node !== "string") {
       expect(serializedInline.children).toBeUndefined();
       expect(serializedInline.node.members?.map((item) =>
-        typeof item === "string" ? item : item.key
+        typeof item === "string" ? item : "key" in item ? item.key : undefined
       )).toEqual(["member"]);
-      expect(serializedInline.node.state).toMatchObject({ key: "count" });
-      const hydratedState = hydrateStateDescriptor(serializedInline.node.state!, registry);
+      expect(serializedInline.node.states?.[0]).toMatchObject({ key: "count" });
+      const hydratedState = hydrateStateDescriptor(serializedInline.node.states![0]!, registry);
       expect(hydratedState.schema.parse(3)).toBe(3);
     }
 
@@ -3114,7 +2829,7 @@ describe("serialization and refs", () => {
     expect(serializedRegistered.node).toBe("registered");
 
     const hydratedInline = hydrateInstance(serializedInline, registry);
-    expect(hydratedInline.node.state?.schema.parse(4)).toBe(4);
+    expect(hydratedInline.node.states[0]?.schema.parse(4)).toBe(4);
   });
 
   it("serializes inline output schema and rejects inline output mappers", () => {

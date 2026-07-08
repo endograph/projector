@@ -1,47 +1,54 @@
 import type { z } from "zod";
 import type { AnyParamsSchema, JsonObject } from "./params.ts";
 
-export type ProjectionMode = "hidden" | "augment" | "replace";
+export type Ref = string;
 
-export type StandardProjectionConfig = {
-  mode?: ProjectionMode;
-  instructions?: "system" | "dynamic" | "hidden";
-  tools?: "provider-static" | "hidden";
+/**
+ * Compile-internal placement tags carried by projection parts. Assigned when
+ * a node's parts render into the draft; consumed by the layout render in
+ * finalizeSections, which re-stamps compiled output parts with their resolved
+ * slot identity and volatility (`CompiledPart`). `partDepth` never leaves
+ * compile.
+ */
+export type PartPlacement = {
+  /** Slot name this part is addressed to; absent = the region's default slot. */
+  slot?: string;
+  /** Region this part is addressed to (region-addressed parts carry no slot). */
+  region?: LayoutRegionName;
+  /** Contributor depth (ancestor count) for deterministic LWW ordering. */
+  partDepth?: number;
 };
 
-export type ResolvedStandardProjectionConfig = Required<StandardProjectionConfig>;
-
-export type Ref = string;
-export type ProjectionFunctionRef = Ref;
-export type StateDescriptorRef = Ref;
-
-export type TextContentPart = { type: "text"; text: string };
+export type TextContentPart = { type: "text"; text: string } & PartPlacement;
 
 export type ImageContentPart = {
   type: "image";
   data: string | Uint8Array | ArrayBuffer | URL;
   mediaType: string;
   label?: string;
-};
+} & PartPlacement;
 
 export type DataContentPart<TDataContent = never> = {
   type: "data";
   data: TDataContent;
   label?: string;
-};
+} & PartPlacement;
 
 export type ContentPart<TDataContent = never> =
   | TextContentPart
   | ImageContentPart
   | DataContentPart<TDataContent>;
 
-export type ProjectionTextPart = TextContentPart;
-export type ProjectionImagePart = ImageContentPart;
-export type ProjectionDataPart<TDataContent = never> = DataContentPart<TDataContent>;
-
 export type ProjectionStatePart = {
   type: "state";
-  section: "system" | "dynamic" | "retrieval";
+  /** Slot the rendered value addresses; absent = region default. */
+  slot?: string;
+  /** Region the rendered value addresses (region-addressed projections carry no slot). */
+  region?: LayoutRegionName;
+  /** Absent = native. Deferred renders an availability note + getState access. */
+  exposure?: Exposure;
+  render?: (value: unknown) => string;
+  note?: (address: string) => string;
   stateKey: string;
   target: StateAddress;
   value: unknown;
@@ -52,54 +59,19 @@ export type ProjectionPart<TDataContent = never> =
   | ProjectionStatePart;
 
 export type ProjectionIR<TDataContent = never> = {
-  systemParts: ProjectionPart<TDataContent>[];
-  dynamicParts: ProjectionPart<TDataContent>[];
+  preamble: ProjectionPart<TDataContent>[];
+  recency: ProjectionPart<TDataContent>[];
   tools: AnyAction[];
   states: ProjectionStatePart[];
 };
 
-export type ReadonlyProjectionIR<TDataContent = never> = {
-  readonly systemParts: readonly ProjectionPart<TDataContent>[];
-  readonly dynamicParts: readonly ProjectionPart<TDataContent>[];
-  readonly tools: readonly AnyAction[];
-  readonly states: readonly ProjectionStatePart[];
-};
-
-export type ProjectionSource<TDataContent = never> = {
-  readonly node?: Node<TDataContent>;
-  readonly ir?: ReadonlyProjectionIR<TDataContent>;
-};
-
-export type ProjectionCallSite = "node" | "boundary";
-
-export type ProjectionContext<TDataContent = never> = {
-  callSite: ProjectionCallSite;
-  generatorId: GeneratorId;
-  address: ProjectionAddress;
-  targetGeneratorId?: GeneratorId;
-  originNode: Node<TDataContent>;
-  params: JsonObject;
-  createNodeIR(): ProjectionIR<TDataContent>;
-};
-
-export type ProjectionFunctionMethod<TDataContent = never> = {
-  bivarianceHack(
-    ctx: ProjectionContext<TDataContent>,
-    draft: ProjectionIR<TDataContent>,
-    source: ProjectionSource<TDataContent>,
-  ): void;
-}["bivarianceHack"];
-
-export type ProjectionFunction<TDataContent = never> = {
-  kind: "projection";
-  name: string;
-  standard?: ResolvedStandardProjectionConfig;
-  method: ProjectionFunctionMethod<TDataContent>;
-};
-
-export type Projection<TDataContent = never> =
-  | ProjectionFunctionRef
-  | ProjectionFunction<TDataContent>;
+/**
+ * How a child generator's compiled surface crosses its boundary into an
+ * ancestor's document. `hidden` (default): nothing crosses — the child is a
+ * private sub-machine. `augment`: every part the child compiles (content,
+ * tools, state projections) forwards to the parent document as-is.
+ */
+export type BoundaryProjection = "hidden" | "augment";
 
 export type HistoryProjectionFunctionRef = Ref;
 
@@ -186,49 +158,60 @@ export type RuntimeTrigger =
 export type RuntimeConcurrency = "serial" | "parallel";
 export type ActivationHistory = "live" | "snapshot";
 
-export type TriggeredRuntimeOptions<TDataContent = never> = {
+export type TriggeredRuntimeOptions = {
   trigger: RuntimeTrigger;
   concurrency?: RuntimeConcurrency;
   activationHistory?: ActivationHistory;
-  historyProjection?: HistoryProjection<TDataContent>;
-  boundaryProjection?: Projection<TDataContent>;
+  boundaryProjection?: BoundaryProjection;
   outputAudienceDefault?: "self" | "broadcast";
 };
 
 export type ComponentRuntime = { type: "component" };
-export type GeneratorRuntime<TDataContent = never> = {
+export type GeneratorRuntime = {
   type: "generator";
-  boundaryProjection: Projection<TDataContent>;
-} & TriggeredRuntimeOptions<TDataContent>;
+  boundaryProjection: BoundaryProjection;
+} & TriggeredRuntimeOptions;
 
-export type Runtime<TDataContent = never> =
+export type Runtime =
   | { type?: "component" }
   | ({
       type?: "generator";
-    } & TriggeredRuntimeOptions<TDataContent>);
+    } & TriggeredRuntimeOptions);
 
-export type NormalizedRuntime<TDataContent = never> =
+export type NormalizedRuntime =
   | ComponentRuntime
-  | GeneratorRuntime<TDataContent>;
-
-type DryTriggeredRuntimeOptions = Omit<
-  TriggeredRuntimeOptions,
-  "boundaryProjection" | "historyProjection"
-> & {
-  historyProjection?: DryHistoryProjection;
-};
-
-export type DryHistoryProjection = ActorHistoryProjection | MessageHistoryProjection | Ref;
+  | GeneratorRuntime;
 
 export type DryRuntime =
   | { type?: "component" }
-  | ({
-      type: "generator";
-      boundaryProjection?: Ref;
-      outputAudienceDefault?: "self" | "broadcast";
-    } & DryTriggeredRuntimeOptions);
+  | ({ type: "generator" } & TriggeredRuntimeOptions);
 
-export type StateProjection = "system" | "dynamic" | "retrieval" | "hidden";
+/**
+ * How the generator encounters a projected thing. `native`: fully present on
+ * the surface. `deferred`: discoverable/loadable on demand — state defers via
+ * the reserved getState tool; tools defer via the executor's provider-
+ * idiomatic tool-search lowering. An executor with no lowering for its model
+ * errors rather than degrades: the compiled availability note promises tool
+ * search, so a surface that cannot honor it must not run.
+ */
+export type Exposure = "native" | "deferred";
+
+/**
+ * How (and whether) a state's value participates in the projection. Absent =
+ * hidden (declaration/binding only). One declaration carries both the state
+ * and its projection config — no separate registration. Distinct from
+ * `Projection` (a whole-surface projection function): this is per-state
+ * declaration-side config the compile consumes.
+ */
+export type StateProjection = {
+  /** Slot the rendered value (or deferred-availability note) addresses; absent = region default (preamble). */
+  slot?: SlotAddress;
+  exposure?: Exposure;
+  /** Custom value rendering (native exposure). Code — registered descriptors only; never serializes. */
+  render?: (value: unknown) => string;
+  /** Custom deferred-availability note, given the getState address. Code — registered descriptors only. */
+  note?: (address: string) => string;
+};
 
 export type StateDescriptor<S = unknown> = {
   key: string;
@@ -242,7 +225,6 @@ export type StateDescriptor<S = unknown> = {
 export type NormalizedStateDescriptor<S = unknown> = StateDescriptor<S> & {
   scope: "hoist" | "local";
   onInitConflict: "error" | "replace";
-  projection: StateProjection;
 };
 
 export type StateContainer<S = unknown> = {
@@ -300,16 +282,19 @@ export type ActionInstanceContext<TDataContent = never> = {
   generatorId: GeneratorId;
   address: ProjectionAddress;
   ownerInstanceId: InstanceId;
+  // Tree operations accept Node<any>: action contexts cannot thread the
+  // charter's TDataContent, and data-content variance is irrelevant to
+  // instance surgery (spawned nodes serialize into instance messages).
   spawn(
-    node: Node<TDataContent>,
+    node: Node<any>,
     options?: {
       states?: Record<StateKey, unknown>;
       children?: SpawnChild<TDataContent>[];
     },
   ): void;
-  cede(node?: Node<TDataContent>): void;
+  cede(node?: Node<any>): void;
   transition(
-    node: Node<TDataContent>,
+    node: Node<any>,
     options?: { states?: Record<StateKey, unknown> },
   ): void;
 };
@@ -353,19 +338,177 @@ export type ActionRef = string;
 export type ActionConfigEntry = AnyAction | ActionRef;
 export type ActionBindings = Record<string, AnyAction>;
 
+/**
+ * Who operates an action. `generator` actions compile into the inference tool
+ * surface; `external` actions are dispatched by hosts/clients via
+ * executeCommand and surface in client snapshots; `any` is both. Enforcement
+ * for the generator is capability-by-construction (presence on the compiled
+ * surface is the grant); for external callers the transport authenticates —
+ * this field declares intent there, it is not an ACL.
+ */
+export type ActionCaller = "generator" | "external" | "any";
+
+// --- Parts: a node's configuration as an ordered list of typed, addressed
+// contributions. `instructions`/`tools`/`commands` on NodeConfig are authoring
+// sugar that desugars into parts at createNode. Contributions are additive-
+// only; all variation is expressed by the owning node via selects. ---
+
+export type SlotDef = {
+  kind: "slot";
+  name: string;
+  /** Rendered heading; omitted = bare content. */
+  title?: string;
+  /** How appended text parts combine within the slot. */
+  merge: "block" | "list";
+  /** Computed parts may only target volatile slots (prompt-cache hygiene). */
+  volatile: boolean;
+  /** Anonymous/unslotted parts land in the region's default slot. */
+  default: boolean;
+};
+
+export type LayoutRegionName = "preamble" | "recency";
+
+/**
+ * A layout-independent address: "this region's default slot, whatever the
+ * active layout names it". The graduation-safe way to say preamble-vs-recency
+ * without declaring a layout — parts written against a region keep working
+ * when a charter later registers its own layout. Address via the `preamble`/
+ * `recency` sentinels, never inline literals.
+ */
+export type RegionAddress = {
+  kind: "region";
+  region: LayoutRegionName;
+};
+
+export type SlotAddress = SlotDef | string | RegionAddress;
+
+export type LayoutDef = {
+  kind: "layout";
+  name: string;
+  /** Unknown slot names become compile errors instead of overflow. */
+  strict: boolean;
+  regions: Record<LayoutRegionName, SlotDef[]>;
+  /**
+   * How frames render into the document's history. Layout-owned (history is
+   * wire-structural; the layout picks WHICH named policy, never placement);
+   * there are no per-node overrides. Default: { type: "messages" }.
+   */
+  historyProjection?: HistoryProjection<any>;
+};
+
+export type DiscriminatorEnv = {
+  /** Resolved value of the discriminator's declared state (or its init). */
+  state: unknown;
+  params: JsonObject;
+};
+
+export type Discriminator<TValue extends string = string> = {
+  kind: "discriminator";
+  name: string;
+  values: readonly TValue[];
+  state: StateDescriptor | null;
+  derive: (env: DiscriminatorEnv) => TValue;
+};
+
+export type AnyDiscriminator = Discriminator<string>;
+
+export type ComputedPartEnv = {
+  params: JsonObject;
+  /** Resolved value of a declared state descriptor (or its init). */
+  state: (descriptor: StateDescriptor) => unknown;
+};
+
+export type ComputedPartDef<TDataContent = never> = {
+  kind: "computedPart";
+  name: string;
+  slot: SlotAddress;
+  compute: (env: ComputedPartEnv) => string | ContentPart<TDataContent>[];
+};
+
+export type AnyComputedPartDef = ComputedPartDef<any>;
+
+export type TextPart = {
+  kind: "text";
+  slot?: SlotAddress;
+  text: string;
+};
+
+export type ActionPart = {
+  kind: "action";
+  caller: ActionCaller;
+  /** Default native. Deferred tools lower to provider tool search (see Exposure). */
+  exposure?: Exposure;
+  action: ActionConfigEntry;
+  /**
+   * Companion prose owned by this action contribution: ordinary slot-addressed
+   * text parts emitted whenever the action is contributed, so a select that
+   * swaps the tool swaps its guidance atomically. Emitted regardless of
+   * caller — an external command's guidance is typically model-facing (it
+   * tells the generator what external surfaces can do).
+   */
+  guidance?: TextPart[];
+};
+
+export type ComputedPartRef<TDataContent = never> = {
+  kind: "computed";
+  part: ComputedPartDef<TDataContent> | Ref;
+};
+
+export type SelectPart<TDataContent = never> = {
+  kind: "select";
+  discriminator: AnyDiscriminator | Ref;
+  /** Missing keys are only legal for partial selects created via when(). */
+  partial: boolean;
+  branches: Record<string, Part<TDataContent>[] | null>;
+};
+
+export type Part<TDataContent = never> =
+  | TextPart
+  | ActionPart
+  | ComputedPartRef<TDataContent>
+  | SelectPart<TDataContent>;
+
+export type PartEntry<TDataContent = never> =
+  | Part<TDataContent>
+  | ComputedPartDef<TDataContent>;
+
+export type MemberSelect<TDataContent = never> = {
+  kind: "memberSelect";
+  discriminator: AnyDiscriminator | Ref;
+  partial: boolean;
+  branches: Record<string, Node<TDataContent>[] | null>;
+};
+
+export type MemberEntry<TDataContent = never> =
+  | Node<TDataContent>
+  | MemberSelect<TDataContent>;
+
+export type CompileDiagnostic = {
+  severity: "warning" | "error";
+  code:
+    | "unknown-slot"
+    | "shadowed-action"
+    | "volatile-order"
+    | "invalid-discriminator-value";
+  message: string;
+};
+
 export type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
   params?: AnyParamsSchema;
+  /** Sugar: an anonymous text part in the preamble region's default slot. */
   instructions?: string;
+  /** Sugar: action parts with caller "generator". */
   tools?: ActionConfigEntry[];
+  /** Sugar: action parts with caller "external". */
   commands?: ActionConfigEntry[];
-  state?: StateDescriptor;
-  members?: Node<TDataContent>[];
+  parts?: PartEntry<TDataContent>[];
+  states?: StateDescriptor[];
+  members?: MemberEntry<TDataContent>[];
   output?: OutputConfig<TDataContent>;
-  projection?: Projection<TDataContent>;
-  runtime?: Runtime<TDataContent>;
+  runtime?: Runtime;
   /** Per-executor config, namespaced by executor identity name. Plain JSON. */
   executorConfig?: ExecutorConfig;
 };
@@ -378,16 +521,11 @@ export type Node<
   sourceNodeKey?: string;
   name?: string;
   params: TParams;
-  instructions?: string;
-  toolBindings: ActionBindings;
-  toolRefs: ActionRef[];
-  commandBindings: ActionBindings;
-  commandRefs: ActionRef[];
-  state?: NormalizedStateDescriptor;
-  members: Node<TDataContent>[];
+  parts: Part<TDataContent>[];
+  states: NormalizedStateDescriptor[];
+  memberEntries: MemberEntry<TDataContent>[];
   output?: OutputConfig<TDataContent>;
-  projection: Projection<TDataContent>;
-  runtime: NormalizedRuntime<TDataContent>;
+  runtime: NormalizedRuntime;
   executorConfig?: ExecutorConfig;
 };
 
@@ -568,6 +706,14 @@ export type FrameDraft<TDataContent = never> = {
   activationId?: string;
   inert?: boolean;
   messages: FrameMessage<TDataContent>[];
+  /**
+   * App/runner-owned channel, complementary to framework-owned `provenance`:
+   * hosts stamp correctness-bearing linkage here (e.g. durable-queue item ids
+   * completed transactionally with frame persistence, transport/turn routing
+   * markers). The framework never reads or writes it; unlike provenance,
+   * persistence must NOT drop it.
+   */
+  metadata?: Record<string, unknown>;
   provenance?: FrameProvenance;
 };
 
@@ -682,10 +828,14 @@ export type Charter<
   version?: string;
   params: TParams;
   nodes: Record<string, Node<TDataContent>>;
-  tools: Record<string, AnyAction>;
-  commands: Record<string, AnyAction>;
+  /** Unified action registry; tools and commands share one namespace. */
+  actions: Record<string, AnyAction>;
   states: Record<string, NormalizedStateDescriptor>;
-  projections: Record<string, ProjectionFunction<TDataContent>>;
+  slots: Record<string, SlotDef>;
+  layouts: Record<string, LayoutDef>;
+  computedParts: Record<string, AnyComputedPartDef>;
+  discriminators: Record<string, AnyDiscriminator>;
+  defaultLayout: LayoutDef;
   historyProjections: Record<string, HistoryProjectionFunction<TDataContent>>;
 };
 
@@ -694,19 +844,44 @@ export type CharterConfig<TDataContent = never> = {
   version?: string;
   params?: AnyParamsSchema;
   nodes: readonly Node<TDataContent>[];
-  tools: readonly AnyAction[];
-  commands: readonly AnyAction[];
-  states: readonly StateDescriptor[];
-  projections: readonly ProjectionFunction<TDataContent>[];
+  /** Sugar: registered into `actions` alongside `commands`. */
+  tools?: readonly AnyAction[];
+  /** Sugar: registered into `actions` alongside `tools`. */
+  commands?: readonly AnyAction[];
+  actions?: readonly AnyAction[];
+  states?: readonly StateDescriptor[];
+  slots?: readonly SlotDef[];
+  layouts?: readonly LayoutDef[];
+  computedParts?: readonly AnyComputedPartDef[];
+  discriminators?: readonly AnyDiscriminator[];
   historyProjections?: readonly HistoryProjectionFunction<TDataContent>[];
 };
 
+/**
+ * Slot identity + volatility stamped on every compiled region part by the
+ * layout render. Executors key caching (cache breakpoints at the first
+ * volatile part) and session sync (slot-granular diffing) off these; draft
+ * placement (`region`, `partDepth`) never leaves compile.
+ */
+export type CompiledPart<TDataContent = never> = ContentPart<TDataContent> & {
+  /** Owning slot name. Unknown (pseudo-)slots keep their name; untagged
+   * tail parts in a default-less region carry UNSLOTTED_PART_SLOT. */
+  slot: string;
+  /** From SlotDef.volatile. Unknown slots and the untagged tail stamp
+   * volatile — they render at the region tail and must never extend the
+   * stable prefix. */
+  volatile: boolean;
+};
+
 export type CompiledInference<TDataContent = never> = {
-  systemParts: ContentPart<TDataContent>[];
+  /** The rendered `preamble` region: durable framing, stable-first. */
+  preamble: CompiledPart<TDataContent>[];
   history: FrameMessage<TDataContent>[];
-  dynamicParts: ContentPart<TDataContent>[];
+  /** The rendered `recency` region: attention-adjacent freshness. */
+  recency: CompiledPart<TDataContent>[];
   tools: AnyAction[];
   retrievableStates: RetrievableState[];
+  diagnostics?: CompileDiagnostic[];
 };
 
 export type ProjectionAddress =
@@ -717,25 +892,51 @@ export type SerializedStateDescriptor = {
   key: string;
   scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
-  projection?: StateProjection;
+  projection?: { slot?: string; region?: LayoutRegionName; exposure?: Exposure };
   init?: unknown;
   schema: unknown;
 };
 
 export type DryAction = Ref;
 
+export type DryPart =
+  | { kind: "text"; slot?: string; region?: LayoutRegionName; text: string }
+  | {
+      kind: "action";
+      caller: ActionCaller;
+      exposure?: Exposure;
+      ref: DryAction;
+      guidance?: Array<{ slot?: string; region?: LayoutRegionName; text: string }>;
+    }
+  | { kind: "computed"; ref: Ref }
+  | {
+      kind: "select";
+      discriminator: Ref;
+      partial: boolean;
+      branches: Record<string, DryPart[] | null>;
+    };
+
+export type DryMemberSelect<TDataContent = never> = {
+  kind: "select";
+  discriminator: Ref;
+  partial: boolean;
+  branches: Record<string, Array<DryNode<TDataContent> | Ref> | null>;
+};
+
+export type DryMemberEntry<TDataContent = never> =
+  | DryNode<TDataContent>
+  | Ref
+  | DryMemberSelect<TDataContent>;
+
 export type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
   params?: unknown;
-  instructions?: string;
-  tools?: DryAction[];
-  commands?: DryAction[];
-  state?: SerializedStateDescriptor | Ref;
-  members?: Array<DryNode<TDataContent> | Ref>;
+  parts?: DryPart[];
+  states?: Array<SerializedStateDescriptor | Ref>;
+  members?: Array<DryMemberEntry<TDataContent>>;
   output?: SerializedOutputConfig;
-  projection?: Ref;
   runtime?: DryRuntime;
   executorConfig?: Record<string, unknown>;
 };

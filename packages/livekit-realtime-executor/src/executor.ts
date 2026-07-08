@@ -1,6 +1,8 @@
 import { llm } from "@livekit/agents";
 import { createHash } from "node:crypto";
 import {
+  actionExposure,
+  UNSLOTTED_PART_SLOT,
   createToolActionRequest,
   createUnboundActionContext,
   executeActionInvocation,
@@ -17,6 +19,7 @@ import type {
   ActorMessage,
   AnyAction,
   CompiledInference,
+  CompiledPart,
   ContentPart,
   ExecutionReport,
   ExecutorRealizedPrompt,
@@ -108,13 +111,26 @@ type RealtimeClientEvent =
   | RealtimeConversationItemDeleteEvent
   | RealtimeResponseCreateEvent;
 
-type DynamicContextState = {
+/**
+ * Per-slot realtime item lifecycle. Dynamic-context conversation items are
+ * keyed by the compiled part's slot stamp, so a change in one slot replaces
+ * only that slot's item. The version is per-slot monotonic and participates
+ * in the item id hash, preventing id reuse when a slot cycles back to prior
+ * content while a delete is still in flight. Slot entries are never pruned
+ * (the layout bounds their count); only a session bootstrap resets them.
+ */
+type SlotItemState = {
   version: number;
   currentItemId?: string;
   currentFingerprint?: string;
   desiredItemId?: string;
   desiredFingerprint?: string;
+};
+
+type DynamicContextState = {
+  slots: Map<string, SlotItemState>;
   pending: Map<string, {
+    slotKey: string;
     fingerprint: string;
   }>;
   stalePendingItemIds: Set<string>;
@@ -224,11 +240,12 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   } = { completed: false };
   private pendingRealtimeTurnCompletionMetadata?: Record<string, unknown>;
   private readonly dynamicContextState: DynamicContextState = {
-    version: 0,
+    slots: new Map(),
     pending: new Map(),
     stalePendingItemIds: new Set(),
     deleteRequestedItemIds: new Set(),
   };
+  private readonly lastPushedInstructions = new WeakMap<object, string>();
   private readonly assistantTranscripts = new AssistantTranscriptStream<TDataContent>(this);
   private readonly userTranscripts = new UserTranscriptEnvelope<TDataContent>(this);
 
@@ -470,10 +487,10 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
 
     if (realtimeActive) {
       this.syncRealtimeServerEventHandler(realtimeSession);
-      await realtimeSession?.updateInstructions?.(this.currentInstructions);
+      if (realtimeSession) await this.pushInstructionsIfChanged(realtimeSession);
       await realtimeSession?.updateTools?.(this.currentTools);
 
-      await this.config.session.updateInstructions?.(this.currentInstructions);
+      await this.pushInstructionsIfChanged(this.config.session);
       await this.config.session.updateTools?.(this.currentTools);
 
       if (syncContext) {
@@ -487,6 +504,21 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     // RoomIO can replace session.output.transcription after session.start(),
     // so install the wrapper after each sync, not only at connect time.
     this.assistantTranscripts.install();
+  }
+
+  /**
+   * Skips the session.update when this session object already holds the
+   * exact instructions. A replaced session is a fresh WeakMap key, so it
+   * always receives an initial push; a failed push stays unrecorded and
+   * retries on the next sync.
+   */
+  private async pushInstructionsIfChanged(
+    session: Pick<LiveKitRealtimeSessionLike, "updateInstructions">,
+  ): Promise<void> {
+    const key = isObject(session) ? session : undefined;
+    if (key && this.lastPushedInstructions.get(key) === this.currentInstructions) return;
+    await session.updateInstructions?.(this.currentInstructions);
+    if (key) this.lastPushedInstructions.set(key, this.currentInstructions);
   }
 
   private syncRealtimeServerEventHandler(
@@ -543,18 +575,19 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     if (!pending) return;
 
     state.pending.delete(itemId);
-    const isDesired = state.desiredItemId === itemId;
+    const slotState = state.slots.get(pending.slotKey);
+    const isDesired = slotState?.desiredItemId === itemId;
     const isStale = state.stalePendingItemIds.delete(itemId);
-    if (!isDesired || isStale) {
+    if (!slotState || !isDesired || isStale) {
       void this.requestDynamicItemDeletion(itemId).catch((error) => {
         this.executor.log("Failed to delete stale dynamic context item", error);
       });
       return;
     }
 
-    const previousItemId = state.currentItemId;
-    state.currentItemId = itemId;
-    state.currentFingerprint = pending.fingerprint;
+    const previousItemId = slotState.currentItemId;
+    slotState.currentItemId = itemId;
+    slotState.currentFingerprint = pending.fingerprint;
     if (previousItemId && previousItemId !== itemId) {
       void this.requestDynamicItemDeletion(previousItemId).catch((error) => {
         this.executor.log("Failed to delete previous dynamic context item", error);
@@ -567,13 +600,15 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     state.deleteRequestedItemIds.delete(itemId);
     state.stalePendingItemIds.delete(itemId);
     state.pending.delete(itemId);
-    if (state.currentItemId === itemId) {
-      state.currentItemId = undefined;
-      state.currentFingerprint = undefined;
-    }
-    if (state.desiredItemId === itemId) {
-      state.desiredItemId = undefined;
-      state.desiredFingerprint = undefined;
+    for (const slotState of state.slots.values()) {
+      if (slotState.currentItemId === itemId) {
+        slotState.currentItemId = undefined;
+        slotState.currentFingerprint = undefined;
+      }
+      if (slotState.desiredItemId === itemId) {
+        slotState.desiredItemId = undefined;
+        slotState.desiredFingerprint = undefined;
+      }
     }
   }
 
@@ -582,7 +617,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     realtimeSession: LiveKitRealtimeSessionLike,
   ): Promise<void> {
     await this.bootstrapRealtimeSessionContext(context, realtimeSession);
-    await this.publishDynamicContext(context.inference.dynamicParts, realtimeSession);
+    await this.publishDynamicContext(context.inference.recency, realtimeSession);
     await this.syncMissingHistoryItems(context, realtimeSession);
     const shouldCreateResponse = await this.forwardVisibleInputAsRealtimeItems(
       context,
@@ -675,11 +710,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
 
   private resetDynamicContextState(): void {
     const state = this.dynamicContextState;
-    state.version = 0;
-    state.currentItemId = undefined;
-    state.currentFingerprint = undefined;
-    state.desiredItemId = undefined;
-    state.desiredFingerprint = undefined;
+    state.slots.clear();
     state.pending.clear();
     state.stalePendingItemIds.clear();
     state.deleteRequestedItemIds.clear();
@@ -732,60 +763,85 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   }
 
   private async publishDynamicContext(
-    parts: readonly ContentPart<any>[],
+    parts: readonly CompiledPart<any>[],
     realtimeSession: LiveKitRealtimeSessionLike,
   ): Promise<void> {
     const realtimeParts = realtimeConversationDynamicParts(parts);
     const state = this.dynamicContextState;
-    if (!hasRenderedParts(realtimeParts)) {
-      state.desiredItemId = undefined;
-      state.desiredFingerprint = undefined;
-      for (const itemId of state.pending.keys()) {
-        state.stalePendingItemIds.add(itemId);
+
+    // One conversation item per slot, in first-appearance order (= layout
+    // order). Only slots whose content changed create or delete items.
+    const groups = new Map<string, CompiledPart<any>[]>();
+    for (const part of realtimeParts) {
+      const slotKey = part.slot ?? UNSLOTTED_PART_SLOT;
+      const group = groups.get(slotKey) ?? [];
+      group.push(part);
+      groups.set(slotKey, group);
+    }
+    for (const [slotKey, group] of groups) {
+      if (!hasRenderedParts(group)) groups.delete(slotKey);
+    }
+
+    // Slots no longer desired: supersede their pending items and delete the
+    // live one. Entries stay in the map so the per-slot version keeps
+    // advancing if the slot returns.
+    for (const [slotKey, slotState] of state.slots) {
+      if (groups.has(slotKey)) continue;
+      if (!slotState.currentItemId && !slotState.desiredItemId) continue;
+      slotState.desiredItemId = undefined;
+      slotState.desiredFingerprint = undefined;
+      for (const [itemId, entry] of state.pending) {
+        if (entry.slotKey === slotKey) state.stalePendingItemIds.add(itemId);
       }
-      if (state.currentItemId) {
-        const itemId = state.currentItemId;
-        state.currentItemId = undefined;
-        state.currentFingerprint = undefined;
+      if (slotState.currentItemId) {
+        const itemId = slotState.currentItemId;
+        slotState.currentItemId = undefined;
+        slotState.currentFingerprint = undefined;
         await this.requestDynamicItemDeletion(itemId, realtimeSession);
       }
-      return;
     }
 
-    const fingerprint = dynamicPartsFingerprint(realtimeParts);
-    if (
-      state.desiredFingerprint === fingerprint ||
-      state.currentFingerprint === fingerprint ||
-      [...state.pending.values()].some((entry) => entry.fingerprint === fingerprint)
-    ) {
-      return;
-    }
+    for (const [slotKey, group] of groups) {
+      const slotState = state.slots.get(slotKey) ?? { version: 0 };
+      state.slots.set(slotKey, slotState);
 
-    for (const itemId of state.pending.keys()) {
-      state.stalePendingItemIds.add(itemId);
-    }
-
-    const version = ++state.version;
-    const itemId = projectorRealtimeItemId("d", version, fingerprint);
-    const item = dynamicPartsToRealtimeMessage(realtimeParts, itemId, version);
-    state.desiredItemId = itemId;
-    state.desiredFingerprint = fingerprint;
-    state.pending.set(itemId, {
-      fingerprint,
-    });
-
-    try {
-      await this.sendRealtimeEvent(realtimeSession, {
-        type: "conversation.item.create",
-        item,
-      });
-    } catch (error) {
-      state.pending.delete(itemId);
-      if (state.desiredItemId === itemId) {
-        state.desiredItemId = undefined;
-        state.desiredFingerprint = undefined;
+      const fingerprint = dynamicPartsFingerprint(group);
+      const pendingForSlot = [...state.pending.entries()].filter(([, entry]) => entry.slotKey === slotKey);
+      if (
+        slotState.desiredFingerprint === fingerprint ||
+        slotState.currentFingerprint === fingerprint ||
+        pendingForSlot.some(([, entry]) => entry.fingerprint === fingerprint)
+      ) {
+        continue;
       }
-      throw error;
+
+      for (const [itemId] of pendingForSlot) {
+        state.stalePendingItemIds.add(itemId);
+      }
+
+      const version = ++slotState.version;
+      const itemId = projectorRealtimeItemId("d", slotKey, version, fingerprint);
+      const item = dynamicPartsToRealtimeMessage(group, itemId, version, slotKey);
+      slotState.desiredItemId = itemId;
+      slotState.desiredFingerprint = fingerprint;
+      state.pending.set(itemId, {
+        slotKey,
+        fingerprint,
+      });
+
+      try {
+        await this.sendRealtimeEvent(realtimeSession, {
+          type: "conversation.item.create",
+          item,
+        });
+      } catch (error) {
+        state.pending.delete(itemId);
+        if (slotState.desiredItemId === itemId) {
+          slotState.desiredItemId = undefined;
+          slotState.desiredFingerprint = undefined;
+        }
+        throw error;
+      }
     }
   }
 
@@ -1252,8 +1308,8 @@ export function buildLiveKitInstructions<TDataContent = never>(
   messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
 ): string {
   return [
-    renderSection("System", inference.systemParts),
-    renderSection("Dynamic Context", inference.dynamicParts),
+    renderSection("System", inference.preamble),
+    renderSection("Dynamic Context", inference.recency),
     renderHistory(inference.history, messageToText),
   ]
     .filter(Boolean)
@@ -1264,8 +1320,8 @@ export function buildLiveKitRealtimeInstructions<TDataContent = never>(
   inference: CompiledInference<TDataContent>,
 ): string {
   return [
-    renderSection("System", inference.systemParts),
-    renderSection("Dynamic Context", realtimeInstructionDynamicParts(inference.dynamicParts)),
+    renderSection("System", inference.preamble),
+    renderSection("Dynamic Context", realtimeInstructionDynamicParts(inference.recency)),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1295,9 +1351,27 @@ function isRuntimeSyncContext<TDataContent>(
   );
 }
 
+/**
+ * The realtime session has no tool-search mechanism, so deferred-exposure
+ * tools cannot be honored. Silently loading them natively would contradict
+ * the compiled availability note, so an unsupported surface is an error the
+ * charter must resolve (mark the tool native for this generator).
+ */
+function assertNoDeferredTools(inference: CompiledInference<any>): void {
+  const deferred = inference.tools.filter((action) => actionExposure(action) === "deferred");
+  if (deferred.length > 0) {
+    throw new Error(
+      `LiveKit realtime executor does not support deferred tools: ${deferred
+        .map((action) => action.name)
+        .join(", ")}`,
+    );
+  }
+}
+
 export function buildLiveKitToolDefinitions(
   inference: CompiledInference<any>,
 ): LiveKitToolDefinition[] {
+  assertNoDeferredTools(inference);
   const definitions = new Map<string, LiveKitToolDefinition>();
 
   for (const action of inference.tools) {
@@ -1318,6 +1392,7 @@ export function buildLiveKitToolContext<TDataContent = never>(
   inference: CompiledInference<TDataContent>,
   connection: LiveKitRealtimeConnection<TDataContent>,
 ): LiveKitToolContext {
+  assertNoDeferredTools(inference);
   const tools: LiveKitToolContext = {};
 
   for (const action of inference.tools) {
@@ -1501,11 +1576,12 @@ function dynamicPartsToRealtimeMessage(
   parts: readonly ContentPart<any>[],
   itemId: string,
   version: number,
+  slotKey: string,
 ): RealtimeMessageItem {
   const text = renderDynamicContextText(parts);
   const textContent = [
     text || `<${DYNAMIC_CONTEXT_TAG}>\nLatest application-provided dynamic context is attached as multimodal content.\n</${DYNAMIC_CONTEXT_TAG}>`,
-    `Projector dynamic context version ${version}. This replaces older projector dynamic context items; use the highest version only.`,
+    `Projector dynamic context for section "${slotKey}", version ${version}. This replaces older projector dynamic context items for the same section; use the highest version per section.`,
   ].join("\n\n");
   return {
     id: itemId,
@@ -1535,7 +1611,7 @@ function realtimeInstructionDynamicParts(parts: readonly ContentPart<any>[]): Co
   ];
 }
 
-function realtimeConversationDynamicParts(parts: readonly ContentPart<any>[]): ContentPart<any>[] {
+function realtimeConversationDynamicParts(parts: readonly CompiledPart<any>[]): CompiledPart<any>[] {
   return parts.some((part) => part.type === "image") ? [...parts] : [];
 }
 

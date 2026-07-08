@@ -684,8 +684,8 @@ export function buildLiveKitInstructions<TDataContent = never>(
   messageToText?: (message: ActorMessage<TDataContent>) => string | undefined,
 ): string {
   return [
-    renderSection("System", inference.systemParts),
-    renderSection("Dynamic Context", inference.dynamicParts),
+    renderSection("System", inference.preamble),
+    renderSection("Dynamic Context", inference.recency),
     renderHistory(inference.history, messageToText),
   ]
     .filter(Boolean)

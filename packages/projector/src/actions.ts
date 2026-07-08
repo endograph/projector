@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { markActionExposure } from "./action-exposure.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema } from "./params.ts";
 import type {
@@ -9,6 +10,7 @@ import type {
   ActionKind,
   AnyAction,
   ExecuteActionResult,
+  Exposure,
   Node,
   GeneratorId,
   FrameMessage,
@@ -136,11 +138,16 @@ export function createToolActionRequest(
 export function bindAction<TAction extends AnyAction>(
   action: TAction,
   binding: ActionBinding,
+  exposure?: Exposure,
 ): TAction {
-  return {
+  const bound = {
     ...action,
     [ACTION_BINDING]: binding,
   } as TAction;
+  // Untagged reads native, so only non-native exposures tag the fresh copy.
+  return exposure === undefined || exposure === "native"
+    ? bound
+    : markActionExposure(bound, exposure);
 }
 
 export function getActionBinding(action: AnyAction): ActionBinding | undefined {
@@ -434,26 +441,23 @@ export function assertNodeActionStateCompatibility(
     return;
   }
 
-  if (!node.state) {
+  const requiredKey = action.state.key;
+  const declared = node.states.find((candidate) => candidate.key === requiredKey);
+  if (!declared) {
+    const owned = node.states.map((candidate) => `"${candidate.key}"`).join(", ") || "none";
     throw new Error(
-      `Node "${node.key}" ${kind} "${action.name}" requires state "${action.state.key}" but the node has no state`,
-    );
-  }
-
-  if (action.state.key !== node.state.key) {
-    throw new Error(
-      `Node "${node.key}" ${kind} "${action.name}" requires state "${action.state.key}" but the node owns state "${node.state.key}"`,
+      `Node "${node.key}" ${kind} "${action.name}" requires state "${requiredKey}" but the node declares: ${owned}`,
     );
   }
 
   const actionScope = action.state.scope ?? "hoist";
-  if (actionScope !== node.state.scope) {
+  if (actionScope !== declared.scope) {
     throw new Error(
-      `Node "${node.key}" ${kind} "${action.name}" requires ${actionScope} state "${action.state.key}" but the node owns ${node.state.scope} state`,
+      `Node "${node.key}" ${kind} "${action.name}" requires ${actionScope} state "${action.state.key}" but the node owns ${declared.scope} state`,
     );
   }
 
-  if (action.state.schema !== node.state.schema) {
+  if (action.state.schema !== declared.schema) {
     throw new Error(
       `Node "${node.key}" ${kind} "${action.name}" requires a different schema for state "${action.state.key}"`,
     );

@@ -1,5 +1,12 @@
 import { createNode } from "./create.ts";
-import { hiddenProjection } from "./projection-functions.ts";
+// Function-level cycle with discriminator-eval.ts (it reads contributor
+// params); safe because both modules only declare functions at init.
+import { evaluateDiscriminator } from "./discriminator-eval.ts";
+import {
+  isMemberSelect,
+  resolveDiscriminatorRef,
+  type DiscriminatorMemo,
+} from "./discriminators.ts";
 import { encodeProjectionAddress } from "./projection-address.ts";
 import { ROOT_INSTANCE_ID } from "./projection-address.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
@@ -35,7 +42,6 @@ const rootNode = createNode({
     type: "generator",
     trigger: { type: "actor-frame" },
   },
-  projection: hiddenProjection,
 });
 
 export type CreateInstanceOptions<TDataContent = never> = {
@@ -112,12 +118,64 @@ export function findContributorById<TDataContent = never>(
   );
 }
 
+export type MemberResolution<TDataContent = never> =
+  | { mode: "all" }
+  | { mode: "effective"; charter?: Charter<TDataContent>; memo?: DiscriminatorMemo };
+
+/**
+ * Resolves a contributor's members. Two views, per the invariant "state
+ * follows the skeleton; surface follows the derivation":
+ *
+ * - "all" (default): every potential member across every select branch,
+ *   deduped by key. Used by contributor collection and state resolution so
+ *   containers provision for every branch a select could derive — a member
+ *   flapping on must find its state already in scope — and so no evaluation
+ *   (which needs params in scope) happens outside a compiled root.
+ * - "effective": selects evaluated at the contributor; the compile render
+ *   path uses this to decide which members contribute to the surface.
+ */
+export function resolveMemberNodes<TDataContent = never>(
+  contributor: Contributor<TDataContent>,
+  resolution: MemberResolution<TDataContent> = { mode: "all" },
+): Node<TDataContent>[] {
+  const members: Node<TDataContent>[] = [];
+  const seen = new Set<string>();
+  const push = (node: Node<TDataContent>) => {
+    if (!seen.has(node.key)) {
+      seen.add(node.key);
+      members.push(node);
+    }
+  };
+
+  for (const entry of contributor.node.memberEntries) {
+    if (isMemberSelect(entry)) {
+      if (resolution.mode === "all") {
+        for (const branch of Object.values(entry.branches)) {
+          for (const node of branch ?? []) {
+            push(node);
+          }
+        }
+        continue;
+      }
+      const discriminator = resolveDiscriminatorRef(entry.discriminator, resolution.charter);
+      const value = evaluateDiscriminator(discriminator, contributor, resolution.memo);
+      for (const node of entry.branches[value] ?? []) {
+        push(node);
+      }
+      continue;
+    }
+    push(entry);
+  }
+  return members;
+}
+
 export function directContributorChildren<TDataContent = never>(
   contributor: Contributor<TDataContent>,
+  resolution: MemberResolution<TDataContent> = { mode: "all" },
 ): Contributor<TDataContent>[] {
   const children: Contributor<TDataContent>[] = [];
 
-  for (const member of contributor.node.members) {
+  for (const member of resolveMemberNodes(contributor, resolution)) {
     const memberPath = [...contributor.memberPath, member.key];
     const address: ProjectionAddress = {
       type: "member",

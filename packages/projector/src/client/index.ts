@@ -6,8 +6,8 @@ import {
   type Contributor,
 } from "../contributors.ts";
 import { encodeProjectionAddress } from "../projection-address.ts";
-import { resolveFrameCommands, resolveFrameTools } from "../scoped-actions.ts";
-import { resolveStates, type ResolvedState } from "../state.ts";
+import { callerAllows, resolveContributorActions, type ResolvedNodeAction } from "../scoped-actions.ts";
+import { groupStatesByContributor, resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
   ActionRequestMessage,
@@ -17,7 +17,7 @@ import type {
   NormalizedRuntime,
   ProjectionAddress,
   StateAddress,
-  StateProjection,
+  Exposure,
 } from "../types.ts";
 
 export type JSONSchema = unknown;
@@ -58,7 +58,7 @@ export type ClientStateView<TValue = unknown> = {
   address: StateAddress;
   value: TValue;
   schema?: JSONSchema;
-  projection?: StateProjection;
+  projection?: { exposure: Exposure };
 };
 
 export type ClientCommandMeta<
@@ -81,6 +81,7 @@ export type ClientToolMeta<
   name: TName;
   description?: string;
   inputSchema?: JSONSchema;
+  exposure: Exposure;
   target?: ProjectionAddress;
   __input?: TInput;
 };
@@ -135,15 +136,24 @@ export type ClientStateOf<TStateDescriptor> = TStateDescriptor extends {
   ? TValue
   : unknown;
 
+/** Union of the state value types a node's `states` declarations carry. */
+export type ClientStatesOf<TConfig> = TConfig extends {
+  states: readonly (infer TStateDescriptor)[];
+}
+  ? [TStateDescriptor] extends [never]
+    ? unknown
+    : ClientStateOf<TStateDescriptor>
+  : unknown;
+
 export type ClientInstanceOf<TNode> = TNode extends {
-  state?: infer TState;
+  __config: infer TConfig;
   __commands?: infer TCommand;
   __tools?: infer TTool;
 }
   ? Omit<
       ClientInstance<
         ClientCommandOf<TCommand>,
-        ClientStateOf<NonNullable<TState>>,
+        ClientStatesOf<TConfig>,
         ClientToolOf<TTool>
       >,
       "members" | "children"
@@ -493,11 +503,11 @@ function realizeContributor(
       runtimeType: contributor.node.runtime.type,
     },
     states: (statesByContributor.get(contributor.id) ?? []).map(realizeState),
-    tools: resolveFrameTools(contributor, charter).map((tool) =>
-      realizeTool(tool, contributor.address)
+    tools: clientActions(contributor, charter, "generator").map((entry) =>
+      realizeTool(entry, contributor.address)
     ),
-    commands: resolveFrameCommands(contributor, charter).map((command) =>
-      realizeCommand(command, contributor.address)
+    commands: clientActions(contributor, charter, "external").map((entry) =>
+      realizeCommand(entry.action, contributor.address)
     ),
     members: memberNodes.map((member) =>
       realizeContributor(member, statesByContributor, charter)
@@ -508,11 +518,21 @@ function realizeContributor(
   };
 }
 
-function realizeTool(tool: Action, target: ProjectionAddress): ClientToolMeta {
+function clientActions(
+  contributor: Contributor,
+  charter: Charter | undefined,
+  requirement: "generator" | "external",
+): ResolvedNodeAction[] {
+  return resolveContributorActions(contributor, charter)
+    .filter((entry) => callerAllows(entry.caller, requirement));
+}
+
+function realizeTool(entry: ResolvedNodeAction, target: ProjectionAddress): ClientToolMeta {
   return {
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : undefined,
+    name: entry.action.name,
+    description: entry.action.description,
+    inputSchema: entry.action.inputSchema ? z.toJSONSchema(entry.action.inputSchema) : undefined,
+    exposure: entry.exposure,
     target,
   };
 }
@@ -532,30 +552,10 @@ function realizeState(state: ResolvedState): ClientStateView {
     address: state.address,
     value: state.container.value,
     schema: z.toJSONSchema(state.descriptor.schema),
-    projection: state.descriptor.projection,
+    projection: state.descriptor.projection
+      ? { exposure: state.descriptor.projection.exposure ?? "native" }
+      : undefined,
   };
-}
-
-function groupStatesByContributor(states: ResolvedState[]): Map<string, ResolvedState[]> {
-  const grouped = new Map<string, ResolvedState[]>();
-  for (const state of states) {
-    const contributorKey = stateContributorKey(state);
-    const list = grouped.get(contributorKey) ?? [];
-    list.push(state);
-    grouped.set(contributorKey, list);
-  }
-  return grouped;
-}
-
-function stateContributorKey(state: ResolvedState): string {
-  if (state.descriptor.scope === "hoist") {
-    return encodeProjectionAddress({
-      type: "instance",
-      instanceId: state.targetInstance.id,
-    });
-  }
-
-  return state.sourceContributor.id;
 }
 
 function createOverlay<TInstances, TName extends string>(

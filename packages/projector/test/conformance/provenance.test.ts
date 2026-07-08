@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   compileProjection,
   createHistoryProjectionFunction,
+  createLayout,
   createMachine,
   createNode,
   createRuntimeTurnFrame,
+  createSlot,
   messagesSinceLastCompletion,
   runMachine,
   syncMachineRuntime,
@@ -195,7 +197,14 @@ describe("conformance: provenance", () => {
       runtime: {
         type: "generator",
         trigger: { type: "actor-frame" },
-        historyProjection: recordingProjection,
+      },
+    });
+    const recordingLayout = createLayout({
+      name: "recordingLayout",
+      historyProjection: recordingProjection,
+      regions: {
+        preamble: [createSlot("body", { default: true })],
+        recency: [createSlot("context", { default: true, volatile: true })],
       },
     });
     const { executor } = createRecordingExecutor(() => ({
@@ -206,7 +215,7 @@ describe("conformance: provenance", () => {
     const machine = createMachine({
       id: "strip-demo",
       instance: { id: "r", isSource: true, node },
-      charter: charter({ historyProjections: [recordingProjection] }),
+      charter: charter({ historyProjections: [recordingProjection], layouts: [recordingLayout] }),
       executor: identified,
     });
     machine.enqueueFrame({ messages: [{ ...textUserMessage("first") }] });

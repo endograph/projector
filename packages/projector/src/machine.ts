@@ -23,7 +23,7 @@ import {
 } from "./history.ts";
 import { isNode } from "./create.ts";
 import { decodeContributorId, encodeProjectionAddress } from "./projection-address.ts";
-import { resolveFrameCommands, resolveFrameTools } from "./scoped-actions.ts";
+import { callerAllows, collectAllNodeActions, resolveContributorActions } from "./scoped-actions.ts";
 import { hydrateInstance, hydrateNode, serializeInstance, serializeNode } from "./serialization.ts";
 import { resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
 import {
@@ -34,8 +34,6 @@ import {
 import type {
   ActionContext,
   ActionRequestMessage,
-  ActionResultMessage,
-  ActorMessage,
   AnyAction,
   Charter,
   CompiledInference,
@@ -267,7 +265,15 @@ function validateExecutorConfig<TDataContent>(
         );
       }
     }
-    node.members.forEach(validate);
+    for (const entry of node.memberEntries) {
+      if ((entry as { kind?: unknown }).kind === "memberSelect") {
+        for (const branch of Object.values((entry as { branches: Record<string, Node<TDataContent>[] | null> }).branches)) {
+          for (const member of branch ?? []) validate(member);
+        }
+        continue;
+      }
+      validate(entry as Node<TDataContent>);
+    }
   };
 
   Object.values(charter.nodes).forEach(validate);
@@ -559,7 +565,7 @@ export async function runActivation<TDataContent = never>(
   const producer = executorProducer(executor);
 
   const runtime = contributor.node.runtime;
-  const generatorRuntime = runtime as GeneratorRuntime<TDataContent>;
+  const generatorRuntime = runtime as GeneratorRuntime;
   const frameDefaults = {
     generatorId: activation.generatorId,
     activationId,
@@ -649,7 +655,7 @@ function absorbedCompletionMessages<TDataContent>(
   machine: Machine<TDataContent>,
   activation: Activation,
   contributor: Contributor<TDataContent>,
-  runtime: GeneratorRuntime<TDataContent>,
+  runtime: GeneratorRuntime,
   consumedFrameIds: ReadonlySet<string>,
   state: WorkState,
 ): FrameMessage<TDataContent>[] {
@@ -772,7 +778,7 @@ function resolveCommand<TDataContent>(
     const targetRuntimeId = encodeProjectionAddress(message.target);
     const contributor = contributors.find((candidate) => candidate.id === targetRuntimeId);
     const command = contributor
-      ? resolveFrameCommands(contributor, machine.charter).find((candidate) => candidate.name === message.name)
+      ? findContributorCommand(contributor, machine.charter, message.name)
       : undefined;
     if (contributor && command) {
       assertNodeActionStateCompatibility(command, contributor.node, "command");
@@ -782,7 +788,7 @@ function resolveCommand<TDataContent>(
 
   const matches: Array<{ command: AnyAction; contributor: Contributor<TDataContent> }> = [];
   for (const contributor of contributors) {
-    const command = resolveFrameCommands(contributor, machine.charter).find((candidate) => candidate.name === message.name);
+    const command = findContributorCommand(contributor, machine.charter, message.name);
     if (command) {
       assertNodeActionStateCompatibility(command, contributor.node, "command");
       matches.push({ command, contributor });
@@ -797,16 +803,31 @@ function resolveCommand<TDataContent>(
   return matches[0];
 }
 
+/**
+ * External dispatch honors the caller field: only actions contributed with
+ * caller external|any are reachable through executeCommand, evaluated against
+ * the contributor's current scope (selects included, fresh evaluation).
+ */
+function findContributorCommand<TDataContent>(
+  contributor: Contributor<TDataContent>,
+  charter: Charter<TDataContent> | undefined,
+  name: string,
+): AnyAction | undefined {
+  return resolveContributorActions(contributor, charter)
+    .find((entry) => callerAllows(entry.caller, "external") && entry.action.name === name)?.action;
+}
+
 function validateMachineActionStateCompatibility<TDataContent>(
   root: Instance<TDataContent>,
   charter: Charter<TDataContent>,
 ): void {
   for (const contributor of collectContributors(root)) {
-    for (const tool of resolveFrameTools(contributor, charter)) {
-      assertNodeActionStateCompatibility(tool, contributor.node, "tool");
-    }
-    for (const command of resolveFrameCommands(contributor, charter)) {
-      assertNodeActionStateCompatibility(command, contributor.node, "command");
+    for (const entry of collectAllNodeActions(contributor.node, charter)) {
+      assertNodeActionStateCompatibility(
+        entry.action,
+        contributor.node,
+        callerAllows(entry.caller, "generator") ? "tool" : "command",
+      );
     }
   }
 }
@@ -853,7 +874,7 @@ function createContributorActionContext<TDataContent>(
   action: AnyAction,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
 ): ActionContext<unknown, TDataContent> {
-  const stateAddress = stateAddressForContributor(contributor);
+  const stateAddress = stateAddressForContributor(contributor, action);
   const instance = createActionInstanceContext(machine, contributor, frameDefaults);
   const params = resolveActionParams(
     action,
@@ -976,16 +997,6 @@ function childInstanceIdsByNodeKey(
     .map((child) => child.id);
 }
 
-function enqueueActionResult<TDataContent>(
-  machine: Machine<TDataContent>,
-  value: unknown,
-): void {
-  const messages = actionResultMessages<TDataContent>(value);
-  if (messages.length > 0) {
-    machine.enqueueFrame({ messages });
-  }
-}
-
 function enqueueExecutorResult<TDataContent>(
   machine: Machine<TDataContent>,
   result: ExecutorRunResult<TDataContent>,
@@ -1012,7 +1023,7 @@ function enqueueExecutorResult<TDataContent>(
 
 function outputConfigForRuntime<TDataContent>(
   output: OutputConfig<TDataContent> | undefined,
-  runtime: NormalizedRuntime<TDataContent>,
+  runtime: NormalizedRuntime,
 ): OutputConfig<TDataContent> | undefined {
   if (runtime.type !== "generator" || output?.audience !== undefined) {
     return output;
@@ -1038,19 +1049,6 @@ function enqueueFrameWithDefaults<TDataContent>(
     generatorId: frame.generatorId ?? defaults.generatorId,
     activationId: frame.activationId ?? defaults.activationId,
   });
-}
-
-function actionResultMessages<TDataContent>(
-  value: unknown,
-): FrameMessage<TDataContent>[] {
-  if (Array.isArray(value)) {
-    return value.filter(isFrameMessageLike) as FrameMessage<TDataContent>[];
-  }
-  return isFrameMessageLike(value) ? [value as FrameMessage<TDataContent>] : [];
-}
-
-function isFrameMessageLike(value: unknown): value is { type: string } {
-  return Boolean(value && typeof value === "object" && typeof (value as { type?: unknown }).type === "string");
 }
 
 function canonicalizeFrameDraft<
@@ -1334,8 +1332,8 @@ function stateOverrideTarget(
   const contributor = collectContributors(root).find(
     (candidate) => !candidate.isMember && candidate.concreteInstance === instance,
   );
-  const descriptor = contributor?.node.state;
-  if (!contributor || !descriptor || descriptor.key !== stateKey) {
+  const descriptor = contributor?.node.states.find((candidate) => candidate.key === stateKey);
+  if (!contributor || !descriptor) {
     return instance;
   }
   return descriptor.scope === "local"
@@ -1374,8 +1372,16 @@ function findResolvedState(
 
 function stateAddressForContributor(
   contributor: Contributor<any>,
+  action: AnyAction,
 ): StateAddress | undefined {
-  const descriptor = contributor.node.state;
+  // With plural states, the action context binds the descriptor the ACTION
+  // declares, resolved among the node's declarations. state: null means the
+  // action gets no state context, even when the node declares states.
+  const required = action.state?.key;
+  if (required === undefined) {
+    return undefined;
+  }
+  const descriptor = contributor.node.states.find((declared) => declared.key === required);
   if (!descriptor) {
     return undefined;
   }
@@ -1734,7 +1740,7 @@ function generatorCandidatesForSource<TDataContent>(
 ): GeneratorCandidate[] {
   const candidates: GeneratorCandidate[] = [];
   for (const contributor of generatorContributors) {
-    const runtime = contributor.node.runtime as GeneratorRuntime<TDataContent>;
+    const runtime = contributor.node.runtime as GeneratorRuntime;
     if (sourceFrameProducedByGenerator(sourceFrame, contributor.id)) {
       continue;
     }
@@ -1914,7 +1920,7 @@ function activationIdFor({
 }
 
 function completionReasonForRuntime(
-  runtime: NormalizedRuntime<any>,
+  runtime: NormalizedRuntime,
   reason: ExecutorRunResult["completionReason"],
 ): WorkCompletionReason {
   if (reason === "cancelled" || reason === "delegated" || reason === "error" || reason === "terminal-action") return reason;

@@ -147,8 +147,8 @@ export const getCompiledIr = query({
         return {
           ...runtime,
           inference: {
-            systemParts: inference.systemParts,
-            dynamicParts: inference.dynamicParts,
+            preamble: inference.preamble,
+            recency: inference.recency,
             tools: inference.tools.map((tool) => tool.name),
             retrievableStates: inference.retrievableStates,
           },

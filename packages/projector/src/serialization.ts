@@ -3,41 +3,49 @@ import {
   createNode,
   normalizeStateDescriptor,
 } from "./create.ts";
-import {
-  defaultProjection,
-  hiddenProjection,
-  isHistoryProjectionFunction,
-  isProjectionFunction,
-} from "./projection-functions.ts";
+import { isMemberSelect, resolveDiscriminatorRef } from "./discriminators.ts";
 import { hydrateNodeRef } from "./refs.ts";
-import { actionBinding } from "./scoped-actions.ts";
+import { nodeActionByName } from "./scoped-actions.ts";
+import { regionAddress } from "./regions.ts";
+import { slotPlacement } from "./slots.ts";
 import type {
-  ActionBindings,
-  ActionKind,
-  ActorHistoryProjection,
   AnyAction,
   Charter,
-  DryHistoryProjection,
+  DryMemberEntry,
+  DryPart,
   DryRuntime,
   DryAction,
   DryNode,
-  HistoryProjection,
-  HistoryProjectionFunction,
   Instance,
-  MessageHistoryProjection,
+  LayoutRegionName,
+  MemberEntry,
   Node,
   NormalizedStateDescriptor,
   AnyOutputConfig,
   OutputConfig,
-  Projection,
-  ProjectionFunction,
+  Part,
   Ref,
   Runtime,
   SerializedOutputConfig,
   SerializedInstance,
   SerializedStateDescriptor,
+  SlotAddress,
   StateContainer,
 } from "./types.ts";
+
+/** Re-enters a dry placement tag as a slot address (regions by sentinel identity). */
+function hydrateSlotAddress(entry: {
+  slot?: string;
+  region?: LayoutRegionName;
+}): { slot?: SlotAddress } {
+  if (entry.slot !== undefined) {
+    return { slot: entry.slot };
+  }
+  if (entry.region !== undefined) {
+    return { slot: regionAddress(entry.region) };
+  }
+  return {};
+}
 
 export function serializeInstance<TDataContent>(
   instance: Instance<TDataContent>,
@@ -76,26 +84,20 @@ export function serializeNode<TDataContent>(
     return registeredKey;
   }
   const sourceNodeKey = sourceNodeKeyFor(node, charter);
+  const sourceNode = sourceNodeKey ? charter.nodes[sourceNodeKey] : undefined;
 
   return {
     key: node.key,
     sourceNodeKey,
     name: node.name,
     params: serializeParams(node.params),
-    instructions: node.instructions,
-    tools: serializeActionRefs(node.toolRefs, node.toolBindings, charter, "tool", sourceNodeKey),
-    commands: serializeActionRefs(
-      node.commandRefs,
-      node.commandBindings,
-      charter,
-      "command",
-      sourceNodeKey,
-    ),
-    state: node.state ? serializeStateDescriptor(node.state, charter) : undefined,
-    members: node.members.map((member) => serializeNode(member, charter)),
+    parts: serializeParts(node.parts, charter, sourceNode, []),
+    states: node.states.length > 0
+      ? node.states.map((state) => serializeStateDescriptor(state, charter))
+      : undefined,
+    members: node.memberEntries.map((entry) => serializeMemberEntry(entry, charter)),
     output: node.output ? serializeOutputConfig(node.output) : undefined,
-    projection: serializeNodeProjection(node, charter, sourceNodeKey),
-    runtime: serializeRuntime(node.runtime, charter, sourceNodeKey),
+    runtime: serializeRuntime(node.runtime),
     executorConfig: node.executorConfig,
   };
 }
@@ -108,32 +110,281 @@ export function hydrateNode<TDataContent = never>(
     return hydrateNodeRef(serialized, charter);
   }
 
+  const sourceNode = serialized.sourceNodeKey ? charter.nodes[serialized.sourceNodeKey] : undefined;
   return createNode<TDataContent>({
     key: serialized.key,
     sourceNodeKey: serialized.sourceNodeKey,
     name: serialized.name,
     params: serialized.params ? hydrateParams(serialized.params) : undefined,
-    instructions: serialized.instructions,
-    tools: hydrateActionRefs(serialized.tools, charter, "tool", serialized.sourceNodeKey),
-    commands: hydrateActionRefs(
-      serialized.commands,
-      charter,
-      "command",
-      serialized.sourceNodeKey,
-    ),
-    state: serialized.state ? hydrateStateDescriptor(serialized.state, charter) : undefined,
-    members: serialized.members?.map((member) => hydrateNode(member, charter)),
+    parts: serialized.parts
+      ? hydrateParts<TDataContent>(serialized.parts, charter, sourceNode, [])
+      : undefined,
+    states: serialized.states?.map((state) => hydrateStateDescriptor(state, charter)),
+    members: serialized.members?.map((entry) => hydrateMemberEntry(entry, charter)),
     output: serialized.output
       ? (hydrateOutputConfig(serialized.output) as OutputConfig<TDataContent>)
       : undefined,
-    projection: serialized.projection
-      ? hydrateNodeProjection(serialized.projection, charter, serialized.sourceNodeKey)
-      : undefined,
-    runtime: serialized.runtime
-      ? hydrateRuntime(serialized.runtime, charter, serialized.sourceNodeKey)
-      : undefined,
+    runtime: serialized.runtime,
     executorConfig: serialized.executorConfig,
   });
+}
+
+// --- Parts serialization. Invariant: every behavioral ref on a serialized
+// node must be recoverable from some registry at hydration — the sourceNode's
+// parts when the node descends from a charter node, or the charter's global
+// registries otherwise. Code (runs, computes, derives) never serializes. ---
+
+/** A step into a select branch, for branch-scoped action recovery. */
+type BranchPath = Array<{ discriminator: string; value: string }>;
+
+function serializeParts<TDataContent>(
+  parts: readonly Part<TDataContent>[],
+  charter: Charter<TDataContent>,
+  sourceNode: Node<TDataContent> | undefined,
+  branchPath: BranchPath,
+): DryPart[] {
+  return parts.map((part): DryPart => {
+    if (part.kind === "text") {
+      return { kind: "text", ...slotPlacement(part.slot), text: part.text };
+    }
+
+    if (part.kind === "computed") {
+      const definition = part.part;
+      if (typeof definition === "string") {
+        if (!charter.computedParts[definition]) {
+          throw new Error(`Cannot serialize unknown computed part ref "${definition}"`);
+        }
+        return { kind: "computed", ref: definition };
+      }
+      if (charter.computedParts[definition.name] !== definition) {
+        throw new Error(`Cannot serialize unregistered computed part "${definition.name}"`);
+      }
+      return { kind: "computed", ref: definition.name };
+    }
+
+    if (part.kind === "action") {
+      return {
+        kind: "action",
+        caller: part.caller,
+        ...(part.exposure ? { exposure: part.exposure } : {}),
+        ref: serializePartAction(part.action, charter, sourceNode, branchPath),
+        ...(part.guidance
+          ? {
+              guidance: part.guidance.map((entry) => ({
+                ...slotPlacement(entry.slot),
+                text: entry.text,
+              })),
+            }
+          : {}),
+      };
+    }
+
+    const discriminator = resolveDiscriminatorRef(part.discriminator, charter);
+    if (charter.discriminators[discriminator.name] !== discriminator) {
+      throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
+    }
+    const branches: Record<string, DryPart[] | null> = {};
+    for (const [value, branch] of Object.entries(part.branches)) {
+      branches[value] = branch
+        ? serializeParts(branch, charter, sourceNode, [
+            ...branchPath,
+            { discriminator: discriminator.name, value },
+          ])
+        : null;
+    }
+    return { kind: "select", discriminator: discriminator.name, partial: part.partial, branches };
+  });
+}
+
+function hydrateParts<TDataContent>(
+  parts: readonly DryPart[],
+  charter: Charter<TDataContent>,
+  sourceNode: Node<TDataContent> | undefined,
+  branchPath: BranchPath,
+): Part<TDataContent>[] {
+  return parts.map((part): Part<TDataContent> => {
+    if (part.kind === "text") {
+      return { kind: "text", ...hydrateSlotAddress(part), text: part.text };
+    }
+
+    if (part.kind === "computed") {
+      const definition = charter.computedParts[part.ref];
+      if (!definition) {
+        throw new Error(`Unknown computed part ref "${part.ref}" for node hydration`);
+      }
+      return { kind: "computed", part: definition };
+    }
+
+    if (part.kind === "action") {
+      return {
+        kind: "action",
+        caller: part.caller,
+        ...(part.exposure ? { exposure: part.exposure } : {}),
+        action: hydratePartAction(part.ref, charter, sourceNode, branchPath),
+        ...(part.guidance
+          ? {
+              guidance: part.guidance.map((entry) => ({
+                kind: "text" as const,
+                ...hydrateSlotAddress(entry),
+                text: entry.text,
+              })),
+            }
+          : {}),
+      };
+    }
+
+    const discriminator = charter.discriminators[part.discriminator];
+    if (!discriminator) {
+      throw new Error(`Unknown discriminator ref "${part.discriminator}" for node hydration`);
+    }
+    const branches: Record<string, Part<TDataContent>[] | null> = {};
+    for (const [value, branch] of Object.entries(part.branches)) {
+      branches[value] = branch
+        ? hydrateParts(branch, charter, sourceNode, [
+            ...branchPath,
+            { discriminator: discriminator.name, value },
+          ])
+        : null;
+    }
+    return { kind: "select", discriminator, partial: part.partial, branches };
+  });
+}
+
+/**
+ * Serializes an action entry to a name ref. Recovery tiers mirror scoped
+ * resolution: charter registry key, else identity-match inside the source
+ * node's parts (branch-scoped first, so same-named variants in different
+ * select branches stay distinguishable), else error — an inline behavioral
+ * definition recoverable from no registry cannot serialize.
+ */
+function serializePartAction<TDataContent>(
+  entry: AnyAction | string,
+  charter: Charter<TDataContent>,
+  sourceNode: Node<TDataContent> | undefined,
+  branchPath: BranchPath,
+): DryAction {
+  if (typeof entry === "string") {
+    return entry;
+  }
+
+  const registeredKey = findRegisteredKey(charter.actions, entry);
+  if (registeredKey) {
+    return registeredKey;
+  }
+
+  if (sourceNode) {
+    const match = findSourceAction(sourceNode, entry.name, branchPath);
+    if (match === entry) {
+      return entry.name;
+    }
+  }
+
+  throw new Error(`Cannot serialize unregistered action "${entry.name}"`);
+}
+
+function hydratePartAction<TDataContent>(
+  ref: DryAction,
+  charter: Charter<TDataContent>,
+  sourceNode: Node<TDataContent> | undefined,
+  branchPath: BranchPath,
+): AnyAction {
+  if (sourceNode) {
+    const match = findSourceAction(sourceNode, ref, branchPath);
+    if (match) {
+      return match;
+    }
+  }
+  const registered = charter.actions[ref];
+  if (registered) {
+    return registered;
+  }
+  throw new Error(`Unknown action ref "${ref}" for node hydration`);
+}
+
+/**
+ * Finds an inline action by name in a source node's parts, preferring the
+ * exact branch context (following selects whose discriminator+value match the
+ * path) before falling back to a node-wide first match.
+ */
+function findSourceAction<TDataContent>(
+  sourceNode: Node<TDataContent>,
+  name: string,
+  branchPath: BranchPath,
+): AnyAction | undefined {
+  const scoped = findActionInParts(sourceNode.parts, name, branchPath);
+  if (scoped) {
+    return scoped;
+  }
+  return nodeActionByName(sourceNode, name);
+}
+
+function findActionInParts<TDataContent>(
+  parts: readonly Part<TDataContent>[],
+  name: string,
+  branchPath: BranchPath,
+): AnyAction | undefined {
+  const [step, ...rest] = branchPath;
+  for (const part of parts) {
+    if (step === undefined) {
+      if (part.kind === "action" && typeof part.action !== "string" && part.action.name === name) {
+        return part.action;
+      }
+      continue;
+    }
+    if (part.kind !== "select") {
+      continue;
+    }
+    const discriminator = typeof part.discriminator === "string"
+      ? part.discriminator
+      : part.discriminator.name;
+    if (discriminator !== step.discriminator) {
+      continue;
+    }
+    const branch = part.branches[step.value];
+    if (branch) {
+      const found = findActionInParts(branch, name, rest);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+function serializeMemberEntry<TDataContent>(
+  entry: MemberEntry<TDataContent>,
+  charter: Charter<TDataContent>,
+): DryMemberEntry<TDataContent> {
+  if (isMemberSelect(entry)) {
+    const discriminator = resolveDiscriminatorRef(entry.discriminator, charter);
+    if (charter.discriminators[discriminator.name] !== discriminator) {
+      throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
+    }
+    const branches: Record<string, Array<DryNode<TDataContent> | Ref> | null> = {};
+    for (const [value, branch] of Object.entries(entry.branches)) {
+      branches[value] = branch ? branch.map((member) => serializeNode(member, charter)) : null;
+    }
+    return { kind: "select", discriminator: discriminator.name, partial: entry.partial, branches };
+  }
+  return serializeNode(entry, charter);
+}
+
+function hydrateMemberEntry<TDataContent>(
+  entry: DryMemberEntry<TDataContent>,
+  charter: Charter<TDataContent>,
+): MemberEntry<TDataContent> {
+  if (typeof entry !== "string" && "kind" in entry && entry.kind === "select") {
+    const discriminator = charter.discriminators[entry.discriminator];
+    if (!discriminator) {
+      throw new Error(`Unknown discriminator ref "${entry.discriminator}" for node hydration`);
+    }
+    const branches: Record<string, Node<TDataContent>[] | null> = {};
+    for (const [value, branch] of Object.entries(entry.branches)) {
+      branches[value] = branch ? branch.map((member) => hydrateNode(member, charter)) : null;
+    }
+    return { kind: "memberSelect", discriminator, partial: entry.partial, branches };
+  }
+  return hydrateNode(entry as DryNode<TDataContent> | Ref, charter);
 }
 
 export function serializeOutputConfig(output: AnyOutputConfig): SerializedOutputConfig {
@@ -164,238 +415,16 @@ export function hydrateOutputConfig(output: SerializedOutputConfig): AnyOutputCo
   };
 }
 
-export function serializeProjection<TDataContent>(
-  projection: Projection<TDataContent>,
-  charter: Charter<TDataContent>,
-): Ref {
-  if (isProjectionFunction<TDataContent>(projection)) {
-    const registered = charter.projections[projection.name];
-    if (registered !== projection) {
-      throw new Error(
-        `Cannot serialize unregistered projection function "${projection.name}"`,
-      );
-    }
-    return projection.name;
-  }
-
-  if (typeof projection === "string") {
-    assertProjectionRef(projection, charter);
-    return projection;
-  }
-
-  throw new Error("Cannot serialize unknown projection");
-}
-
-export function hydrateProjection<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-): ProjectionFunction<TDataContent> {
-  const fn = charter.projections[projection];
-  if (!fn) {
-    throw new Error(`Unknown projection ref "${projection}"`);
-  }
-  return fn;
-}
-
-function serializeNodeProjection<TDataContent>(
-  node: Node<TDataContent>,
-  charter: Charter<TDataContent>,
-  sourceNodeKey: string | undefined,
-): Ref | undefined {
-  if (node.projection === defaultProjection) {
-    return undefined;
-  }
-  return serializeProjectionSlot(node.projection, charter, "projection", sourceNodeKey);
-}
-
-function hydrateNodeProjection<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-  sourceNodeKey: string | undefined,
-): ProjectionFunction<TDataContent> {
-  return hydrateProjectionSlot(projection, charter, "projection", sourceNodeKey);
-}
-
-function serializeProjectionSlot<TDataContent>(
-  projection: Projection<TDataContent>,
-  charter: Charter<TDataContent>,
-  slot: "projection" | "boundaryProjection",
-  sourceNodeKey: string | undefined,
-): Ref {
-  if (typeof projection === "string") {
-    assertProjectionSlotRef(projection, charter, slot, sourceNodeKey);
-    return projection;
-  }
-
-  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
-  if (sourceProjection === projection) {
-    return projection.name;
-  }
-
-  return serializeProjection(projection, charter);
-}
-
-function hydrateProjectionSlot<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-  slot: "projection" | "boundaryProjection",
-  sourceNodeKey: string | undefined,
-): ProjectionFunction<TDataContent> {
-  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
-  if (sourceProjection?.name === projection) {
-    return sourceProjection;
-  }
-  return hydrateProjection(projection, charter);
-}
-
-function assertProjectionSlotRef<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-  slot: "projection" | "boundaryProjection",
-  sourceNodeKey: string | undefined,
-): void {
-  const sourceProjection = sourceNodeProjectionSlot(charter, slot, sourceNodeKey);
-  if (sourceProjection?.name === projection) {
-    return;
-  }
-  assertProjectionRef(projection, charter);
-}
-
-export function sourceNodeProjectionSlot<TDataContent>(
-  charter: Charter<TDataContent>,
-  slot: "projection" | "boundaryProjection",
-  sourceNodeKey: string | undefined,
-): ProjectionFunction<TDataContent> | undefined {
-  if (!sourceNodeKey) {
-    return undefined;
-  }
-  const sourceNode = charter.nodes[sourceNodeKey];
-  if (!sourceNode) {
-    return undefined;
-  }
-
-  const projection = slot === "projection"
-    ? sourceNode.projection
-    : sourceNode.runtime.type === "generator"
-      ? sourceNode.runtime.boundaryProjection
-      : undefined;
-  return isProjectionFunction<TDataContent>(projection) ? projection : undefined;
-}
-
-function assertProjectionRef<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-): void {
-  if (!charter.projections[projection]) {
-    throw new Error(`Unknown projection ref "${projection}"`);
-  }
-}
-
-export function serializeHistoryProjection<TDataContent>(
-  projection: HistoryProjection<TDataContent>,
-  charter: Charter<TDataContent>,
-): ActorHistoryProjection | MessageHistoryProjection | Ref {
-  if (isActorHistoryProjection(projection) || isMessageHistoryProjection(projection)) {
-    return projection;
-  }
-
-  if (isHistoryProjectionFunction(projection)) {
-    const registered = charter.historyProjections[projection.name];
-    if (registered !== projection) {
-      throw new Error(
-        `Cannot serialize unregistered history projection function "${projection.name}"`,
-      );
-    }
-    return projection.name;
-  }
-
-  if (typeof projection === "string") {
-    assertHistoryProjectionRef(projection, charter);
-    return projection;
-  }
-
-  throw new Error(`Cannot serialize unknown history projection`);
-}
-
-function assertHistoryProjectionRef<TDataContent>(
-  projection: Ref,
-  charter: Charter<TDataContent>,
-): void {
-  if (!charter.historyProjections[projection]) {
-    throw new Error(`Unknown history projection ref "${projection}"`);
-  }
-}
-
-export function hydrateHistoryProjection<TDataContent>(
-  projection: ActorHistoryProjection | MessageHistoryProjection | Ref,
-  charter: Charter<TDataContent>,
-): ActorHistoryProjection | MessageHistoryProjection | HistoryProjectionFunction<TDataContent> {
-  if (isActorHistoryProjection(projection) || isMessageHistoryProjection(projection)) {
-    return projection;
-  }
-
-  if (typeof projection !== "string") {
-    throw new Error(`Cannot hydrate unknown history projection`);
-  }
-  const historyProjection = charter.historyProjections[projection];
-  if (!historyProjection) {
-    throw new Error(`Unknown history projection ref "${projection}"`);
-  }
-  return historyProjection;
-}
-
-function serializeRuntime<TDataContent>(
-  runtime: Node<TDataContent>["runtime"],
-  charter: Charter<TDataContent>,
-  sourceNodeKey: string | undefined,
-): DryRuntime {
+function serializeRuntime(runtime: Node["runtime"]): DryRuntime {
   if (runtime.type === "generator") {
-    const { boundaryProjection, historyProjection, ...rest } = runtime;
-    const serializedHistoryProjection = historyProjection
-      ? serializeRuntimeHistoryProjection(historyProjection, charter)
-      : undefined;
+    const { boundaryProjection, ...rest } = runtime;
     return {
       ...rest,
-      boundaryProjection: boundaryProjection === hiddenProjection
-        ? undefined
-        : serializeProjectionSlot(boundaryProjection, charter, "boundaryProjection", sourceNodeKey),
-      ...(serializedHistoryProjection
-        ? { historyProjection: serializedHistoryProjection }
-        : {}),
+      ...(boundaryProjection === "hidden" ? {} : { boundaryProjection }),
     };
   }
 
   return runtime;
-}
-
-function hydrateRuntime<TDataContent>(
-  runtime: DryRuntime,
-  charter: Charter<TDataContent>,
-  sourceNodeKey: string | undefined,
-): Runtime<TDataContent> {
-  if (runtime.type === "generator") {
-    return {
-      ...runtime,
-      boundaryProjection: runtime.boundaryProjection
-        ? hydrateProjectionSlot(runtime.boundaryProjection, charter, "boundaryProjection", sourceNodeKey)
-        : undefined,
-      historyProjection: runtime.historyProjection
-        ? hydrateHistoryProjection(runtime.historyProjection, charter)
-        : undefined,
-    };
-  }
-
-  return runtime;
-}
-
-function serializeRuntimeHistoryProjection<TDataContent>(
-  projection: HistoryProjection<TDataContent>,
-  charter: Charter<TDataContent>,
-): DryHistoryProjection | undefined {
-  if (isMessageHistoryProjection(projection)) {
-    return undefined;
-  }
-  return serializeHistoryProjection(projection, charter);
 }
 
 export function serializeStateDescriptor(
@@ -410,12 +439,24 @@ export function serializeStateDescriptor(
   if (typeof state.init === "function") {
     throw new Error("Cannot serialize inline state descriptor with function init");
   }
+  if (state.projection?.render || state.projection?.note) {
+    throw new Error(
+      `Cannot serialize inline state descriptor "${state.key}" with a render/note function; register it on the charter`,
+    );
+  }
 
   return {
     key: state.key,
     scope: state.scope,
     onInitConflict: state.onInitConflict,
-    projection: state.projection,
+    ...(state.projection
+      ? {
+          projection: {
+            ...slotPlacement(state.projection.slot),
+            ...(state.projection.exposure ? { exposure: state.projection.exposure } : {}),
+          },
+        }
+      : {}),
     init: state.init,
     schema: z.toJSONSchema(state.schema),
   };
@@ -439,78 +480,13 @@ export function hydrateStateDescriptor(
     init: serialized.init,
     scope: serialized.scope,
     onInitConflict: serialized.onInitConflict,
-    projection: serialized.projection,
+    projection: serialized.projection
+      ? {
+          ...hydrateSlotAddress(serialized.projection),
+          ...(serialized.projection.exposure ? { exposure: serialized.projection.exposure } : {}),
+        }
+      : undefined,
   });
-}
-
-function serializeActionRefs<TDataContent>(
-  refs: readonly string[],
-  bindings: ActionBindings,
-  charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: ActionKind,
-  sourceNodeKey: string | undefined,
-): DryAction[] {
-  return refs.map((ref) =>
-    serializeActionRef(ref, bindings[ref], charter, kind, sourceNodeKey)
-  );
-}
-
-function hydrateActionRefs<TDataContent>(
-  refs: readonly DryAction[] | undefined,
-  charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: ActionKind,
-  sourceNodeKey: string | undefined,
-): AnyAction[] | undefined {
-  return refs?.map((ref) => hydrateActionRef(ref, charter, kind, sourceNodeKey));
-}
-
-function hydrateActionRef<TDataContent>(
-  ref: DryAction,
-  charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: ActionKind,
-  sourceNodeKey: string | undefined,
-): AnyAction {
-  const sourceNode = sourceNodeKey ? charter.nodes[sourceNodeKey] : undefined;
-  const sourceBinding = sourceNode ? actionBinding(sourceNode, ref, kind) : undefined;
-  const registry = kind === "tool" ? charter.tools : charter.commands;
-  const binding = sourceBinding ?? registry[ref];
-  if (!binding) {
-    throw new Error(`Unknown ${kind} ref "${ref}" for node hydration`);
-  }
-  if (binding.name !== ref) {
-    throw new Error(
-      `Cannot hydrate ${kind} ref "${ref}" because resolved action name is "${binding.name}"`,
-    );
-  }
-  return binding;
-}
-
-function serializeActionRef<TDataContent>(
-  ref: string,
-  binding: AnyAction | undefined,
-  charter: Pick<Charter<TDataContent>, "nodes" | "tools" | "commands">,
-  kind: ActionKind,
-  sourceNodeKey: string | undefined,
-): DryAction {
-  if (!binding) {
-    return ref;
-  }
-
-  const registry = kind === "tool" ? charter.tools : charter.commands;
-  const key = findRegisteredKey(registry, binding);
-  if (!key) {
-    const sourceNode = sourceNodeKey ? charter.nodes[sourceNodeKey] : undefined;
-    const sourceBinding = sourceNode
-      ? actionBinding(sourceNode, ref, kind)
-      : undefined;
-    if (sourceBinding === binding) {
-      return ref;
-    }
-
-    throw new Error(`Cannot serialize unregistered ${kind} "${binding.name}"`);
-  }
-
-  return key;
 }
 
 export function sourceNodeKeyFor<TDataContent>(
@@ -522,28 +498,6 @@ export function sourceNodeKeyFor<TDataContent>(
   }
   const sourceNode = charter.nodes[node.key];
   return sourceNode && sourceNode !== node ? node.key : undefined;
-}
-
-function isActorHistoryProjection(
-  projection: HistoryProjection<any>,
-): projection is ActorHistoryProjection {
-  return (
-    typeof projection === "object" &&
-    projection !== null &&
-    "type" in projection &&
-    projection.type === "actor"
-  );
-}
-
-function isMessageHistoryProjection(
-  projection: HistoryProjection<any>,
-): projection is MessageHistoryProjection {
-  return (
-    typeof projection === "object" &&
-    projection !== null &&
-    "type" in projection &&
-    projection.type === "messages"
-  );
 }
 
 function findRegisteredKey<T extends object>(registry: Record<string, T>, value: T): string | undefined {

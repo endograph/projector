@@ -126,7 +126,7 @@ export function actorMessageVisibleByDelivery(
 export function visibleFramesForGenerator<TDataContent>(
   frames: readonly Frame<TDataContent>[],
   targetGeneratorId: GeneratorId,
-  runtime: GeneratorRuntime<TDataContent>,
+  runtime: GeneratorRuntime,
   activationId?: string,
 ): Frame<TDataContent>[] {
   const activationFrameIndex = activationFrameIndexFor(frames, activationId, {
@@ -165,7 +165,7 @@ export function frameVisibleByActivationHistory(
   frame: Frame<any>,
   frameIndex: number,
   activationFrameIndex: number,
-  runtime: GeneratorRuntime<any>,
+  runtime: GeneratorRuntime,
   activationId: string | undefined,
 ): boolean {
   if (runtime.activationHistory !== "snapshot" || activationId === undefined) {

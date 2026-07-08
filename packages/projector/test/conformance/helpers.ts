@@ -15,7 +15,6 @@ export function charter(overrides: Partial<CharterConfig> = {}): Charter {
     tools: [],
     commands: [],
     states: [],
-    projections: [],
     ...overrides,
   });
 }

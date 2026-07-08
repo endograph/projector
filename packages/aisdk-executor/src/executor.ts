@@ -6,9 +6,13 @@ import {
   tool,
   type ModelMessage,
   type PrepareStepFunction,
+  type SystemModelMessage,
   type ToolSet,
 } from "ai";
+import { anthropic } from "@ai-sdk/anthropic";
+import { openai } from "@ai-sdk/openai";
 import {
+  actionExposure,
   assistantMessageFromTextOutput,
   createToolActionRequest,
   createUnboundActionContext,
@@ -33,7 +37,13 @@ import type {
   ProjectorExecutor,
 } from "@projectors/core";
 import { z } from "zod";
-import type { AiSdkExecutorConfig, AiSdkExecutorNodeConfig, AiSdkStreamUpdate } from "./types.ts";
+import type {
+  AiSdkDeferredToolsLowering,
+  AiSdkExecutorConfig,
+  AiSdkExecutorNodeConfig,
+  AiSdkPromptCacheConfig,
+  AiSdkStreamUpdate,
+} from "./types.ts";
 
 const DEFAULT_MAX_STEPS = 5;
 const DYNAMIC_CONTEXT_TAG = "dynamic-context";
@@ -230,7 +240,7 @@ function buildAiSdkInput<TDataContent = never>(
   const hasTools = Object.keys(tools).length > 0;
   return {
     model: config.model,
-    system: buildAiSdkSystem(request.inference),
+    system: buildAiSdkSystemMessages(request.inference, config.model, config.promptCache),
     messages: buildAiSdkMessages(request.inference, config.messageToModelMessage),
     prepareStep: request.refreshInference
       ? buildPrepareStep(request.refreshInference, config)
@@ -277,7 +287,7 @@ function buildPrepareStep<TDataContent>(
     if (stepNumber === 0) return undefined;
     const inference = refreshInference();
     return {
-      system: buildAiSdkSystem(inference),
+      system: buildAiSdkSystemMessages(inference, config.model, config.promptCache),
       messages: [
         ...buildAiSdkMessages(inference, config.messageToModelMessage),
         ...steps.flatMap((step) => step.response.messages),
@@ -370,15 +380,59 @@ function shouldStream<TDataContent>(
 }
 
 export function buildAiSdkSystem(inference: CompiledInference<any>): string {
-  const dynamicGuidance = hasRenderedParts(inference.dynamicParts)
+  const dynamicGuidance = hasRenderedParts(inference.recency)
     ? [{ type: "text" as const, text: DYNAMIC_CONTEXT_SYSTEM_GUIDANCE }]
     : [];
   return [
-    renderSection("System", inference.systemParts),
+    renderSection("System", inference.preamble),
     renderSection("Dynamic Context", dynamicGuidance),
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/**
+ * Lowers the preamble to system blocks with an Anthropic prompt-cache
+ * breakpoint at the stable/volatile boundary the IR marks on each part. The
+ * concatenated block text equals buildAiSdkSystem's string, so non-Anthropic
+ * providers (and promptCache: false) fall back to it byte-identically. One
+ * breakpoint, on the last stable block; Anthropic orders tools before system,
+ * so it also caches the tool-definition prefix.
+ */
+export function buildAiSdkSystemMessages(
+  inference: CompiledInference<any>,
+  model: AiSdkExecutorConfig<any>["model"],
+  promptCache?: AiSdkPromptCacheConfig,
+): string | SystemModelMessage[] {
+  if (promptCache === false) return buildAiSdkSystem(inference);
+  const provider = model && typeof model === "object" ? readStringField(model, "provider") : undefined;
+  if (!provider?.startsWith("anthropic.")) return buildAiSdkSystem(inference);
+
+  const boundary = inference.preamble.findIndex((part) => part.volatile);
+  const stable = boundary === -1 ? inference.preamble : inference.preamble.slice(0, boundary);
+  if (!hasRenderedParts(stable)) return buildAiSdkSystem(inference);
+  const volatileTail = boundary === -1 ? [] : inference.preamble.slice(boundary);
+
+  const dynamicGuidance = hasRenderedParts(inference.recency)
+    ? [{ type: "text" as const, text: DYNAMIC_CONTEXT_SYSTEM_GUIDANCE }]
+    : [];
+  const volatileText = [
+    renderContentPartsForText(volatileTail),
+    renderSection("Dynamic Context", dynamicGuidance),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const cacheControl = { type: "ephemeral" as const, ...(promptCache?.ttl ? { ttl: promptCache.ttl } : {}) };
+  const messages: SystemModelMessage[] = [
+    {
+      role: "system",
+      content: renderSection("System", stable),
+      providerOptions: { anthropic: { cacheControl } },
+    },
+  ];
+  if (volatileText) messages.push({ role: "system", content: volatileText });
+  return messages;
 }
 
 export function buildAiSdkMessages<TDataContent = never>(
@@ -394,7 +448,7 @@ export function buildAiSdkMessages<TDataContent = never>(
       entry.message !== undefined
     );
   const messages = entries.map((entry) => entry.message);
-  const dynamicContext = renderDynamicContextMessage(inference.dynamicParts);
+  const dynamicContext = renderDynamicContextMessage(inference.recency);
   if (!dynamicContext) {
     return messages;
   }
@@ -421,18 +475,122 @@ export function buildAiSdkTools<TDataContent = never>(
   runState: RunState = { terminal: false },
 ): ToolSet {
   const tools: ToolSet = {};
+  const deferred: AnyAction[] = [];
 
-  for (const action of request.inference.tools) {
-    tools[action.name] = tool({
+  const buildTool = (action: AnyAction): ToolSet[string] =>
+    tool({
       description: action.description ?? "",
       inputSchema: action.inputSchema ?? z.object({}),
       strict: config.toolStrict ?? false,
       execute: (input, aiSdkContext) =>
         executeAction(action, input, request, config, aiSdkContext, runState),
     });
+
+  for (const action of request.inference.tools) {
+    if (actionExposure(action) === "deferred") {
+      deferred.push(action);
+      continue;
+    }
+    tools[action.name] = buildTool(action);
+  }
+
+  if (deferred.length > 0) {
+    const lowering = config.deferredTools ?? builtinDeferredToolsLowering<TDataContent>(config.model);
+    if (!lowering) {
+      // Deferred exposure is a charter promise ("available via tool search")
+      // this executor cannot keep for the configured model. Failing loudly
+      // beats silently loading the tools natively under a lying note.
+      throw new Error(
+        `[aisdk-executor] deferred tools are not supported for this model (no built-in ` +
+          `tool-search lowering and no deferredTools configured): ${deferred
+            .map((action) => action.name)
+            .join(", ")}`,
+      );
+    }
+    const lowered = lowering({ deferred, buildTool, request });
+    for (const name of Object.keys(lowered)) {
+      // Keys for the deferred actions themselves never collide (they were
+      // skipped above); anything else shadowing a built tool is a lowering bug.
+      if (name in tools) {
+        throw new Error(
+          `[aisdk-executor] deferred-tools lowering returned tool "${name}", which would overwrite a native tool`,
+        );
+      }
+    }
+    Object.assign(tools, lowered);
   }
 
   return tools;
+}
+
+/**
+ * Built-in deferred-tools lowerings, matched by the model's provider id. Every
+ * provider shares one idiom: deferred tools stay in the ToolSet (execution
+ * wiring intact) marked `deferLoading` under the provider's options namespace,
+ * and the provider's tool-search tool is added so the model loads them on
+ * demand. Anthropic gets the BM25 (natural-language) search variant. Renamed
+ * provider instances and other providers have no built-in lowering;
+ * `config.deferredTools` overrides everything here.
+ */
+const BUILTIN_DEFERRED_LOWERINGS: Array<{
+  matches: (provider: string) => boolean;
+  searchToolName: string;
+  searchTool: () => ToolSet[string];
+  namespace: string;
+}> = [
+  {
+    matches: (provider) => provider.startsWith("anthropic."),
+    searchToolName: "tool_search_tool_bm25",
+    searchTool: () => anthropic.tools.toolSearchBm25_20251119() as ToolSet[string],
+    namespace: "anthropic",
+  },
+  {
+    matches: (provider) => provider === "openai.responses",
+    searchToolName: "tool_search",
+    searchTool: () => openai.tools.toolSearch() as ToolSet[string],
+    namespace: "openai",
+  },
+];
+
+function builtinDeferredToolsLowering<TDataContent>(
+  model: AiSdkExecutorConfig<TDataContent>["model"],
+): AiSdkDeferredToolsLowering<TDataContent> | undefined {
+  const provider =
+    model && typeof model === "object" ? readStringField(model, "provider") : undefined;
+  const lowering = provider
+    ? BUILTIN_DEFERRED_LOWERINGS.find((entry) => entry.matches(provider))
+    : undefined;
+  if (!lowering) return undefined;
+
+  return ({ deferred, buildTool, request }) => ({
+    [reserveSearchToolName(lowering.searchToolName, request)]: lowering.searchTool(),
+    ...Object.fromEntries(
+      deferred.map((action) => [action.name, markDeferLoading(buildTool(action), lowering.namespace)]),
+    ),
+  });
+}
+
+/** The provider search tool's ToolSet key may not collide with a projected action. */
+function reserveSearchToolName<TDataContent>(
+  name: string,
+  request: ExecutorRunRequest<TDataContent>,
+): string {
+  if (request.inference.tools.some((action) => action.name === name)) {
+    throw new Error(
+      `[aisdk-executor] projected tool name "${name}" is reserved for the provider tool-search lowering`,
+    );
+  }
+  return name;
+}
+
+function markDeferLoading(toolDef: ToolSet[string], namespace: string): ToolSet[string] {
+  return {
+    ...toolDef,
+    providerOptions: {
+      ...toolDef.providerOptions,
+      [namespace]: { ...toolDef.providerOptions?.[namespace], deferLoading: true },
+    },
+  };
 }
 
 async function executeAction<TDataContent>(

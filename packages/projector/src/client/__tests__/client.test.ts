@@ -104,13 +104,12 @@ describe("client instance realization", () => {
       key: "agentState",
       schema: z.object({ liveMode: z.boolean() }),
       init: { liveMode: false },
-      projection: "hidden" as const,
     };
     const critic = createNode({ key: "critic", commands: [setLiveMode] });
     const child = createNode({ key: "child" });
     const agent = createNode({
       key: "agent",
-      state: agentState,
+      states: [agentState],
       tools: [lookup],
       commands: [setLiveMode],
       members: [critic],
