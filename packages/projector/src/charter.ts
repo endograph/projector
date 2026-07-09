@@ -2,7 +2,7 @@ import {
   normalizeStateDescriptor,
   type ValidateNodeTreeParams,
 } from "./create.ts";
-import { isMemberSelect, resolveDiscriminatorRef } from "./discriminators.ts";
+import { resolveDiscriminatorRef } from "./discriminators.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import { defaultSlotForRegion, implicitDefaultLayout, layoutSlot, lintLayoutVolatileOrder, type CreatedLayout } from "./layouts.ts";
 import { isRegionAddress } from "./regions.ts";
@@ -11,7 +11,9 @@ import {
   normalizeParamsSchema,
   type AnyParamsSchema,
 } from "./params.ts";
+import { computedPartDefinition, isComputedMemberDef } from "./computed-parts.ts";
 import { walkAllParts } from "./parts.ts";
+import { computedRegistryActions } from "./scoped-actions.ts";
 import { slotName } from "./slots.ts";
 import type {
   AnyAction,
@@ -94,11 +96,19 @@ export function createCharter<
 }
 
 /**
- * Build-time validation over the closed vocabularies: computed parts must
- * target volatile slots, non-partial selects must be exhaustive over their
- * discriminator's values, discriminator/computed refs in registered nodes
- * must resolve, and layouts get the volatile-ordering lint (as an error at
- * build — it is always fixable at authoring time).
+ * Build-time validation over the closed vocabularies: registered computed
+ * parts must target volatile slots, sugar-lowered selects must use registered
+ * discriminators with valid (and, when non-partial, exhaustive) branches,
+ * discriminator/computed refs in registered nodes must resolve, and layouts
+ * get the volatile-ordering lint (as an error at build — it is always fixable
+ * at authoring time).
+ *
+ * The volatile-slot requirement deliberately does NOT apply to sugar-produced
+ * defs (select/when): they are slot-less and never registered in
+ * charter.computedParts, so the loop below never sees them. Their variation
+ * axis is a declared discriminator — branch prose is exactly as static as the
+ * old SelectPart branches were — not the ambient dynamism the volatile rule
+ * exists to quarantine.
  */
 function validateCharter<TDataContent>(charter: Charter<TDataContent>): void {
   const layouts = [charter.defaultLayout, ...Object.values(charter.layouts)];
@@ -137,27 +147,117 @@ function validateCharter<TDataContent>(charter: Charter<TDataContent>): void {
   for (const node of Object.values(charter.nodes)) {
     validateNodeSelects(node, charter);
   }
+
+  validateStateDescriptorIdentities(charter);
+}
+
+/**
+ * One registered descriptor identity per state key, charter-wide: every state
+ * key appearing anywhere (charter `states:` list, node `states:` declarations,
+ * action `state:` bindings) must resolve to a single descriptor object. Lazy
+ * realization depends on this — with one identity per key there is never a
+ * second descriptor to merge with, so the init a read falls back to and the
+ * init a write realizes with cannot diverge.
+ */
+function validateStateDescriptorIdentities<TDataContent>(
+  charter: Charter<TDataContent>,
+): void {
+  const seen = new Map<string, { descriptor: NormalizedStateDescriptor; origin: string }>();
+  const register = (descriptor: StateDescriptor, origin: string): void => {
+    const normalized = normalizeStateDescriptor(descriptor);
+    const existing = seen.get(normalized.key);
+    if (!existing) {
+      seen.set(normalized.key, { descriptor: normalized, origin });
+      return;
+    }
+    if (existing.descriptor !== normalized) {
+      throw new Error(
+        `State key "${normalized.key}" is declared by two descriptor identities (${existing.origin} and ${origin}); share one createState(...) descriptor per key charter-wide`,
+      );
+    }
+  };
+
+  for (const [key, descriptor] of Object.entries(charter.states)) {
+    register(descriptor, `charter states["${key}"]`);
+  }
+  for (const action of Object.values(charter.actions)) {
+    if (action.state) {
+      register(action.state, `action "${action.name}"`);
+    }
+  }
+
+  const visited = new Set<Node<TDataContent>>();
+  const visitNode = (node: Node<TDataContent>): void => {
+    if (visited.has(node)) {
+      return;
+    }
+    visited.add(node);
+    for (const descriptor of node.states) {
+      register(descriptor, `node "${node.key}"`);
+    }
+    walkAllParts(node.parts, (part) => {
+      if (part.kind === "action" && typeof part.action !== "string" && part.action.state) {
+        register(part.action.state, `action "${part.action.name}" on node "${node.key}"`);
+      }
+      // Computed registries are walkable data: their actions' state bindings
+      // participate in the one-identity-per-key invariant like any inline part.
+      if (part.kind === "computed") {
+        const definition = computedPartDefinition(part.part, charter);
+        for (const action of definition ? computedRegistryActions(definition) : []) {
+          if (action.state) {
+            register(
+              action.state,
+              `action "${action.name}" in computed "${definition!.name}" registry (node "${node.key}")`,
+            );
+          }
+        }
+      }
+    });
+    for (const entry of node.memberEntries) {
+      if (isComputedMemberDef(entry)) {
+        // A member computed's registry is walkable data; bare charter-node
+        // returns are covered by the charter.nodes iteration.
+        for (const member of entry.registry ?? []) {
+          visitNode(member);
+        }
+        continue;
+      }
+      visitNode(entry as Node<TDataContent>);
+    }
+  };
+  for (const node of Object.values(charter.nodes)) {
+    visitNode(node);
+  }
 }
 
 function validateNodeSelects<TDataContent>(
   node: Node<TDataContent>,
   charter: Charter<TDataContent>,
 ): void {
+  // walkAllParts enters sugar metadata branches, so these checks apply to
+  // nested selects and to computed refs inside branches alike. Exhaustiveness
+  // is enforced at the sugar constructor for object discriminators; this
+  // build-time pass re-checks it against the charter registry, covering
+  // string-ref discriminators and hand-crafted metadata.
   walkAllParts(node.parts, (part) => {
-    if (part.kind === "select") {
-      assertSelectExhaustive(part.discriminator, part.partial, Object.keys(part.branches), charter, node.key);
+    if (part.kind !== "computed") {
+      return;
     }
-    if (part.kind === "computed" && typeof part.part === "string" && !charter.computedParts[part.part]) {
-      throw new Error(`Unknown computed part ref "${part.part}" in node "${node.key}"`);
+    if (typeof part.part === "string") {
+      if (!charter.computedParts[part.part]) {
+        throw new Error(`Unknown computed part ref "${part.part}" in node "${node.key}"`);
+      }
+      return;
+    }
+    const metadata = part.part.metadata;
+    if (metadata) {
+      assertSelectExhaustive(metadata.discriminator, metadata.partial, Object.keys(metadata.branches), charter, node.key);
     }
   });
   for (const entry of node.memberEntries) {
-    if (isMemberSelect(entry)) {
-      assertSelectExhaustive(entry.discriminator, entry.partial, Object.keys(entry.branches), charter, node.key);
-      for (const branch of Object.values(entry.branches)) {
-        for (const member of branch ?? []) {
-          validateNodeSelects(member, charter);
-        }
+    if (isComputedMemberDef(entry)) {
+      for (const member of entry.registry ?? []) {
+        validateNodeSelects(member, charter);
       }
       continue;
     }

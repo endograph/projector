@@ -77,7 +77,7 @@ export function isPart(value: unknown): value is Part<any> {
     return false;
   }
   const kind = (value as { kind?: unknown }).kind;
-  return kind === "text" || kind === "action" || kind === "computed" || kind === "select";
+  return kind === "text" || kind === "action" || kind === "computed";
 }
 
 /**
@@ -97,9 +97,12 @@ export function normalizePartEntries<TDataContent>(
 }
 
 /**
- * Walks every part reachable in a parts list, entering all select branches.
+ * Walks every part reachable in a parts list, entering all branches of
+ * sugar-lowered selects through their computed metadata (walkable data,
+ * always an inline def — sugar defs never register or serialize by ref).
  * Static analysis helper (validation, serialization, registries) — runtime
- * evaluation walks only chosen branches.
+ * evaluation runs the compute and sees only the chosen branch. Bare computed
+ * closures stay opaque; callers consult their registries directly.
  */
 export function walkAllParts<TDataContent>(
   parts: readonly Part<TDataContent>[],
@@ -107,8 +110,8 @@ export function walkAllParts<TDataContent>(
 ): void {
   for (const part of parts) {
     visit(part);
-    if (part.kind === "select") {
-      for (const branch of Object.values(part.branches)) {
+    if (part.kind === "computed" && typeof part.part !== "string" && part.part.metadata) {
+      for (const branch of Object.values(part.part.metadata.branches)) {
         if (branch) {
           walkAllParts(branch, visit);
         }

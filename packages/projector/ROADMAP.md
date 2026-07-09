@@ -115,11 +115,3 @@ ordering across slots is unanchored (items append at the conversation tail —
 `previous_item_id` anchoring is a follow-up); tool-list `session.update`
 diffing.
 
-## Process
-
-### 9. Upstream sync
-The canonical copy of this package currently lives in a downstream product
-repo; this repo receives milestone snapshots (last synced: executor lowering
-laws + cache breakpoints, 2026-07-08). Product-specific deferred work is
-tracked in that repo's copy of this roadmap, not here. The conformance suites
-are what make each sync cheap.

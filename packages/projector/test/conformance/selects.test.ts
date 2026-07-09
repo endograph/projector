@@ -70,7 +70,7 @@ describe("conformance: selects and discriminators", () => {
     expect(systemText(compileProjection(terse, { charter: testCharter }))).toContain("keep it short");
 
     const verbose = sourceFor(node);
-    verbose.states!.prefs = { value: { verbose: true } };
+    verbose.states = { prefs: { value: { verbose: true } } };
     expect(systemText(compileProjection(verbose, { charter: testCharter }))).toContain("explain everything");
   });
 
@@ -155,20 +155,13 @@ describe("conformance: selects and discriminators", () => {
     );
   });
 
-  it("rejects non-exhaustive selects at charter build", () => {
+  it("rejects non-exhaustive selects at construction", () => {
     const mode = makeMode();
-    const node = createNode({
-      key: "n",
-      parts: [
-        {
-          kind: "select",
-          discriminator: mode,
-          partial: false,
-          branches: { terse: [text("only one branch")] },
-        },
-      ],
-    });
-    expect(() => charter({ nodes: [node], discriminators: [mode] })).toThrow(/missing branch "verbose"/);
+    // The runtime exhaustiveness check lives in the sugar constructor (the
+    // Record type enforces it for TS callers; the cast simulates a JS caller).
+    expect(() =>
+      select(mode, { terse: text("only one branch") } as Parameters<typeof select>[1]),
+    ).toThrow(/missing branch "verbose"/);
   });
 
   it("accepts arrays in part-select branches and member-select branches", () => {
@@ -221,7 +214,7 @@ describe("conformance: selects and discriminators", () => {
     expect(compiled.tools.map((t) => t.name)).not.toContain("notify");
   });
 
-  it("derives members from state and provisions their state into the parent scope", async () => {
+  it("derives members from state and resolves their state into the parent scope", async () => {
     const mode = makeMode();
     const facetState = {
       key: "facet",
@@ -257,10 +250,14 @@ describe("conformance: selects and discriminators", () => {
     });
 
     const instance = createSourceInstance({ id: "host-1", node: host });
-    resolveStates(instance);
-    // Member state provisions even while the member is derived OFF: state
-    // follows the skeleton, surface follows the derivation.
-    expect(instance.states?.facet).toEqual({ value: { count: 7 } });
+    // Member state resolves in the parent scope even while the member is
+    // derived OFF: state placement follows the skeleton, surface follows the
+    // derivation. Existence follows the log — nothing attaches on a read.
+    const facetResolved = resolveStates(instance).find((state) => state.address.stateKey === "facet");
+    expect(facetResolved?.address).toEqual({ instanceId: "host-1", stateKey: "facet" });
+    expect(facetResolved?.container.value).toEqual({ count: 7 });
+    expect(facetResolved?.realized).toBe(false);
+    expect(instance.states?.facet).toBeUndefined();
 
     const machine = createMachine({ instance, charter: testCharter, executor: noopExecutor() });
     const before = compileProjection(machine.instance, {

@@ -3,7 +3,12 @@ import {
   createNode,
   normalizeStateDescriptor,
 } from "./create.ts";
-import { isMemberSelect, resolveDiscriminatorRef } from "./discriminators.ts";
+import { isComputedMemberDef } from "./computed-parts.ts";
+import {
+  memberSelectComputed,
+  partSelectComputed,
+  resolveDiscriminatorRef,
+} from "./discriminators.ts";
 import { hydrateNodeRef } from "./refs.ts";
 import { nodeActionByName } from "./scoped-actions.ts";
 import { regionAddress } from "./regions.ts";
@@ -134,7 +139,7 @@ export function hydrateNode<TDataContent = never>(
 // parts when the node descends from a charter node, or the charter's global
 // registries otherwise. Code (runs, computes, derives) never serializes. ---
 
-/** A step into a select branch, for branch-scoped action recovery. */
+/** A step into a sugar select branch, for branch-scoped action recovery. */
 type BranchPath = Array<{ discriminator: string; value: string }>;
 
 function serializeParts<TDataContent>(
@@ -156,43 +161,46 @@ function serializeParts<TDataContent>(
         }
         return { kind: "computed", ref: definition };
       }
+      const select = definition.metadata;
+      if (select) {
+        // Sugar-produced computeds serialize as their declarative data — the
+        // same select wire shape the SelectPart kind used — so old stored
+        // payloads and new ones hydrate through the same lowering.
+        const discriminator = resolveDiscriminatorRef(select.discriminator, charter);
+        if (charter.discriminators[discriminator.name] !== discriminator) {
+          throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
+        }
+        const branches: Record<string, DryPart[] | null> = {};
+        for (const [value, branch] of Object.entries(select.branches)) {
+          branches[value] = branch
+            ? serializeParts(branch, charter, sourceNode, [
+                ...branchPath,
+                { discriminator: discriminator.name, value },
+              ])
+            : null;
+        }
+        return { kind: "select", discriminator: discriminator.name, partial: select.partial, branches };
+      }
       if (charter.computedParts[definition.name] !== definition) {
         throw new Error(`Cannot serialize unregistered computed part "${definition.name}"`);
       }
       return { kind: "computed", ref: definition.name };
     }
 
-    if (part.kind === "action") {
-      return {
-        kind: "action",
-        caller: part.caller,
-        ...(part.exposure ? { exposure: part.exposure } : {}),
-        ref: serializePartAction(part.action, charter, sourceNode, branchPath),
-        ...(part.guidance
-          ? {
-              guidance: part.guidance.map((entry) => ({
-                ...slotPlacement(entry.slot),
-                text: entry.text,
-              })),
-            }
-          : {}),
-      };
-    }
-
-    const discriminator = resolveDiscriminatorRef(part.discriminator, charter);
-    if (charter.discriminators[discriminator.name] !== discriminator) {
-      throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
-    }
-    const branches: Record<string, DryPart[] | null> = {};
-    for (const [value, branch] of Object.entries(part.branches)) {
-      branches[value] = branch
-        ? serializeParts(branch, charter, sourceNode, [
-            ...branchPath,
-            { discriminator: discriminator.name, value },
-          ])
-        : null;
-    }
-    return { kind: "select", discriminator: discriminator.name, partial: part.partial, branches };
+    return {
+      kind: "action",
+      caller: part.caller,
+      ...(part.exposure ? { exposure: part.exposure } : {}),
+      ref: serializePartAction(part.action, charter, sourceNode, branchPath),
+      ...(part.guidance
+        ? {
+            guidance: part.guidance.map((entry) => ({
+              ...slotPlacement(entry.slot),
+              text: entry.text,
+            })),
+          }
+        : {}),
+    };
   });
 }
 
@@ -233,6 +241,9 @@ function hydrateParts<TDataContent>(
       };
     }
 
+    // The select wire shape hydrates through the sugar lowering: refs resolve
+    // to definitions first (the lowering's compute has no charter access), so
+    // the reconstructed computed is identical to a freshly authored select.
     const discriminator = charter.discriminators[part.discriminator];
     if (!discriminator) {
       throw new Error(`Unknown discriminator ref "${part.discriminator}" for node hydration`);
@@ -246,7 +257,7 @@ function hydrateParts<TDataContent>(
           ])
         : null;
     }
-    return { kind: "select", discriminator, partial: part.partial, branches };
+    return { kind: "computed", part: partSelectComputed(discriminator, part.partial, branches) };
   });
 }
 
@@ -273,7 +284,7 @@ function serializePartAction<TDataContent>(
   }
 
   if (sourceNode) {
-    const match = findSourceAction(sourceNode, entry.name, branchPath);
+    const match = findSourceAction(sourceNode, entry.name, branchPath, charter);
     if (match === entry) {
       return entry.name;
     }
@@ -289,7 +300,7 @@ function hydratePartAction<TDataContent>(
   branchPath: BranchPath,
 ): AnyAction {
   if (sourceNode) {
-    const match = findSourceAction(sourceNode, ref, branchPath);
+    const match = findSourceAction(sourceNode, ref, branchPath, charter);
     if (match) {
       return match;
     }
@@ -304,18 +315,21 @@ function hydratePartAction<TDataContent>(
 /**
  * Finds an inline action by name in a source node's parts, preferring the
  * exact branch context (following selects whose discriminator+value match the
- * path) before falling back to a node-wide first match.
+ * path) before falling back to a node-wide first match — which includes
+ * computed-part registries (charter needed to resolve computed refs), so
+ * registry-listed actions recover from serialized bare refs.
  */
 function findSourceAction<TDataContent>(
   sourceNode: Node<TDataContent>,
   name: string,
   branchPath: BranchPath,
+  charter?: Charter<TDataContent>,
 ): AnyAction | undefined {
   const scoped = findActionInParts(sourceNode.parts, name, branchPath);
   if (scoped) {
     return scoped;
   }
-  return nodeActionByName(sourceNode, name);
+  return nodeActionByName(sourceNode, name, charter);
 }
 
 function findActionInParts<TDataContent>(
@@ -331,16 +345,22 @@ function findActionInParts<TDataContent>(
       }
       continue;
     }
-    if (part.kind !== "select") {
+    // Branch steps follow sugar-lowered selects through their metadata (the
+    // walkable data that replaced SelectPart branches).
+    if (part.kind !== "computed" || typeof part.part === "string") {
       continue;
     }
-    const discriminator = typeof part.discriminator === "string"
-      ? part.discriminator
-      : part.discriminator.name;
+    const select = part.part.metadata;
+    if (!select) {
+      continue;
+    }
+    const discriminator = typeof select.discriminator === "string"
+      ? select.discriminator
+      : select.discriminator.name;
     if (discriminator !== step.discriminator) {
       continue;
     }
-    const branch = part.branches[step.value];
+    const branch = select.branches[step.value];
     if (branch) {
       const found = findActionInParts(branch, name, rest);
       if (found) {
@@ -355,16 +375,28 @@ function serializeMemberEntry<TDataContent>(
   entry: MemberEntry<TDataContent>,
   charter: Charter<TDataContent>,
 ): DryMemberEntry<TDataContent> {
-  if (isMemberSelect(entry)) {
-    const discriminator = resolveDiscriminatorRef(entry.discriminator, charter);
+  if (isComputedMemberDef(entry)) {
+    const select = entry.metadata;
+    if (!select) {
+      // Compute closures are code and never serialize. Registered nodes
+      // serialize as refs before reaching here, so this only bites de novo
+      // nodes carrying a bare member computed.
+      throw new Error(
+        `Cannot serialize computed member "${entry.name}" on an unregistered node; register the carrying node on the charter`,
+      );
+    }
+    // Sugar-produced computeds serialize as their declarative data — the same
+    // select wire shape the MemberSelect kind used — so hydration reconstructs
+    // the identical computed through the same lowering.
+    const discriminator = resolveDiscriminatorRef(select.discriminator, charter);
     if (charter.discriminators[discriminator.name] !== discriminator) {
       throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
     }
     const branches: Record<string, Array<DryNode<TDataContent> | Ref> | null> = {};
-    for (const [value, branch] of Object.entries(entry.branches)) {
+    for (const [value, branch] of Object.entries(select.branches)) {
       branches[value] = branch ? branch.map((member) => serializeNode(member, charter)) : null;
     }
-    return { kind: "select", discriminator: discriminator.name, partial: entry.partial, branches };
+    return { kind: "select", discriminator: discriminator.name, partial: select.partial, branches };
   }
   return serializeNode(entry, charter);
 }
@@ -382,7 +414,7 @@ function hydrateMemberEntry<TDataContent>(
     for (const [value, branch] of Object.entries(entry.branches)) {
       branches[value] = branch ? branch.map((member) => hydrateNode(member, charter)) : null;
     }
-    return { kind: "memberSelect", discriminator, partial: entry.partial, branches };
+    return memberSelectComputed(discriminator, entry.partial, branches);
   }
   return hydrateNode(entry as DryNode<TDataContent> | Ref, charter);
 }

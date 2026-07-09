@@ -90,7 +90,9 @@ describe("conformance: state access", () => {
     const boundReadB = request.inference.tools.find((tool) => tool.name === "readB");
     expect(request.createActionContext?.(boundReadA!)?.state).toEqual({ owner: "root" });
     expect(request.createActionContext?.(boundReadB!)?.state).toEqual({ owner: "root" });
-    expect(rootInstance.states?.session?.value).toEqual({ owner: "root" });
+    // Both members read the shared init through the hoist address, but reads
+    // never realize: the container only attaches on a logged write.
+    expect(rootInstance.states?.session).toBeUndefined();
   });
 
   it("keeps hoist state isolated between direct root machines", async () => {

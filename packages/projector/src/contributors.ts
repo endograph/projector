@@ -1,9 +1,13 @@
 import { createNode } from "./create.ts";
 // Function-level cycle with discriminator-eval.ts (it reads contributor
 // params); safe because both modules only declare functions at init.
-import { evaluateDiscriminator } from "./discriminator-eval.ts";
+import { contributorStateValue, evaluateDiscriminator } from "./discriminator-eval.ts";
 import {
-  isMemberSelect,
+  evaluateComputedMemberNodes,
+  isComputedMemberDef,
+  type ComputedMemberMemo,
+} from "./computed-parts.ts";
+import {
   resolveDiscriminatorRef,
   type DiscriminatorMemo,
 } from "./discriminators.ts";
@@ -12,6 +16,7 @@ import { ROOT_INSTANCE_ID } from "./projection-address.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
   Charter,
+  ComputedPartEnv,
   Instance,
   Node,
   ProjectionAddress,
@@ -103,36 +108,70 @@ export function createRootInstance<TDataContent = never>(
 
 export function collectContributors<TDataContent = never>(
   root: Instance<TDataContent>,
+  resolution: MemberResolution<TDataContent> = { mode: "all" },
 ): Contributor<TDataContent>[] {
   const contributors: Contributor<TDataContent>[] = [];
-  collectInstanceNode(contributors, root, undefined, undefined);
+  collectInstanceNode(contributors, root, undefined, undefined, resolution);
   return contributors;
 }
 
 export function findContributorById<TDataContent = never>(
   root: Instance<TDataContent>,
   id: string,
+  resolution: MemberResolution<TDataContent> = { mode: "all" },
 ): Contributor<TDataContent> | undefined {
-  return collectContributors(root).find(
+  return collectContributors(root, resolution).find(
     (contributor) => contributor.id === id,
   );
 }
 
 export type MemberResolution<TDataContent = never> =
   | { mode: "all" }
-  | { mode: "effective"; charter?: Charter<TDataContent>; memo?: DiscriminatorMemo };
+  | {
+      mode: "effective";
+      charter?: Charter<TDataContent>;
+      memo?: DiscriminatorMemo;
+      /** Per-compile cache for member compute returns; absent = fresh evaluation. */
+      computedMembers?: ComputedMemberMemo;
+    };
+
+/**
+ * The env a compute closure sees, resolved at a contributor: node params, a
+ * declared-state reader (init fallback, never a side effect), and a
+ * discriminator reader through the canonical evaluation path — contributor-
+ * relative state resolution, memo write, vocabulary validation. Compile,
+ * member resolution, and external dispatch all construct env through here so
+ * every path agrees; memo-less callers (dispatch) evaluate fresh and agree
+ * because correctness never depends on the memo.
+ */
+export function computedPartEnv<TDataContent>(
+  contributor: Contributor<TDataContent>,
+  charter?: Charter<TDataContent>,
+  memo?: DiscriminatorMemo,
+): ComputedPartEnv {
+  return {
+    params: resolveContributorNodeParams(contributor),
+    state: (descriptor) => contributorStateValue(contributor, descriptor).value,
+    discriminator: (discriminator) =>
+      evaluateDiscriminator(resolveDiscriminatorRef(discriminator, charter), contributor, memo),
+  };
+}
 
 /**
  * Resolves a contributor's members. Two views, per the invariant "state
- * follows the skeleton; surface follows the derivation":
+ * placement follows the skeleton; state existence follows the log; state
+ * persists once attached; surface follows the derivation":
  *
- * - "all" (default): every potential member across every select branch,
- *   deduped by key. Used by contributor collection and state resolution so
- *   containers provision for every branch a select could derive — a member
- *   flapping on must find its state already in scope — and so no evaluation
- *   (which needs params in scope) happens outside a compiled root.
- * - "effective": selects evaluated at the contributor; the compile render
- *   path uses this to decide which members contribute to the surface.
+ * - "all" (default): every potential member reachable by walking data —
+ *   static nodes plus computed-member registries (sugar-produced computeds
+ *   carry every former branch node by construction) — deduped by key. Used by
+ *   contributor collection and state resolution so declarations resolve for
+ *   every member the data declares. Compute closures are NEVER called here
+ *   (no params in scope); a bare computed return (charter-registered, not
+ *   registry-listed) is invisible to this view by design.
+ * - "effective": member computeds evaluated at the contributor; compile,
+ *   client realization, and dispatch use this to decide which members
+ *   contribute to the surface.
  */
 export function resolveMemberNodes<TDataContent = never>(
   contributor: Contributor<TDataContent>,
@@ -148,18 +187,22 @@ export function resolveMemberNodes<TDataContent = never>(
   };
 
   for (const entry of contributor.node.memberEntries) {
-    if (isMemberSelect(entry)) {
+    if (isComputedMemberDef(entry)) {
       if (resolution.mode === "all") {
-        for (const branch of Object.values(entry.branches)) {
-          for (const node of branch ?? []) {
-            push(node);
-          }
+        for (const node of entry.registry ?? []) {
+          push(node);
         }
         continue;
       }
-      const discriminator = resolveDiscriminatorRef(entry.discriminator, resolution.charter);
-      const value = evaluateDiscriminator(discriminator, contributor, resolution.memo);
-      for (const node of entry.branches[value] ?? []) {
+      const memo = resolution.computedMembers
+        ? { key: `${entry.name} ${contributor.id}`, store: resolution.computedMembers }
+        : undefined;
+      for (const node of evaluateComputedMemberNodes(
+        entry,
+        computedPartEnv(contributor, resolution.charter, resolution.memo),
+        resolution.charter,
+        memo,
+      )) {
         push(node);
       }
       continue;
@@ -261,6 +304,7 @@ function collectInstanceNode<TDataContent>(
   instance: Instance<TDataContent>,
   parent: Contributor<TDataContent> | undefined,
   sourceInstance: Instance<TDataContent> | undefined,
+  resolution: MemberResolution<TDataContent>,
 ): void {
   const address: ProjectionAddress = { type: "instance", instanceId: instance.id };
   const contributor: Contributor<TDataContent> = {
@@ -275,16 +319,17 @@ function collectInstanceNode<TDataContent>(
     isMember: false,
   };
   contributors.push(contributor);
-  collectDescendants(contributors, contributor);
+  collectDescendants(contributors, contributor, resolution);
 }
 
 function collectDescendants<TDataContent>(
   contributors: Contributor<TDataContent>[],
   contributor: Contributor<TDataContent>,
+  resolution: MemberResolution<TDataContent>,
 ): void {
-  for (const child of directContributorChildren(contributor)) {
+  for (const child of directContributorChildren(contributor, resolution)) {
     contributors.push(child);
-    collectDescendants(contributors, child);
+    collectDescendants(contributors, child, resolution);
   }
 }
 

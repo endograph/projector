@@ -12,7 +12,7 @@ import type {
   StateDescriptor,
 } from "./types.ts";
 import { command, normalizePartEntries, text, tool } from "./parts.ts";
-import { isMemberSelect } from "./discriminators.ts";
+import { isComputedMemberDef } from "./computed-parts.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import {
   emptyParamsSchema,
@@ -118,6 +118,14 @@ export function createState<S>(
   return normalizeStateDescriptor(descriptor);
 }
 
+/**
+ * Memoized per input object: every declaration site sharing one raw descriptor
+ * resolves to one normalized identity. The charter-wide one-descriptor-per-key
+ * validation compares descriptors by reference, so normalization must never
+ * mint a second identity for the same declaration.
+ */
+const normalizedStateDescriptors = new WeakMap<object, NormalizedStateDescriptor<any>>();
+
 export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
 ): NormalizedStateDescriptor<S> {
@@ -128,11 +136,18 @@ export function normalizeStateDescriptor<S>(
     return descriptor as NormalizedStateDescriptor<S>;
   }
 
-  return {
+  const cached = normalizedStateDescriptors.get(descriptor);
+  if (cached) {
+    return cached as NormalizedStateDescriptor<S>;
+  }
+
+  const normalized = {
     ...descriptor,
     scope,
     onInitConflict,
   };
+  normalizedStateDescriptors.set(descriptor, normalized);
+  return normalized;
 }
 
 export function normalizeRuntime(
@@ -250,16 +265,12 @@ function normalizeMemberEntries<TDataContent>(
   };
 
   for (const entry of entries) {
-    if (isMemberSelect(entry)) {
-      // A select's branches may reuse one key across branches (that is the
-      // point); distinct entries may not claim the same key.
-      const branchKeys = new Set<string>();
-      for (const branch of Object.values(entry.branches)) {
-        for (const member of branch ?? []) {
-          branchKeys.add(member.key);
-        }
-      }
-      for (const key of branchKeys) {
+    if (isComputedMemberDef(entry)) {
+      // A computed's registry is its walkable candidate set (a sugar entry's
+      // branches may reuse one key across branches — that is the point);
+      // distinct entries may not claim the same key. Bare charter-registered
+      // returns are opaque here by design.
+      for (const key of new Set((entry.registry ?? []).map((node) => node.key))) {
         claim(key);
       }
       continue;

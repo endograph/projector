@@ -484,7 +484,10 @@ function realizeContributor(
 ): ClientInstance {
   const memberNodes: Contributor[] = [];
   const childNodes: Contributor[] = [];
-  for (const child of directContributorChildren(contributor)) {
+  // The client tree shows effective members (selects and member computeds
+  // evaluated, fresh): params and state are definitionally part of the client
+  // representation — there is no potential-members view here.
+  for (const child of directContributorChildren(contributor, { mode: "effective", charter })) {
     if (child.isMember) {
       memberNodes.push(child);
     } else {

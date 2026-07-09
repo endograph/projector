@@ -59,8 +59,26 @@ type Discriminator<TValue extends string = string> = {
 type ComputedPartDef<TDataContent = never> = {
   kind: "computedPart";
   name: string;
-  slot: SlotAddress;
-  compute: (env: ComputedPartEnv) => string | ContentPart<TDataContent>[];
+  // Default placement for returned parts with no address of their own.
+  // Required (volatile-validated) for authored computeds; absent on
+  // sugar-lowered defs (select/when), whose returns keep their own slots.
+  slot?: SlotAddress;
+  // Local candidates for ref resolution of returned action parts / member
+  // nodes (first tier of the scoped chain). Walkable data: listing an inline
+  // value here is what gives it a declared identity — closures stay opaque.
+  registry?: ReadonlyArray<Action | Node<TDataContent>>;
+  // Present only on sugar-produced computeds (select/when): the declarative
+  // { discriminator, branches } record tooling and lints read.
+  metadata?: PartSelectMetadata<TDataContent>;
+  compute: (env: ComputedPartEnv) => string | ComputedReturnPart<TDataContent>[];
+};
+
+type ComputedPartEnv = {
+  params: JsonObject;
+  state: (descriptor: StateDescriptor) => unknown; // resolved value or init
+  // Canonical discriminator reader: contributor-relative state resolution,
+  // memo write, vocabulary validation (throws on out-of-set derive).
+  discriminator: (d: Discriminator | Ref) => string;
 };
 
 type TextPart = { kind: "text"; slot?: SlotAddress; text: string };
@@ -78,29 +96,27 @@ type ComputedPartRef<TDataContent = never> = {
   part: ComputedPartDef<TDataContent> | Ref;
 };
 
-type SelectPart<TDataContent = never> = {
-  kind: "select";
-  discriminator: Discriminator | Ref;
-  partial: boolean; // missing keys legal only for when() partial selects
-  branches: Record<string, Part<TDataContent>[] | null>;
-};
-
 type Part<TDataContent = never> =
   | TextPart
   | ActionPart
-  | ComputedPartRef<TDataContent>
-  | SelectPart<TDataContent>;
+  | ComputedPartRef<TDataContent>;
+// There is no SelectPart kind: select()/when() are sugar returning a
+// metadata-bearing computed part. computed is the single variation primitive.
 
-type MemberSelect<TDataContent = never> = {
-  kind: "memberSelect";
-  discriminator: Discriminator | Ref;
-  partial: boolean;
-  branches: Record<string, Node<TDataContent>[] | null>;
+type ComputedMemberDef<TDataContent = never> = {
+  kind: "computedMember";
+  name: string;
+  registry?: ReadonlyArray<Action | Node<TDataContent>>;
+  metadata?: MemberSelectMetadata<TDataContent>; // sugar-produced only
+  compute: (env: ComputedPartEnv) => ComputedMemberReturn<TDataContent>;
 };
 
 type MemberEntry<TDataContent = never> =
   | Node<TDataContent>
-  | MemberSelect<TDataContent>;
+  | ComputedMemberDef<TDataContent>;
+// selectMember()/whenMember() are the same sugar on the member side:
+// computeds evaluate to plain registered Nodes; nothing about a node changes
+// because it arrived via a computed.
 
 type TextContentPart = { type: "text"; text: string };
 
@@ -153,19 +169,32 @@ to a region resolves to the active layout's default slot for that region and
 stays valid across layout changes. A charter that registers no layout uses
 the built-in default layout.
 
-Discriminators are charter-defined and contributor-resolved: a select
-resolves its discriminator against the contributing node's own state/params
-environment (`derive({ state, params })` must return one of `values`).
-Selects swap parts — and, through `ActionPart.guidance`, a tool and its prose
-atomically. Member selects (`selectMember`/`whenMember`) express derived
-membership the same way: branches are `Node | Node[] | null`, so the member
-surface follows the derivation while state containers provision across all
-branches (state follows the skeleton).
+`computed` is the single variation primitive — for content, actions,
+commands, and members. A `select` is a defunctionalized `(params, state) →
+parts`; `computed` is the direct form of the same function, so the select
+forms (`select`/`when`, `selectMember`/`whenMember`) keep their exact
+signatures but lower to metadata-bearing computeds whose registry is
+auto-derived from the branches. Runtime ignores the metadata; ref lookup
+walks the registry; tooling and future closed-variation lints read the
+metadata. Discriminators stay charter-defined and contributor-resolved
+(`derive({ state, params })` must return one of `values`); they are a
+naming/enforcement layer over computeds, reached inside a compute via the
+canonical `env.discriminator(d)` reader (memo write + vocabulary validation
+included). Selects still swap parts — and, through `ActionPart.guidance`, a
+tool and its prose — atomically: one closure returns both.
 
-Computed parts are registered, named code (`createComputedPart`) referenced
-from nodes by identity or ref. They may only target volatile slots
-(prompt-cache hygiene), and like all part code they never serialize — an
-unregistered computed part in a serialized machine throws.
+The closure rule bounds open variation: a computed's returned action parts
+and member nodes must resolve against computed-local `registry` → node →
+charter; identities are never minted inside a closure, and anything
+unresolvable is a compile error. Branches-as-data (sugar metadata) support
+inline definitions because validation and ref recovery can walk them; bare
+closures are opaque and recoverable only via their explicit registry.
+Authored computeds declare a default `slot` (volatile-validated,
+prompt-cache hygiene); sugar-lowered computeds' returns keep their own slot
+addresses. Like all part code, computeds never serialize — an unregistered
+computed in a serialized machine throws. The invariant: **state placement
+follows the skeleton; state existence follows the log; state persists once
+attached; surface follows the derivation.**
 
 Action parts unify tools and commands under one registry with a `caller`
 field, enforced at compile (generator surface), `executeCommand` (external
@@ -414,31 +443,28 @@ State rules:
 - Nodes attach state through the plural `states: [a, b]` list; the singular
   node-level `state:` spelling was removed (action-level `state:` bindings
   are unrelated and stay).
-- The same `StateDescriptor.key` may still appear on multiple nodes. It means
-  shared access to the same resolved state container.
+- The same `StateDescriptor.key` may appear on multiple nodes, but it must be
+  the SAME registered descriptor identity — one descriptor identity per state
+  key, charter-wide, validated at charter build. Shared keys mean shared
+  access to the same resolved container; descriptor-group merging and
+  compatibility checking are impossible by construction.
 - State containers are resolved by target instance plus state key.
-- If traversal encounters multiple descriptors for the same resolved target
-  instance plus state key, those descriptors must be compatible. They must agree
-  on `scope`, and each descriptor schema must validate the reused state value.
-  Incompatible descriptors throw.
-- If a state must be initialized and multiple compatible descriptors are visible,
-  conflicting non-equivalent `init` values throw. Equivalent `init` values are
-  allowed. For concrete values, equivalence uses `Object.is` for primitives and
-  stable JSON equality for JSON-serializable values. For `init` functions,
-  equivalence means the same function reference; different function references
-  conflict.
-- If multiple compatible descriptors are visible, `onInitConflict` merges by
-  strictest policy: `"error"` takes precedence over `"replace"`.
-- If multiple compatible descriptors are visible, `projection` is view-level
-  policy and uses latest-wins in `ProjectionNode` traversal order.
+- Realization is lazy — a logged write, never a read. A container comes into
+  existence only via the mutation path (`ctx.updateState` in an action frame)
+  or a spawn/transition `states:` seed. Reads — compile, discriminators,
+  computeds, getState — fall back to the descriptor's `init` and never
+  side-effect; compile stays a pure function of `(params, state)`.
+- Unrealized state tracks the current code `init` across deploys (hot-updatable
+  defaults, by decision); a write realizes the container at the placement the
+  descriptor's `scope` dictates for the writing contributor. `getState`
+  aliases derive from declarations in scope, not realized containers, so an
+  address never shifts when a container realizes.
 - Hoisted state projects from its resolved target instance's projection node,
-  even when the latest descriptor contribution came from a member or generator
+  even when the descriptor contribution came from a member or generator
   boundary. Local state projects from the descriptor's source projection node.
-- Existing state validation and invalid-state conflict handling use the effective
-  descriptor after compatibility has been checked.
 - If an existing value validates against the descriptor schema, reuse it.
 - If validation fails, apply `onInitConflict`: `"replace"` resets to `init`,
-  `"error"` throws.
+  `"error"` throws (the reset path is how schema evolution lands).
 - Absent `projection` means hidden: the state exists for declaration and
   action binding only. `projection.exposure: "deferred"` replaces the old
   `"retrieval"` policy — the compile emits a getState availability note
@@ -446,8 +472,9 @@ State rules:
   projection config, and state projections route through slots and the layout
   like all other content.
 
-State descriptors follow the same charter ref and inline serialization rules as
-nodes. If registered in `charter.states`, serialize by ref. Otherwise serialize
+Unrealized state never serializes; hydration validates only the containers
+that arrive. State descriptors follow the same charter ref and inline
+serialization rules as nodes. If registered in `charter.states`, serialize by ref. Otherwise serialize
 inline. Inline state descriptors use `z.toJSONSchema` and `z.fromJSONSchema` so
 their schemas can round-trip through serialized machines.
 `projection.render` and `projection.note` are code and never serialize;
@@ -477,7 +504,7 @@ type NodeConfig<TDataContent = never> = {
   commands?: ActionConfigEntry[]; // sugar: action parts, caller "external"
   parts?: PartEntry<TDataContent>[];
   states?: StateDescriptor[];
-  members?: MemberEntry<TDataContent>[]; // nodes or member selects
+  members?: MemberEntry<TDataContent>[]; // nodes or computed members
   output?: OutputConfig<TDataContent>;
   runtime?: Runtime;
   executorConfig?: ExecutorConfig; // per-executor config, namespaced by executor identity name
@@ -506,9 +533,12 @@ type Node<TDataContent = never> = {
 `createNode` normalizes the authoring sugar and inline part entries into the
 ordered `parts` list; there is no node-level projection field.
 
-A member entry is a direct `Node` or a member select
-(`selectMember`/`whenMember`) whose branches are `Node | Node[] | null`,
-resolved against the contributing node's discriminator environment. A
+A member entry is a direct `Node` or a computed member — including the
+`selectMember`/`whenMember` sugar, whose branches are `Node | Node[] | null`
+resolved against the contributing node's discriminator environment. Computed
+members evaluate to plain registered nodes (effective view only — there is no
+potential-members view); derived membership is a memoryless view over durable
+state, and state that should die with presence uses spawn/cede instead. A
 member's stable path segment is its `Node.key`, and
 duplicate sibling member keys are an error. If an app needs the same logical
 node twice under one parent, it should create distinct wrapper nodes with unique
@@ -803,8 +833,8 @@ member action spawns a child, the child is spawned onto the nearest concrete
 instance.
 
 Members always participate in traversal and cannot be removed via runtime
-child mutation; derived membership (member selects) is how a member surface
-varies.
+child mutation; derived membership (computed members, including the member
+select sugar) is how a member surface varies.
 
 Members must not be materialized as durable child instances during serialization
 or deserialization. This distinction is intentional: members represent current
@@ -912,12 +942,14 @@ consumes only declarative data (parts, slots, layouts, discriminators,
 registered part code).
 
 1. **Contribution.** Traverse projection nodes in pre-order (see Projection
-   Nodes And Runtime Frames). Each contributor evaluates its parts: selects
-   resolve their discriminator against the contributor's own state/params
-   environment and contribute only the chosen branch (a value outside the
-   discriminator's declared `values` is an `invalid-discriminator-value`
-   error); computed parts run their registered `compute` with the
-   contributor's params/state env; state projections contribute the rendered
+   Nodes And Runtime Frames). Each contributor evaluates its parts: computed
+   parts run their registered `compute` with the contributor's
+   params/state/discriminator env — select sugar included, whose compute
+   reads its discriminator through the canonical `env.discriminator` path (a
+   value outside the declared `values` is an `invalid-discriminator-value`
+   error); returned action parts resolve through the scoped chain
+   (computed-local registry → node → charter) and bind at the computed's
+   contributor and depth; state projections contribute the rendered
    value (native exposure, via `projection.render` or default JSON) or a
    deferred-availability note (deferred exposure, via `projection.note` or
    the default getState note), addressed to `projection.slot`; action parts
@@ -2784,6 +2816,9 @@ type DryPart =
       branches: Record<string, DryPart[] | null>;
     };
 
+// The wire shapes of sugar-lowered selects (metadata-bearing computeds) are
+// stable across the SelectPart/MemberSelect-kind deletion: old stored
+// payloads hydrate through the sugar unchanged.
 type DryMemberSelect<TDataContent = never> = {
   kind: "select";
   discriminator: Ref;
@@ -2900,8 +2935,9 @@ Hydrating a dry inline node must recursively hydrate:
 
 - action refs (tools and commands, one namespace)
 - state descriptors and schemas
-- member entries (nodes and member selects)
-- part refs: computed parts and select discriminators
+- member entries (nodes and computed members, incl. member-select sugar)
+- part refs: computed parts and select discriminators (registries walked for
+  inline-value recovery)
 - slot addresses (region addresses re-enter by sentinel identity)
 - history projection refs (via layouts)
 
@@ -2944,10 +2980,13 @@ Add focused tests for:
   ownership anchor, hoisted state below each direct source instance is owned by
   that source instance, and hoisted state resolution throws when no source
   instance is available.
-- Parts and selects: computed parts evaluate with the contributor's
-  params/state environment and may only target volatile slots, member selects
-  derive membership per branch while state containers provision across all
-  branches, and partial selects require `when()`/`whenMember()`.
+- Parts and computeds: computed parts evaluate with the contributor's
+  params/state/discriminator env; authored computeds declare a
+  volatile-validated default slot while sugar returns keep their own
+  addresses; returned action parts resolve through the scoped registry chain
+  and unresolvable closure identities throw; select/when and
+  selectMember/whenMember lower to metadata-bearing computeds with
+  auto-derived registries; partial selects require `when()`/`whenMember()`.
 - Member semantics: members are not serialized as durable children, reload uses
   current registered member definitions, member node keys produce deterministic
   virtual projection addresses, duplicate sibling member node keys throw, member
@@ -2960,11 +2999,13 @@ Add focused tests for:
   only their declared local param views, and static type tests cover charter to
   node compatibility including member descendants plus node to action
   compatibility.
-- State descriptor resolution and conflicts: `hoist` state resolves to the
-  nearest source instance, duplicate state keys reuse valid existing
-  values, incompatible `scope`, schema, or non-equivalent `init` values throw,
-  `onInitConflict` merges with `"error"` taking precedence, projection policy is
-  latest-wins in traversal order, and `"replace"` resets invalid existing state.
+- State resolution and realization: `hoist` state resolves to the nearest
+  source instance, one registered descriptor identity per state key is
+  validated at charter build, reads of unrealized state fall back to `init`
+  without side-effecting, writes and spawn seeds realize containers at the
+  scope-dictated placement, `getState` aliases derive from declarations (not
+  realized containers), unrealized state does not serialize, and
+  `"replace"` resets invalid existing state.
 - Durable state mutation behavior: `ctx.updateState(...)` synchronously enqueues
   durable mutations with explicit `stateKey`, updates `ctx.state` before
   returning, symbolic targets are canonicalized to concrete instance IDs,

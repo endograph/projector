@@ -4,6 +4,9 @@
   "private": true,
   "license": "MIT",
   "catalog": {
+    "@ai-sdk/anthropic": "^3.0.96",
+    "@ai-sdk/openai": "^3.0.83",
+    "ai": "^6.0.222",
     "zod": "^4.4.3"
   },
   "workspaces": [

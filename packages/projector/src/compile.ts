@@ -8,15 +8,22 @@ import {
 } from "./actions.ts";
 import {
   collectContributors,
+  computedPartEnv,
   createRootInstance,
   directContributorChildren,
   findContributorById,
   resolveContributorNodeParams,
   type Contributor,
+  type MemberResolution,
 } from "./contributors.ts";
-import { contributorStateValue } from "./discriminator-eval.ts";
 import type { DiscriminatorMemo } from "./discriminators.ts";
-import { resolveComputedPartRef } from "./computed-parts.ts";
+import {
+  evaluateComputedPartReturn,
+  isComputedActionReturn,
+  resolveComputedPartRef,
+  type ComputedMemberMemo,
+  type ComputedReturnMemo,
+} from "./computed-parts.ts";
 import {
   actorMessages,
   isActorHistoryProjection,
@@ -33,7 +40,7 @@ import {
   callerAllows,
   collectAllNodeActions,
   resolveActionEntry,
-  visitEffectiveParts,
+  resolveComputedActionEntry,
 } from "./scoped-actions.ts";
 import { slotPlacement } from "./slots.ts";
 import {
@@ -44,9 +51,12 @@ import {
 } from "./state.ts";
 import { visibleFramesForGenerator } from "./visibility.ts";
 import type {
+  ActionConfigEntry,
+  ActionPart,
   AnyAction,
   ActivationHistory,
   ActorHistoryProjection,
+  ComputedReturnPart,
   Audience,
   BoundaryProjection,
   Charter,
@@ -110,6 +120,10 @@ export type CompileProjectionOptions<
 type CompileSession = {
   layout: LayoutDef;
   memo: DiscriminatorMemo;
+  /** Computed-return cache per (computed name, contributor); see evaluateComputedPartReturn. */
+  computedReturns: ComputedReturnMemo;
+  /** Member-compute cache per (computed name, contributor); see evaluateComputedMemberNodes. */
+  computedMembers: ComputedMemberMemo;
   diagnostics: CompileDiagnostic[];
   onDiagnostic?: (diagnostic: CompileDiagnostic) => void;
 };
@@ -120,8 +134,23 @@ function createCompileSession<TDataContent>(
   return {
     layout: options.layout ?? options.charter?.defaultLayout ?? implicitDefaultLayout,
     memo: new Map(),
+    computedReturns: new Map(),
+    computedMembers: new Map(),
     diagnostics: [],
     onDiagnostic: options.onDiagnostic,
+  };
+}
+
+/** The compile-path member view: selects and member computeds evaluated, memoized on the session. */
+function effectiveMembers<TDataContent>(
+  options: { charter?: Charter<TDataContent> },
+  session: CompileSession,
+): MemberResolution<TDataContent> {
+  return {
+    mode: "effective",
+    charter: options.charter,
+    memo: session.memo,
+    computedMembers: session.computedMembers,
   };
 }
 
@@ -213,7 +242,7 @@ export function compileProjection<TDataContent = never>(
   const session = createCompileSession(options);
   const draft = emptyProjectionIR<TDataContent>();
   const targetContributor = options.targetGeneratorId
-    ? findContributorById(root, options.targetGeneratorId)
+    ? findContributorById(root, options.targetGeneratorId, effectiveMembers(options, session))
     : undefined;
   if (targetContributor && isGeneratorBoundary(targetContributor)) {
     return finalizeSections(
@@ -311,7 +340,7 @@ export function inspectProjectionIR<TDataContent = never>(
   const stateByContributor = groupStatesByContributor(states);
   const session = createCompileSession(options);
   const targetContributor = options.targetGeneratorId
-    ? findContributorById(root, options.targetGeneratorId)
+    ? findContributorById(root, options.targetGeneratorId, effectiveMembers(options, session))
     : undefined;
 
   let draft: ProjectionIR<TDataContent>;
@@ -387,7 +416,7 @@ function visitContributor<TDataContent>(
   }
 
   renderContributor(draft, contributor, options, stateByContributor, session);
-  for (const child of directContributorChildren(contributor, { mode: "effective", charter: options.charter, memo: session.memo })) {
+  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
     visitContributor(draft, child, options, stateByContributor, session);
   }
 }
@@ -433,8 +462,7 @@ function renderContributor<TDataContent>(
   }
 
   const depth = contributorDepth(contributor);
-  let nodeParams: ReturnType<typeof resolveContributorNodeParams> | undefined;
-  visitEffectiveParts(contributor.node.parts, contributor, options.charter, session.memo, (part) => {
+  for (const part of contributor.node.parts) {
     if (part.kind === "text") {
       pushContentPart(draft, session, {
         type: "text",
@@ -442,67 +470,108 @@ function renderContributor<TDataContent>(
         ...slotPlacement(part.slot),
         partDepth: depth,
       });
-      return;
+      continue;
     }
 
     if (part.kind === "computed") {
       const definition = resolveComputedPartRef(part.part, options.charter);
       const placement = slotPlacement(definition.slot);
-      const computed = definition.compute({
-        params: (nodeParams ??= resolveContributorNodeParams(contributor)),
-        state: (descriptor) => contributorStateValue(contributor, descriptor).value,
+      const returned = evaluateComputedPartReturn(definition, computedPartEnv(contributor, options.charter, session.memo), {
+        key: `${definition.name} ${contributor.id}`,
+        store: session.computedReturns,
       });
-      const parts: ContentPart<TDataContent>[] = typeof computed === "string"
-        ? computed
-          ? [{ type: "text", text: computed }]
-          : []
-        : computed;
-      for (const contentPart of parts) {
+      for (const item of returned) {
+        if (isComputedActionReturn(item)) {
+          // Computed-returned actions route through the exact same binding
+          // path as static action parts at this contributor and depth, with
+          // the computed's local registry as the first resolution tier — one
+          // closure returning both text and tool parts lands both atomically.
+          renderActionPart(draft, session, contributor, item, depth, (entry) =>
+            resolveComputedActionEntry(entry, definition, contributor.node, options.charter),
+          );
+          continue;
+        }
+        // The computed's declared slot (absent on sugar-lowered selects) is
+        // the default placement; a returned part carrying its own slot/region
+        // address keeps it, and a placement-less return on a slot-less def
+        // lands in the node's default placement.
+        const contentPart = computedContentPart<TDataContent>(item);
+        const hasOwnPlacement = contentPart.slot !== undefined || contentPart.region !== undefined;
         pushContentPart(draft, session, {
+          ...(hasOwnPlacement ? {} : placement),
           ...contentPart,
-          ...placement,
           partDepth: depth,
         });
       }
-      return;
+      continue;
     }
 
     if (part.kind === "action") {
-      // Guidance emits whenever the contribution is present — including for
-      // external-caller actions, whose prose is typically model-facing — so a
-      // select that swaps the action swaps its guidance atomically.
-      for (const guidance of part.guidance ?? []) {
-        pushContentPart(draft, session, {
-          type: "text",
-          text: guidance.text,
-          ...slotPlacement(guidance.slot),
-          partDepth: depth,
-        });
-      }
-      if (!callerAllows(part.caller, "generator")) {
-        return;
-      }
-      const action = resolveActionEntry(part.action, contributor.node, options.charter);
-      assertNodeActionStateCompatibility(action, contributor.node, "tool");
-      if (part.exposure === "deferred" && part.guidance === undefined) {
-        // Auto availability note; explicit guidance (even []) replaces it.
-        const summary = action.description?.split("\n", 1)[0];
-        pushContentPart(draft, session, Object.assign(
-          {
-            type: "text" as const,
-            text: `The tool \`${action.name}\`${summary ? ` (${summary})` : ""} is available on demand via tool search.`,
-            partDepth: depth,
-          },
-          { [DEFERRED_NOTE]: action.name },
-        ));
-      }
-      draft.tools.push(
-        Object.assign(bindAction(action, { generatorId: contributor.id }, part.exposure), {
-          [PART_DEPTH]: depth,
-        }),
+      renderActionPart(draft, session, contributor, part, depth, (entry) =>
+        resolveActionEntry(entry, contributor.node, options.charter),
       );
     }
-  });
+  }
+}
+
+/** Lifts a computed-returned content contribution into draft-IR form. */
+function computedContentPart<TDataContent>(
+  item: Exclude<ComputedReturnPart<TDataContent>, ActionPart>,
+): ContentPart<TDataContent> {
+  if ("kind" in item) {
+    // Authoring text part: kind-tagged, slot addressed via SlotAddress.
+    return { type: "text", text: item.text, ...slotPlacement(item.slot) };
+  }
+  return item;
+}
+
+/**
+ * The single action-contribution path: guidance emits whenever the
+ * contribution is present — including for external-caller actions, whose
+ * prose is typically model-facing — so a select (or computed) that swaps the
+ * action swaps its guidance atomically. Generator-callable actions resolve
+ * through the given scoped resolver, validate state compatibility, emit their
+ * deferred availability note, and bind into the tool surface at the
+ * contributor's depth.
+ */
+function renderActionPart<TDataContent>(
+  draft: ProjectionIR<TDataContent>,
+  session: CompileSession,
+  contributor: Contributor<TDataContent>,
+  part: ActionPart,
+  depth: number,
+  resolve: (entry: ActionConfigEntry) => AnyAction,
+): void {
+  for (const guidance of part.guidance ?? []) {
+    pushContentPart(draft, session, {
+      type: "text",
+      text: guidance.text,
+      ...slotPlacement(guidance.slot),
+      partDepth: depth,
+    });
+  }
+  if (!callerAllows(part.caller, "generator")) {
+    return;
+  }
+  const action = resolve(part.action);
+  assertNodeActionStateCompatibility(action, contributor.node, "tool");
+  if (part.exposure === "deferred" && part.guidance === undefined) {
+    // Auto availability note; explicit guidance (even []) replaces it.
+    const summary = action.description?.split("\n", 1)[0];
+    pushContentPart(draft, session, Object.assign(
+      {
+        type: "text" as const,
+        text: `The tool \`${action.name}\`${summary ? ` (${summary})` : ""} is available on demand via tool search.`,
+        partDepth: depth,
+      },
+      { [DEFERRED_NOTE]: action.name },
+    ));
+  }
+  draft.tools.push(
+    Object.assign(bindAction(action, { generatorId: contributor.id }, part.exposure), {
+      [PART_DEPTH]: depth,
+    }),
+  );
 }
 
 /** Symbol-keyed depth tag on bound tool copies; consumed at finalize. */
@@ -574,7 +643,7 @@ function collectCompiledContributorChildren<TDataContent>(
   session: CompileSession,
 ): CompiledContributor<TDataContent>[] {
   const contributors: CompiledContributor<TDataContent>[] = [];
-  for (const child of directContributorChildren(contributor, { mode: "effective", charter: options.charter, memo: session.memo })) {
+  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
     if (isGeneratorBoundary(child)) {
       contributors.push(createCompiledContributor(root, child, parentId, options, stateByContributor, session));
     } else {
@@ -646,7 +715,7 @@ function collectOwnedContributorDescendants(
   session: CompileSession,
 ): CompiledContributorView[] {
   const views: CompiledContributorView[] = [];
-  for (const child of directContributorChildren(contributor, { mode: "effective", charter: options.charter, memo: session.memo })) {
+  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
     if (isGeneratorBoundary(child)) {
       continue;
     }
@@ -889,7 +958,7 @@ function historyProjectionContext<TDataContent>(
     return undefined;
   }
 
-  const contributor = findContributorById(root, targetGeneratorId);
+  const contributor = findContributorById(root, targetGeneratorId, effectiveMembers(options, session));
   if (!contributor || !isGeneratorBoundary(contributor)) {
     return undefined;
   }

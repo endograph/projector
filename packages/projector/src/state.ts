@@ -13,8 +13,16 @@ export type ResolvedState<TDataContent = any> = {
   address: StateAddress;
   targetInstance: Instance<TDataContent>;
   descriptor: NormalizedStateDescriptor;
+  /**
+   * The container view for this state. When `realized` is true this is the
+   * container attached to `targetInstance.states`; when false it is a
+   * detached view carrying the descriptor's init value — reading it never
+   * side-effects the instance tree. Writers must call `realizeResolvedState`
+   * before writing through it.
+   */
   container: StateContainer;
   sourceContributor: Contributor<TDataContent>;
+  realized: boolean;
 };
 
 export type StateReset = {
@@ -40,6 +48,15 @@ type StateGroup<TDataContent = any> = {
   }>;
 };
 
+/**
+ * Resolves every state declared in scope of the instance tree WITHOUT
+ * provisioning: existing containers are validated/parsed (keeping the
+ * onInitConflict reset path for schema evolution); declared-but-unrealized
+ * states resolve to a detached container view carrying the init value, and
+ * nothing is attached to the tree. Realization is a logged write —
+ * `realizeResolvedState` at the state.update fold, or a spawn/transition
+ * `states:` seed — never a read, so any compile-reachable path may call this.
+ */
 export function resolveStates<TDataContent>(
   root: Instance<TDataContent>,
   options: ResolveStatesOptions = {},
@@ -103,6 +120,7 @@ function resolveStateGroup<TDataContent>(
         descriptor: effectiveDescriptor,
         container: existing,
         sourceContributor,
+        realized: true,
       };
     }
 
@@ -123,22 +141,40 @@ function resolveStateGroup<TDataContent>(
       descriptor: effectiveDescriptor,
       container: existing,
       sourceContributor,
+      realized: true,
     };
   }
 
+  // Unrealized: resolve a detached container view over the init value. It is
+  // deliberately NOT attached to targetInstance.states — reads stay pure, and
+  // the value tracks current code init until a logged write realizes it.
   const value = resolveInitialValue(group.entries.map((entry) => entry.descriptor));
   validateAllSchemas(group.entries, value, group.stateKey);
-  group.targetInstance.states ??= {};
-  const container: StateContainer = { value };
-  group.targetInstance.states[group.stateKey] = container;
 
   return {
     address: { instanceId: group.targetInstance.id, stateKey: group.stateKey },
     targetInstance: group.targetInstance,
     descriptor: effectiveDescriptor,
-    container,
+    container: { value },
     sourceContributor,
+    realized: false,
   };
+}
+
+/**
+ * Attaches an unrealized resolved state's container at its target instance —
+ * the placement `resolveStates` derived from the declaring contributor and
+ * `descriptor.scope`. This is the only realization path besides spawn/
+ * transition `states:` seeds, and it must only run under a logged write
+ * (the state.update fold); no compile-reachable code may call it.
+ */
+export function realizeResolvedState(state: ResolvedState): void {
+  if (state.realized) {
+    return;
+  }
+  state.targetInstance.states ??= {};
+  state.targetInstance.states[state.address.stateKey] = state.container;
+  state.realized = true;
 }
 
 /**

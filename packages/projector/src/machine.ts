@@ -13,7 +13,9 @@ import {
   collectContributors,
   resolveContributorNodeParams,
   type Contributor,
+  type MemberResolution,
 } from "./contributors.ts";
+import { isComputedMemberDef } from "./computed-parts.ts";
 import {
   assistantMessageFromTextOutput,
   createActivationFrame,
@@ -25,7 +27,7 @@ import { isNode } from "./create.ts";
 import { decodeContributorId, encodeProjectionAddress } from "./projection-address.ts";
 import { callerAllows, collectAllNodeActions, resolveContributorActions } from "./scoped-actions.ts";
 import { hydrateInstance, hydrateNode, serializeInstance, serializeNode } from "./serialization.ts";
-import { resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
+import { realizeResolvedState, resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
 import {
   actorMessageVisibleToGenerator,
   isActorMessage,
@@ -266,10 +268,10 @@ function validateExecutorConfig<TDataContent>(
       }
     }
     for (const entry of node.memberEntries) {
-      if ((entry as { kind?: unknown }).kind === "memberSelect") {
-        for (const branch of Object.values((entry as { branches: Record<string, Node<TDataContent>[] | null> }).branches)) {
-          for (const member of branch ?? []) validate(member);
-        }
+      if (isComputedMemberDef(entry)) {
+        // Registry entries are the computed's walkable candidates; bare
+        // charter-node returns are covered by the charter.nodes iteration.
+        for (const member of entry.registry ?? []) validate(member);
         continue;
       }
       validate(entry as Node<TDataContent>);
@@ -314,7 +316,7 @@ export async function syncMachineRuntime<TDataContent = never>(
   const syncRuntime = (machine.executor as SyncableExecutor<TDataContent> | undefined)?.syncRuntime;
   if (!syncRuntime) return undefined;
 
-  const generatorId = validateGeneratorId(machine.instance, options.generatorId);
+  const generatorId = validateGeneratorId(machine.instance, options.generatorId, machine.charter);
   reconcileStateResets(machine);
   const inference = compileProjection(machine.instance, {
     charter: machine.charter,
@@ -503,11 +505,24 @@ function signFrame<TFrame extends FrameDraft<any>>(
 
 const MACHINE_SCHEDULER: FrameProducer = { machine: "scheduler" };
 
+/**
+ * Machine dispatch/scheduling paths resolve members effectively — fresh
+ * evaluation, no per-compile memo (correctness never depends on the memo). A
+ * member whose select or computed currently derives "off" is not found, so a
+ * stale dispatch errors cleanly instead of reaching a phantom contributor.
+ */
+function effectiveMembers<TDataContent>(
+  charter: Charter<TDataContent> | undefined,
+): MemberResolution<TDataContent> {
+  return { mode: "effective", charter };
+}
+
 function validateGeneratorId<TDataContent>(
   root: Instance<TDataContent>,
   generatorId: GeneratorId,
+  charter: Charter<TDataContent> | undefined,
 ): GeneratorId {
-  const contributor = findContributorById(root, generatorId);
+  const contributor = findContributorById(root, generatorId, effectiveMembers(charter));
   if (!contributor || contributor.node.runtime.type !== "generator") {
     throw new Error(`Unknown generator "${generatorId}"`);
   }
@@ -519,7 +534,7 @@ export function collectRunnableActivations<TDataContent = never>(
   machine: Machine<TDataContent>,
 ): Activation[] {
   const state = foldWork(machine);
-  const generatorIds = collectGeneratorIds(machine.instance);
+  const generatorIds = collectGeneratorIds(machine.instance, machine.charter);
   const candidates = [...state.activations.values()]
     .filter((activation) => !state.completions.has(activation.activationId))
     .filter((activation) => generatorIds.has(activation.generatorId));
@@ -550,7 +565,11 @@ export async function runActivation<TDataContent = never>(
   if (!activation) return undefined;
   if (initialState.completions.has(activationId)) return undefined;
 
-  const contributor = findContributorById(machine.instance, activation.generatorId);
+  const contributor = findContributorById(
+    machine.instance,
+    activation.generatorId,
+    effectiveMembers(machine.charter),
+  );
   if (!contributor || contributor.node.runtime.type !== "generator") {
     machine.enqueueFrame(signFrame(createCompletionFrame({
       activationId,
@@ -773,7 +792,7 @@ function resolveCommand<TDataContent>(
   machine: Machine<TDataContent>,
   message: ActionRequestMessage & { action: "command" },
 ): { command: AnyAction; contributor: Contributor<TDataContent> } | undefined {
-  const contributors = collectContributors(machine.instance);
+  const contributors = collectContributors(machine.instance, effectiveMembers(machine.charter));
   if (message.target) {
     const targetRuntimeId = encodeProjectionAddress(message.target);
     const contributor = contributors.find((candidate) => candidate.id === targetRuntimeId);
@@ -817,6 +836,9 @@ function findContributorCommand<TDataContent>(
     .find((entry) => callerAllows(entry.caller, "external") && entry.action.name === name)?.action;
 }
 
+// Bind-time validation walks the "all" member view (sugar metadata branches
+// plus computed registries): every walkable candidate validates up front. Bare
+// computed returns are opaque data-side and surface at first compile instead.
 function validateMachineActionStateCompatibility<TDataContent>(
   root: Instance<TDataContent>,
   charter: Charter<TDataContent>,
@@ -840,7 +862,7 @@ function createMachineActionContext<TDataContent>(
 ): ActionContext<unknown, TDataContent> {
   const binding = getActionBinding(action);
   const contributor = binding
-    ? findContributorById(machine.instance, binding.generatorId)
+    ? findContributorById(machine.instance, binding.generatorId, effectiveMembers(machine.charter))
     : undefined;
   if (!contributor) {
     return createUnboundActionContext(getState);
@@ -1230,6 +1252,10 @@ export function applyInstanceMessage<TDataContent>(
     const state = findResolvedState(root, address, options);
     const next = applyStateUpdate(state.container.value, message.update);
     state.descriptor.schema.parse(next);
+    // Realization is a logged write: an unrealized state's container attaches
+    // here, at the instance resolveStates derived for the declaring
+    // contributor's scope, with the updater having seen init as `current`.
+    realizeResolvedState(state);
     state.container.value = next;
     return;
   }
@@ -1625,7 +1651,7 @@ function reconcileWorkOnce<TDataContent>(
   options: { skipPendingSources?: boolean } = {},
 ): Frame<TDataContent>[] {
   const state = foldWork(machine);
-  const contributors = collectContributors(machine.instance);
+  const contributors = collectContributors(machine.instance, effectiveMembers(machine.charter));
   const generatorContributors = contributors.filter(
     (contributor) => contributor.node.runtime.type === "generator",
   );
@@ -1830,9 +1856,12 @@ function foldWork<TDataContent>(machine: Machine<TDataContent>): WorkState {
   return { activations, completions };
 }
 
-function collectGeneratorIds(root: Instance<any>): Set<GeneratorId> {
+function collectGeneratorIds(
+  root: Instance<any>,
+  charter: Charter<any> | undefined,
+): Set<GeneratorId> {
   const ids = new Set<GeneratorId>();
-  for (const contributor of collectContributors(root)) {
+  for (const contributor of collectContributors(root, effectiveMembers(charter))) {
     if (contributor.node.runtime.type === "generator") {
       ids.add(contributor.id);
     }

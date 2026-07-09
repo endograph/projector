@@ -351,7 +351,8 @@ export type ActionCaller = "generator" | "external" | "any";
 // --- Parts: a node's configuration as an ordered list of typed, addressed
 // contributions. `instructions`/`tools`/`commands` on NodeConfig are authoring
 // sugar that desugars into parts at createNode. Contributions are additive-
-// only; all variation is expressed by the owning node via selects. ---
+// only; all variation is expressed by the owning node via computed parts
+// (select/when are sugar lowering to computeds). ---
 
 export type SlotDef = {
   kind: "slot";
@@ -416,13 +417,62 @@ export type ComputedPartEnv = {
   params: JsonObject;
   /** Resolved value of a declared state descriptor (or its init). */
   state: (descriptor: StateDescriptor) => unknown;
+  /**
+   * Evaluates a discriminator at this contributor through the canonical path:
+   * contributor-relative state resolution, memo write, vocabulary validation
+   * (throw on out-of-set derive). String refs resolve against the charter at
+   * evaluation time. Per-instance evaluation semantics — nothing is pinned.
+   */
+  discriminator: (discriminator: AnyDiscriminator | Ref) => string;
+};
+
+/**
+ * What a compute closure may return alongside plain content: compiled-style
+ * content parts (type-tagged), authoring text parts (kind-tagged, slot
+ * addressed), and action parts built with tool()/command() — caller and
+ * exposure ride the part. Select parts and nested computed parts are rejected
+ * at compile: variation nests through data, never through closures.
+ */
+export type ComputedReturnPart<TDataContent = never> =
+  | ContentPart<TDataContent>
+  | TextPart
+  | ActionPart;
+
+/**
+ * Sugar provenance for a part computed produced by select/when: the
+ * declarative subset stays walkable data. The runtime ignores it — compile
+ * evaluates the compute; ref-lookup consults the auto-derived registry — but
+ * static analysis (walkAllParts), charter validation, serialization (the
+ * select wire shape), tooling, and the future closed-variation lint read it.
+ */
+export type PartSelectMetadata<TDataContent = never> = {
+  discriminator: AnyDiscriminator | Ref;
+  partial: boolean;
+  branches: Record<string, Part<TDataContent>[] | null>;
 };
 
 export type ComputedPartDef<TDataContent = never> = {
   kind: "computedPart";
   name: string;
-  slot: SlotAddress;
-  compute: (env: ComputedPartEnv) => string | ContentPart<TDataContent>[];
+  /**
+   * Default placement for returned parts that carry no address of their own.
+   * Required (and volatile-validated) for authored computeds; absent on
+   * sugar-lowered defs (select/when), whose returns keep their own slot
+   * addresses — unaddressed returns land in the node's default placement,
+   * exactly as the old SelectPart branch parts did.
+   */
+  slot?: SlotAddress;
+  /**
+   * Local candidates for ref resolution of returned action parts (the first
+   * tier of the scoped chain; Node entries are reserved for computed members).
+   * The registry is walkable data: listing an inline action here is what makes
+   * it a declared identity (closure rule) and what static analysis and
+   * serialized bare-ref recovery consult — closures stay opaque.
+   */
+  registry?: ReadonlyArray<AnyAction | Node<TDataContent>>;
+  /** Present only on sugar-produced computeds (select/when). */
+  metadata?: PartSelectMetadata<TDataContent>;
+  compute: (env: ComputedPartEnv) => string | ComputedReturnPart<TDataContent>[];
 };
 
 export type AnyComputedPartDef = ComputedPartDef<any>;
@@ -454,34 +504,59 @@ export type ComputedPartRef<TDataContent = never> = {
   part: ComputedPartDef<TDataContent> | Ref;
 };
 
-export type SelectPart<TDataContent = never> = {
-  kind: "select";
-  discriminator: AnyDiscriminator | Ref;
-  /** Missing keys are only legal for partial selects created via when(). */
-  partial: boolean;
-  branches: Record<string, Part<TDataContent>[] | null>;
-};
-
 export type Part<TDataContent = never> =
   | TextPart
   | ActionPart
-  | ComputedPartRef<TDataContent>
-  | SelectPart<TDataContent>;
+  | ComputedPartRef<TDataContent>;
 
 export type PartEntry<TDataContent = never> =
   | Part<TDataContent>
   | ComputedPartDef<TDataContent>;
 
-export type MemberSelect<TDataContent = never> = {
-  kind: "memberSelect";
+/**
+ * Sugar provenance for a member computed produced by selectMember/whenMember:
+ * the declarative subset stays walkable data. The runtime ignores it —
+ * ref-lookup and validation walk the registry — but serialization, tooling,
+ * and the future closed-variation lint read it.
+ */
+export type MemberSelectMetadata<TDataContent = never> = {
   discriminator: AnyDiscriminator | Ref;
   partial: boolean;
   branches: Record<string, Node<TDataContent>[] | null>;
 };
 
+/** What a member compute closure may return: registered nodes (by identity or
+ * charter key ref); null contributes nothing. */
+export type ComputedMemberReturn<TDataContent = never> =
+  | Node<TDataContent>
+  | Ref
+  | Array<Node<TDataContent> | Ref>
+  | null;
+
+/**
+ * A named computed member entry: the open-variation form of member derivation.
+ * Computeds evaluate to plain registered Nodes — nothing about a node changes
+ * because it arrived via a computed. Returned nodes obey the closure rule
+ * (computed-local registry → charter.nodes); a compute closure never mints
+ * node identities. The registry is walkable data: it is what the "all" member
+ * view, executor-config validation, and charter-build state walks consult —
+ * closures stay opaque.
+ */
+export type ComputedMemberDef<TDataContent = never> = {
+  kind: "computedMember";
+  name: string;
+  /** Local node candidates for return resolution (closure-rule tier 1). */
+  registry?: ReadonlyArray<Node<TDataContent>>;
+  /** Present only on sugar-produced computeds (selectMember/whenMember). */
+  metadata?: MemberSelectMetadata<TDataContent>;
+  compute: (env: ComputedPartEnv) => ComputedMemberReturn<TDataContent>;
+};
+
+export type AnyComputedMemberDef = ComputedMemberDef<any>;
+
 export type MemberEntry<TDataContent = never> =
   | Node<TDataContent>
-  | MemberSelect<TDataContent>;
+  | ComputedMemberDef<TDataContent>;
 
 export type CompileDiagnostic = {
   severity: "warning" | "error";
@@ -909,6 +984,9 @@ export type DryPart =
       guidance?: Array<{ slot?: string; region?: LayoutRegionName; text: string }>;
     }
   | { kind: "computed"; ref: Ref }
+  // The wire shape of a sugar-lowered select (a metadata-bearing computed
+  // part): stable across the SelectPart-kind deletion, so old stored payloads
+  // hydrate through the sugar unchanged.
   | {
       kind: "select";
       discriminator: Ref;

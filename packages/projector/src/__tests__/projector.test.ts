@@ -809,7 +809,7 @@ describe("projection compilation", () => {
 });
 
 describe("state resolution and state projection", () => {
-  it("initializes local state on the owner and hoist state on a direct root", () => {
+  it("resolves local state at the owner and hoist state at a direct root without attaching", () => {
     const local = createNode({
       key: "local",
       states: [{ key: "local", scope: "local", schema: z.number(), init: 1 }],
@@ -826,11 +826,18 @@ describe("state resolution and state projection", () => {
       children: [{ id: "child", isSource: true, node: childRoot }],
     };
 
-    resolveStates(instance);
+    const resolved = resolveStates(instance);
 
-    expect(instance.states?.local?.value).toBe(1);
-    expect(instance.states?.hoist).toBeUndefined();
-    expect(instance.children?.[0]?.states?.hoist?.value).toBe(2);
+    const byKey = Object.fromEntries(resolved.map((state) => [state.address.stateKey, state]));
+    expect(byKey.local?.address).toEqual({ instanceId: "root", stateKey: "local" });
+    expect(byKey.local?.container.value).toBe(1);
+    expect(byKey.local?.realized).toBe(false);
+    expect(byKey.hoist?.address).toEqual({ instanceId: "child", stateKey: "hoist" });
+    expect(byKey.hoist?.container.value).toBe(2);
+    expect(byKey.hoist?.realized).toBe(false);
+    // Unrealized state never attaches on a read path.
+    expect(instance.states).toBeUndefined();
+    expect(instance.children?.[0]?.states).toBeUndefined();
   });
 
   it("skips the non-source createRoot wrapper for hoist state ownership", () => {
@@ -841,10 +848,14 @@ describe("state resolution and state projection", () => {
     const app = createNode({ key: "app", members: [memory] });
     const root = createRootInstance([{ id: "app", isSource: true, node: app }]);
 
-    resolveStates(root);
+    const resolved = resolveStates(root);
 
     expect(root.states).toBeUndefined();
-    expect(root.children?.[0]?.states?.hoist?.value).toBe(2);
+    expect(resolved[0]?.address).toEqual({ instanceId: "app", stateKey: "hoist" });
+    expect(resolved[0]?.container.value).toBe(2);
+    // Placement is derived (the wrapper is skipped) but nothing attaches
+    // until a logged write realizes the container.
+    expect(root.children?.[0]?.states).toBeUndefined();
   });
 
   it("shares compatible state keys and applies latest projection config", () => {
@@ -1559,7 +1570,9 @@ describe("commands and instance mutations", () => {
       callId: "increment-2",
     });
 
-    expect(instance.states?.counter?.value).toEqual({ count: 0 });
+    // Unrealized until the gated updates land: the updaters read init as
+    // `current`, and the first logged write attaches the container.
+    expect(instance.states?.counter).toBeUndefined();
     releaseCommands();
     await Promise.all([first, second]);
 

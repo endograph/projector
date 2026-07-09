@@ -83,14 +83,18 @@ describe("conformance: state projections", () => {
     expect(system).toContain("Preferences live at notedPrefs; fetch only when personalizing.");
   });
 
-  it("declares plural states on one node, all provisioned and bound", () => {
+  it("declares plural states on one node, all resolved and bound", () => {
     const a = { key: "alpha", schema: z.object({ v: z.number() }), init: { v: 1 }, projection: {} };
     const b = { key: "beta", schema: z.object({ v: z.number() }), init: { v: 2 }, projection: {} };
     const node = createNode({ key: "n", states: [a, b] });
     const instance = createSourceInstance({ id: "i", node });
-    resolveStates(instance);
-    expect(instance.states?.alpha).toEqual({ value: { v: 1 } });
-    expect(instance.states?.beta).toEqual({ value: { v: 2 } });
+    const resolved = resolveStates(instance);
+    expect(resolved.map((state) => [state.address.stateKey, state.container.value])).toEqual([
+      ["alpha", { v: 1 }],
+      ["beta", { v: 2 }],
+    ]);
+    // Reads never realize: both states project from their init values below.
+    expect(instance.states).toBeUndefined();
     const compiled = compileProjection(instance, { charter: charter({ nodes: [node], states: [a, b] }) });
     const system = joined(compiled.preamble);
     expect(system).toContain("State `alpha`");
