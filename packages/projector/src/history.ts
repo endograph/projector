@@ -20,6 +20,7 @@ import type {
   OutputConfig,
   RuntimeConcurrency,
   TextContentPart,
+  WorkAbortMessage,
   WorkActivationMessage,
   WorkCompletionMessage,
   WorkCompletionReason,
@@ -183,8 +184,36 @@ export function createCompletionFrame<
   };
 }
 
+export function createAbortFrame<
+  TDataContent = never,
+>({
+  activationId,
+  generatorId,
+  note,
+  metadata,
+}: {
+  activationId?: string;
+  generatorId?: GeneratorId;
+  note?: string;
+  /** App/runner frame metadata (see FrameDraft.metadata). */
+  metadata?: Record<string, unknown>;
+} = {}): FrameDraft<TDataContent> {
+  return {
+    ...(metadata ? { metadata } : {}),
+    messages: [
+      ({
+        type: "work",
+        kind: "abort",
+        ...(activationId !== undefined ? { activationId } : {}),
+        ...(generatorId !== undefined ? { generatorId } : {}),
+        ...(note !== undefined ? { note } : {}),
+      } satisfies WorkAbortMessage) as FrameMessage<TDataContent>,
+    ],
+  };
+}
+
 export function isWorkMessage(message: unknown): message is WorkMessage {
-  return isWorkActivationMessage(message) || isWorkCompletionMessage(message);
+  return isWorkActivationMessage(message) || isWorkCompletionMessage(message) || isWorkAbortMessage(message);
 }
 
 export function isWorkActivationMessage(message: unknown): message is WorkActivationMessage {
@@ -211,6 +240,18 @@ export function isWorkCompletionMessage(message: unknown): message is WorkComple
     (record.generatorId === undefined || typeof record.generatorId === "string") &&
     (record.sourceFrameId === undefined || typeof record.sourceFrameId === "string") &&
     isWorkCompletionReason(record.reason)
+  );
+}
+
+export function isWorkAbortMessage(message: unknown): message is WorkAbortMessage {
+  if (!message || typeof message !== "object") return false;
+  const record = message as Record<string, unknown>;
+  return (
+    record.type === "work" &&
+    record.kind === "abort" &&
+    (record.activationId === undefined || typeof record.activationId === "string") &&
+    (record.generatorId === undefined || typeof record.generatorId === "string") &&
+    (record.note === undefined || typeof record.note === "string")
   );
 }
 

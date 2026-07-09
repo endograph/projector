@@ -642,7 +642,25 @@ export type WorkCompletionMessage = {
   reason: WorkCompletionReason;
 };
 
-export type WorkMessage = WorkActivationMessage | WorkCompletionMessage;
+/**
+ * Host-authored request to cancel pending work (e.g. user stop, voice
+ * barge-in). The machine acknowledges by completing matching activations with
+ * reason "cancelled" and aborting their in-flight run signals. Targets one
+ * activation by id, a generator's pending activations, or (both absent) all
+ * pending work. An abort applies to work sourced before the abort frame —
+ * even if the scheduler had not materialized its activation yet — and never
+ * to work sourced after it.
+ */
+export type WorkAbortMessage = {
+  type: "work";
+  kind: "abort";
+  activationId?: string;
+  generatorId?: GeneratorId;
+  /** Why the abort was requested. Forensics/UI only; never read by the fold's scheduling decisions. */
+  note?: string;
+};
+
+export type WorkMessage = WorkActivationMessage | WorkCompletionMessage | WorkAbortMessage;
 
 export type SerializedNodeRef<TDataContent = never> =
   | DryNode<TDataContent>

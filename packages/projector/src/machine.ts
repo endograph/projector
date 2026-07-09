@@ -20,6 +20,7 @@ import {
   assistantMessageFromTextOutput,
   createActivationFrame,
   createCompletionFrame,
+  isWorkAbortMessage,
   isWorkActivationMessage,
   isWorkCompletionMessage,
 } from "./history.ts";
@@ -66,6 +67,7 @@ import type {
   StateUpdate,
   StateUpdateInput,
   GeneratorRuntime,
+  WorkAbortMessage,
   WorkActivationMessage,
   WorkCompletionMessage,
   WorkCompletionReason,
@@ -155,6 +157,8 @@ type FrameCapture<TDataContent> = {
 type WorkState = {
   activations: Map<string, Activation>;
   completions: Map<string, WorkCompletionMessage & { frameId: string; frameIndex: number }>;
+  /** Pending activations targeted by an abort message, keyed by activationId. */
+  aborted: Map<string, WorkAbortMessage & { frameId: string; frameIndex: number }>;
 };
 
 type GeneratorCandidate = {
@@ -537,6 +541,7 @@ export function collectRunnableActivations<TDataContent = never>(
   const generatorIds = collectGeneratorIds(machine.instance, machine.charter);
   const candidates = [...state.activations.values()]
     .filter((activation) => !state.completions.has(activation.activationId))
+    .filter((activation) => !state.aborted.has(activation.activationId))
     .filter((activation) => generatorIds.has(activation.generatorId));
 
   const serialByKey = new Map<string, Activation>();
@@ -556,14 +561,28 @@ export function collectRunnableActivations<TDataContent = never>(
   return runnable.sort((a, b) => a.frameIndex - b.frameIndex);
 }
 
+export type RunActivationOptions = {
+  signal?: AbortSignal;
+};
+
 export async function runActivation<TDataContent = never>(
   machine: Machine<TDataContent>,
   activationId: string,
+  options: RunActivationOptions = {},
 ): Promise<ExecutorRunResult<TDataContent> | undefined> {
   const initialState = foldWork(machine);
   const activation = initialState.activations.get(activationId);
   if (!activation) return undefined;
   if (initialState.completions.has(activationId)) return undefined;
+  if (initialState.aborted.has(activationId)) {
+    machine.enqueueFrame(signFrame(createCompletionFrame({
+      activationId,
+      generatorId: activation.generatorId,
+      sourceFrameId: activation.sourceFrameId,
+      reason: "cancelled",
+    }), MACHINE_SCHEDULER, undefined, machine.runner));
+    return { completionReason: "cancelled" };
+  }
 
   const contributor = findContributorById(
     machine.instance,
@@ -623,6 +642,7 @@ export async function runActivation<TDataContent = never>(
     config: executorNodeConfig(contributor.node, executor),
     inference,
     output,
+    ...(options.signal ? { signal: options.signal } : {}),
     createActionContext: (action) =>
       createMachineActionContext(machine, action, frameDefaults, getState),
     enqueueFrame: (draft, report) =>
@@ -643,6 +663,14 @@ export async function runActivation<TDataContent = never>(
   const result = await executor.run(request);
   enqueueExecutorResult(machine, result, output, frameDefaults, producer);
   const workState = foldWork(machine);
+  // An abort that landed mid-run wins over whatever the executor reported:
+  // the turn completes cancelled (even if the executor ignored the signal and
+  // finished) and absorbs nothing — messages seen mid-generation, including
+  // the barge-in itself, must trigger their own follow-up work. The
+  // executor's late frames were still enqueued above; valid work is never
+  // dropped.
+  const turnCancelled =
+    result.completionReason === "cancelled" || workState.aborted.has(activationId);
   const completionMessages: FrameMessage<TDataContent>[] = [];
   if (!workState.completions.has(activationId)) {
     completionMessages.push(({
@@ -651,10 +679,10 @@ export async function runActivation<TDataContent = never>(
       activationId,
       generatorId: activation.generatorId,
       sourceFrameId: activation.sourceFrameId,
-      reason: completionReasonForRuntime(runtime, result.completionReason),
+      reason: turnCancelled ? "cancelled" : completionReasonForRuntime(runtime, result.completionReason),
     } satisfies WorkCompletionMessage) as FrameMessage<TDataContent>);
   }
-  if (result.completionReason !== "cancelled") {
+  if (!turnCancelled) {
     completionMessages.push(
       ...absorbedCompletionMessages(machine, activation, contributor, generatorRuntime, consumedFrameIds, workState),
     );
@@ -1628,12 +1656,19 @@ class MachineRunImpl<TDataContent> implements MachineRun<TDataContent> {
   private startRunnableActivation(activation: Activation): void {
     if (!this.shouldScheduleWork()) return;
 
+    const controller = new AbortController();
+    const unsubscribe = this.machine.subscribe((frame) => {
+      if (frameAbortsActivation(frame, activation)) {
+        controller.abort();
+      }
+    });
     const run = (async () => {
       try {
-        await runActivation(this.machine, activation.activationId);
+        await runActivation(this.machine, activation.activationId, { signal: controller.signal });
       } catch (error) {
         this.activationErrors.push(error);
       } finally {
+        unsubscribe();
         this.activeActivations.delete(activation.activationId);
       }
     })();
@@ -1644,6 +1679,27 @@ class MachineRunImpl<TDataContent> implements MachineRun<TDataContent> {
   private shouldScheduleWork(): boolean {
     return this.options.scheduleWork && !this.schedulingStopped;
   }
+}
+
+/**
+ * Whether a newly enqueued frame requests cancellation of a specific in-flight
+ * activation — either an abort message targeting it (by id, generator, or
+ * unscoped) or a cancelled completion written on its behalf (e.g. by the
+ * reconciler when its generator disappears).
+ */
+function frameAbortsActivation(frame: Frame<any>, activation: Activation): boolean {
+  return frame.messages.some((message) => {
+    if (isWorkAbortMessage(message)) {
+      if (message.activationId !== undefined) return message.activationId === activation.activationId;
+      if (message.generatorId !== undefined) return message.generatorId === activation.generatorId;
+      return true;
+    }
+    return (
+      isWorkCompletionMessage(message) &&
+      message.reason === "cancelled" &&
+      message.activationId === activation.activationId
+    );
+  });
 }
 
 function reconcileWorkOnce<TDataContent>(
@@ -1662,11 +1718,15 @@ function reconcileWorkOnce<TDataContent>(
     : undefined;
 
   // Cancel pending activations whose generator no longer exists (or is no
-  // longer a generator) so they complete durably instead of dangling.
+  // longer a generator), plus pending activations targeted by an abort
+  // message, so they complete durably instead of dangling. The abort frame is
+  // the request; this completion is the acknowledgment — an in-flight run
+  // observes the abort through its signal and unwinds without writing a
+  // duplicate completion.
   for (const activation of state.activations.values()) {
     if (
       !state.completions.has(activation.activationId) &&
-      !generatorIds.has(activation.generatorId)
+      (!generatorIds.has(activation.generatorId) || state.aborted.has(activation.activationId))
     ) {
       const frame = machine.enqueueFrame(signFrame(createCompletionFrame({
         activationId: activation.activationId,
@@ -1815,6 +1875,9 @@ function triggerMatches<TDataContent>(
   if (trigger.type === "parent-completion") {
     return sourceFrame.messages.some((message) => {
       if (!isWorkCompletionMessage(message)) return false;
+      // A cancelled parent turn (abort/barge-in, orphaned generator) is not a
+      // completion to react to.
+      if (message.reason === "cancelled") return false;
       const completed = state.activations.get(message.activationId);
       return completed?.generatorId === nearestAncestorGeneratorId(contributor);
     });
@@ -1836,8 +1899,12 @@ function triggerMatches<TDataContent>(
 function foldWork<TDataContent>(machine: Machine<TDataContent>): WorkState {
   const activations = new Map<string, Activation>();
   const completions = new Map<string, WorkCompletionMessage & { frameId: string; frameIndex: number }>();
+  const aborted = new Map<string, WorkAbortMessage & { frameId: string; frameIndex: number }>();
+  const abortMessages: Array<WorkAbortMessage & { frameId: string; frameIndex: number }> = [];
+  const frameIndexById = new Map<string, number>();
 
   machine.frames.forEach((frame, frameIndex) => {
+    frameIndexById.set(frame.id, frameIndex);
     for (const message of frame.messages) {
       if (isWorkActivationMessage(message) && !activations.has(message.activationId)) {
         activations.set(message.activationId, {
@@ -1850,10 +1917,36 @@ function foldWork<TDataContent>(machine: Machine<TDataContent>): WorkState {
       if (isWorkCompletionMessage(message) && !completions.has(message.activationId)) {
         completions.set(message.activationId, { ...message, frameId: frame.id, frameIndex });
       }
+
+      if (isWorkAbortMessage(message)) {
+        abortMessages.push({ ...message, frameId: frame.id, frameIndex });
+      }
     }
   });
 
-  return { activations, completions };
+  // An abort applies to work *sourced* before the abort frame — including
+  // work whose activation frame the scheduler had not materialized yet (e.g.
+  // a stop racing runner startup) — and never to work sourced after it. Pure
+  // fold of the log, so replay is deterministic. An explicit activationId is
+  // honored even before its activation message appears — abort by id is
+  // unambiguous.
+  for (const abort of abortMessages) {
+    if (abort.activationId !== undefined) {
+      if (!aborted.has(abort.activationId)) aborted.set(abort.activationId, abort);
+      continue;
+    }
+    for (const activation of activations.values()) {
+      if (aborted.has(activation.activationId)) continue;
+      if (abort.generatorId !== undefined && activation.generatorId !== abort.generatorId) continue;
+      const sourceIndex = frameIndexById.get(activation.sourceFrameId) ?? activation.frameIndex;
+      if (sourceIndex >= abort.frameIndex) continue;
+      const completion = completions.get(activation.activationId);
+      if (completion && completion.frameIndex < abort.frameIndex) continue;
+      aborted.set(activation.activationId, abort);
+    }
+  }
+
+  return { activations, completions, aborted };
 }
 
 function collectGeneratorIds(

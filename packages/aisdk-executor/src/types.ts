@@ -26,7 +26,7 @@ export type AiSdkStreamUpdate<
   messageId: string;
   text: string;
   delta?: string;
-  streamState: "streaming" | "complete" | "error";
+  streamState: "streaming" | "complete" | "cancelled" | "error";
   streamSeq: number;
   error?: string;
 };

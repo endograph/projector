@@ -1619,6 +1619,15 @@ type WorkMessage =
         | "error"
         | "terminal-action"
         | "absorbed";
+    }
+  // Host-authored request to cancel pending work (user stop, voice barge-in).
+  | {
+      type: "work";
+      kind: "abort";
+      activationId?: string; // target one activation…
+      generatorId?: GeneratorId; // …or a generator's pending work…
+      // …or (both absent) all pending work.
+      note?: string; // forensics/UI only; the fold's scheduling never reads it
     };
 ```
 
@@ -1883,6 +1892,23 @@ work frames. The runtime reconstructs pending work by folding the frame log.
 
 - `activation` opens a durable unit of work.
 - `completion` closes a durable unit of work.
+- `abort` requests cancellation of pending work; the machine acknowledges by
+  completing matching activations with `reason: "cancelled"` and aborting
+  their in-flight run signals (`runActivation` takes an `AbortSignal`;
+  `MachineRun` wires one per scheduled activation and fires it when a frame
+  aborting that activation lands). An abort applies to work *sourced* before
+  the abort frame — including work whose activation frame the scheduler had
+  not materialized yet (a stop racing runner startup) — and never to work
+  sourced after it; an explicit `activationId` is honored even before its
+  activation message appears. Pure fold of the log, so replay is
+  deterministic. An abort that lands mid-run wins over whatever the executor
+  reports: the turn completes cancelled and absorbs nothing — messages seen
+  mid-generation, including the barge-in itself, trigger their own follow-up
+  work — while frames the executor already produced stay in the log (valid
+  work is never dropped; the aisdk executor emits an interrupted partial the
+  next turn's history can see). Cancelled completions are not
+  `parent-completion` trigger sources. `createAbortFrame({ activationId?,
+  generatorId?, note? })` is the host helper.
 
 `completion.reason` records why the activation closed. Every reason means the
 activation is closed and should not run again. `delegated` means

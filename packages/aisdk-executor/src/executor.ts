@@ -139,6 +139,40 @@ export class AiSdkExecutor<
       streamSeq: seq,
     });
 
+    // A barge-in abort must not surface the partial text as a completed
+    // assistant turn, but the partial is still valid work: it goes into the
+    // frame log marked interrupted so the next turn's history sees what was
+    // said, while hosts skip message persistence for cancelled activations.
+    const cancelledResult = (): ExecutorRunResult<TDataContent> => {
+      seq += 1;
+      emitStreamUpdate(this.config, {
+        request,
+        messageId,
+        text,
+        streamState: "cancelled",
+        streamSeq: seq,
+      });
+      return {
+        completionReason: "cancelled",
+        ...(text.trim()
+          ? {
+              frames: [
+                {
+                  metadata: { interrupted: true },
+                  messages: [
+                    outputMessageFromText<TDataContent>(text, request.output, {
+                      messageId,
+                      streamState: "cancelled",
+                      streamSeq: seq,
+                    }),
+                  ],
+                },
+              ],
+            }
+          : {}),
+      };
+    };
+
     const result = stream(input);
     try {
       for await (const delta of result.textStream) {
@@ -155,6 +189,9 @@ export class AiSdkExecutor<
         });
       }
     } catch (error) {
+      if (isAbortError(error) || request.signal?.aborted) {
+        return cancelledResult();
+      }
       seq += 1;
       emitStreamUpdate(this.config, {
         request,
@@ -165,6 +202,12 @@ export class AiSdkExecutor<
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
+    }
+
+    // The AI SDK can end an aborted stream without throwing; never report the
+    // partial as a completed turn.
+    if (request.signal?.aborted) {
+      return cancelledResult();
     }
 
     const finalText = text || await result.text;

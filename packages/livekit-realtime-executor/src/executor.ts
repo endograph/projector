@@ -1742,6 +1742,12 @@ function chatContentDescriptor(content: readonly llm.ChatContent[]): unknown[] {
         mimeType: part.mimeType,
       };
     }
+    // agents >= 1.0.48 adds an "instructions" chat-content variant; typed
+    // loosely so this compiles against 1.0.40 and activates on upgrade.
+    const record = part as { type: string; audio?: unknown; text?: unknown };
+    if (record.type === "instructions") {
+      return { type: "instructions", audio: record.audio, text: record.text };
+    }
     return { type: "audio", transcript: part.transcript };
   });
 }
