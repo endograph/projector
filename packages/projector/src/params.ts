@@ -15,16 +15,23 @@ export type InputParams<TSchema> = TSchema extends AnyParamsSchema
   ? z.input<TSchema>
   : {};
 
-export type EnsureParamsSatisfy<
+/**
+ * never = compatible; otherwise a diagnostic object validators intersect into
+ * the config parameter so the assignability failure names the mismatch.
+ * Compares the provider's resolved output against the consumer's INPUT: the
+ * consumer re-parses what it picks (resolveActionParams), so a key its schema
+ * can default or treat as optional need not be provided.
+ */
+export type ParamsSatisfyError<
   TSuper extends AnyParamsSchema,
   TSub extends AnyParamsSchema,
 > = ParamsSchemaKeys<TSub> extends never
-  ? unknown
-  : z.output<TSuper> extends z.output<TSub>
-  ? unknown
+  ? never
+  : z.output<TSuper> extends z.input<TSub>
+  ? never
   : {
       readonly __paramCompatibilityError: "params do not satisfy required schema";
-      readonly expected: z.output<TSub>;
+      readonly expected: z.input<TSub>;
       readonly received: z.output<TSuper>;
     };
 
@@ -80,6 +87,37 @@ export function resolveActionParams(
   const schema = normalizeParamsSchema(action.params);
   const picked = pickDeclaredParamKeys(nodeParams, schema);
   return schema.parse(picked) as JsonObject;
+}
+
+/**
+ * Bind-time mirror of the type-level params check, for everything types cannot
+ * see (string refs, computed-closure returns, hydrated dry nodes, JS callers).
+ * Every param key the action's schema cannot resolve without (no optional/
+ * default) must be declared by the node: resolveNodeParams filters effective
+ * params down to the node's declared keys before resolveActionParams picks
+ * from them, so an undeclared key can never reach the action at runtime.
+ */
+export function assertNodeActionParamsCompatibility(
+  action: AnyAction,
+  node: Node<any>,
+  kind: string,
+): void {
+  if (!action.params) {
+    return;
+  }
+  const nodeSchema = normalizeParamsSchema(node.params);
+  for (const [key, field] of Object.entries(action.params.shape)) {
+    if (key in nodeSchema.shape) {
+      continue;
+    }
+    if ((field as z.ZodType).safeParse(undefined).success) {
+      continue;
+    }
+    const declared = Object.keys(nodeSchema.shape).join(", ") || "none";
+    throw new Error(
+      `Node "${node.key}" ${kind} "${action.name}" requires param "${key}" but the node declares: ${declared}`,
+    );
+  }
 }
 
 export function pickDeclaredParamKeys(

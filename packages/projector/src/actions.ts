@@ -47,6 +47,15 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
     }
 ) & {
   [ACTION_RESULT]: true;
+  /**
+   * Phantom (never present at runtime): the data-content vocabulary this
+   * envelope's messages carry. The one typed channel through which an action
+   * emits data content into the log — result `value` is wire-typed unknown
+   * and deliberately excluded. createAction lifts this onto the action so
+   * createNode/createCharter can hold attached actions to the charter's
+   * declared vocabulary.
+   */
+  __dataContent?: TDataContent;
 };
 
 type InputOf<TSchema> = TSchema extends z.ZodType<infer TInput> ? TInput : unknown;
@@ -69,6 +78,18 @@ type ActionConfig<
   run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, z.output<TParams>>) => O | Promise<O>;
 };
 
+/**
+ * The data content a run's return type implies: extracted from the result
+ * envelope's phantom brand. The keyof guard matters — matching the optional
+ * property with a bare `extends { __dataContent?: infer D }` would bind D to
+ * `unknown` for every UNBRANDED return type, poisoning the node's vocabulary.
+ */
+export type ActionResultDataContent<O> = O extends unknown
+  ? "__dataContent" extends keyof O
+    ? Exclude<O["__dataContent"], undefined>
+    : never
+  : never;
+
 type CreatedAction<
   TState extends ActionStateRequirement,
   TParams extends AnyParamsSchema,
@@ -79,6 +100,8 @@ type CreatedAction<
 > = Action<StateOf<TState>, I, O, TName, TDataContent, TParams> & {
   state: TState;
   params: TParams;
+  /** Phantom: the data content this action's results imply (see ActionResultEnvelope). */
+  __dataContent?: TDataContent | ActionResultDataContent<O>;
 };
 
 type ActionWithSchema<

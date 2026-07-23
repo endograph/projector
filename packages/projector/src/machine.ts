@@ -24,9 +24,10 @@ import {
   isWorkActivationMessage,
   isWorkCompletionMessage,
 } from "./history.ts";
-import { isNode } from "./create.ts";
+import { isNode, runtimeTriggers } from "./create.ts";
 import { decodeContributorId, encodeProjectionAddress } from "./projection-address.ts";
 import { callerAllows, collectAllNodeActions, resolveContributorActions } from "./scoped-actions.ts";
+import { collectScopeDuplicates } from "./scopes.ts";
 import { hydrateInstance, hydrateNode, serializeInstance, serializeNode } from "./serialization.ts";
 import { realizeResolvedState, resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
 import {
@@ -74,6 +75,7 @@ import type {
 } from "./types.ts";
 import { compileProjection } from "./compile.ts";
 import {
+  assertNodeActionParamsCompatibility,
   resolveActionParams,
   resolveEffectiveParams,
 } from "./params.ts";
@@ -166,6 +168,13 @@ type GeneratorCandidate = {
   trigger: RuntimeTrigger;
   concurrency: RuntimeConcurrency;
   concurrencyKey: string;
+};
+
+/** Floor arbitration's partition of a source frame's matching candidates. */
+type ArbitratedCandidates = {
+  admitted: GeneratorCandidate[];
+  /** Matching `primary` candidates whose admission the floor denied. */
+  suppressed: GeneratorCandidate[];
 };
 
 type HydratableNodeRef<TDataContent> =
@@ -710,17 +719,21 @@ function absorbedCompletionMessages<TDataContent>(
   for (const frame of machine.frames) {
     if (!consumedFrameIds.has(frame.id) || frame.id === activation.sourceFrameId) continue;
     if (frame.inert || sourceFrameProducedByGenerator(frame, activation.generatorId)) continue;
-    if (!triggerMatches(contributor, runtime.trigger, frame, state)) continue;
+    // First-matching-trigger derivation, mirroring the scheduler's candidate
+    // collection, so absorbed activation ids match what it would have minted.
+    const matchedTrigger = matchingTrigger(contributor, runtime, frame, state, machine.frames);
+    if (!matchedTrigger) continue;
     const absorbedActivationId =
       activationForGeneratorSource(state, activation.generatorId, frame.id)?.activationId ??
       activationIdFor({
         machineId: machine.id,
         generatorId: activation.generatorId,
-        trigger: runtime.trigger,
+        trigger: matchedTrigger,
         sourceFrameId: frame.id,
       });
     if (absorbedActivationId === activation.activationId) continue;
     if (state.completions.has(absorbedActivationId)) continue;
+    if (hasCompletionForGeneratorSource(state, activation.generatorId, frame.id)) continue;
     messages.push(({
       type: "work",
       kind: "completion",
@@ -873,11 +886,9 @@ function validateMachineActionStateCompatibility<TDataContent>(
 ): void {
   for (const contributor of collectContributors(root)) {
     for (const entry of collectAllNodeActions(contributor.node, charter)) {
-      assertNodeActionStateCompatibility(
-        entry.action,
-        contributor.node,
-        callerAllows(entry.caller, "generator") ? "tool" : "command",
-      );
+      const kind = callerAllows(entry.caller, "generator") ? "tool" : "command";
+      assertNodeActionStateCompatibility(entry.action, contributor.node, kind);
+      assertNodeActionParamsCompatibility(entry.action, contributor.node, kind);
     }
   }
 }
@@ -1293,11 +1304,13 @@ export function applyInstanceMessage<TDataContent>(
     if (!instance) {
       throw new Error(`Unknown instance "${message.instanceId}"`);
     }
+    const scopeBaseline = scopeDuplicateBaseline(root, charter);
     instance.node = hydrateNode(message.node, charter);
     if (message.states) {
       applyStateValueOverrides(root, instance, message.states);
     }
     resolveStates(root, options);
+    assertNoNewScopeDuplicates(root, charter, scopeBaseline, `transition of instance "${message.instanceId}"`);
     return;
   }
 
@@ -1306,6 +1319,7 @@ export function applyInstanceMessage<TDataContent>(
     if (!parent) {
       throw new Error(`Unknown parent instance "${message.parentInstanceId}"`);
     }
+    const scopeBaseline = scopeDuplicateBaseline(root, charter);
     parent.children ??= [];
     const spawned = message.children.map((child) => spawnChildToInstance(child, charter));
     parent.children.push(...spawned);
@@ -1316,6 +1330,7 @@ export function applyInstanceMessage<TDataContent>(
       }
     });
     resolveStates(root, options);
+    assertNoNewScopeDuplicates(root, charter, scopeBaseline, `spawn under instance "${message.parentInstanceId}"`);
     return;
   }
 
@@ -1324,14 +1339,49 @@ export function applyInstanceMessage<TDataContent>(
     if (!parent) {
       throw new Error(`Unknown parent instance "${message.parentInstanceId}"`);
     }
+    const scopeBaseline = scopeDuplicateBaseline(root, charter);
     parent.children ??= [];
     parent.children.push(...message.children.map((child) => hydrateInstance(child, charter)));
     resolveStates(root, options);
+    assertNoNewScopeDuplicates(root, charter, scopeBaseline, `attach under instance "${message.parentInstanceId}"`);
     return;
   }
 
   if (message.kind === "remove") {
     removeInstance(root, message.instanceId);
+  }
+}
+
+/**
+ * Mutation-time tier of the scope-uniqueness invariant: a spawn, transition,
+ * or attach that would introduce a NEW duplicate node key inside one document
+ * scope is rejected at the mutation, where the authoring error lives (the
+ * machine's transactional dry-run fold makes rejection atomic). Pre-existing
+ * duplicates are baselined out so persisted logs written before the invariant
+ * keep replaying — the compile's ambiguous-include diagnostic backstops those.
+ */
+function scopeDuplicateBaseline<TDataContent>(
+  root: Instance<TDataContent>,
+  charter: Charter<TDataContent>,
+): Set<string> {
+  return new Set(
+    collectScopeDuplicates(root, effectiveMembers(charter)).map((duplicate) => duplicate.id),
+  );
+}
+
+function assertNoNewScopeDuplicates<TDataContent>(
+  root: Instance<TDataContent>,
+  charter: Charter<TDataContent>,
+  baseline: ReadonlySet<string>,
+  mutation: string,
+): void {
+  for (const duplicate of collectScopeDuplicates(root, effectiveMembers(charter))) {
+    if (baseline.has(duplicate.id)) {
+      continue;
+    }
+    throw new Error(
+      `Rejected ${mutation}: node key "${duplicate.nodeKey}" would appear more than once in document scope "${duplicate.scopeRootId}" — a scope owns at most one contributor per node key; use distinct node keys`,
+    );
   }
 }
 
@@ -1755,8 +1805,8 @@ function reconcileWorkOnce<TDataContent>(
     if (sourceFrame.inert) continue;
     if (pendingFrameIds?.has(sourceFrame.id)) continue;
 
-    const candidates = generatorCandidatesForSource(machine, sourceFrame, state, generatorContributors);
-    for (const candidate of candidates) {
+    const { admitted, suppressed } = generatorCandidatesForSource(machine, sourceFrame, state, generatorContributors);
+    for (const candidate of admitted) {
       const activationId = activationIdFor({
         machineId: machine.id,
         generatorId: candidate.generatorId,
@@ -1766,7 +1816,8 @@ function reconcileWorkOnce<TDataContent>(
       if (
         state.activations.has(activationId) ||
         state.completions.has(activationId) ||
-        hasActivationForGeneratorSource(state, candidate.generatorId, sourceFrame.id)
+        hasActivationForGeneratorSource(state, candidate.generatorId, sourceFrame.id) ||
+        hasCompletionForGeneratorSource(state, candidate.generatorId, sourceFrame.id)
       ) continue;
 
       const frame = machine.enqueueFrame(signFrame(createActivationFrame({
@@ -1788,6 +1839,52 @@ function reconcileWorkOnce<TDataContent>(
         frameId: frame.id,
         frameIndex: machine.frames.length - 1,
       });
+    }
+
+    // A suppressed primary's turn is decided, not deferred: record the no-op
+    // as a "suppressed" completion (no activation, no compile, no inference),
+    // so a later tree change — e.g. the suppressor ceding — never re-opens a
+    // frame the floor already arbitrated. Deterministic ids keep the record
+    // replay-stable; the completion guard keeps the rescan idempotent.
+    const suppressedCompletions: WorkCompletionMessage[] = [];
+    for (const candidate of suppressed) {
+      const activationId = activationIdFor({
+        machineId: machine.id,
+        generatorId: candidate.generatorId,
+        trigger: candidate.trigger,
+        sourceFrameId: sourceFrame.id,
+      });
+      if (
+        state.activations.has(activationId) ||
+        state.completions.has(activationId) ||
+        hasActivationForGeneratorSource(state, candidate.generatorId, sourceFrame.id) ||
+        hasCompletionForGeneratorSource(state, candidate.generatorId, sourceFrame.id)
+      ) continue;
+
+      suppressedCompletions.push({
+        type: "work",
+        kind: "completion",
+        activationId,
+        generatorId: candidate.generatorId,
+        sourceFrameId: sourceFrame.id,
+        reason: "suppressed",
+      } satisfies WorkCompletionMessage);
+    }
+    if (suppressedCompletions.length > 0) {
+      const frame = machine.enqueueFrame(signFrame(
+        { messages: suppressedCompletions as FrameMessage<TDataContent>[] },
+        MACHINE_SCHEDULER,
+        undefined,
+        machine.runner,
+      ));
+      appended.push(frame);
+      for (const completion of suppressedCompletions) {
+        state.completions.set(completion.activationId, {
+          ...completion,
+          frameId: frame.id,
+          frameIndex: machine.frames.length - 1,
+        });
+      }
     }
   }
 
@@ -1818,38 +1915,153 @@ function activationForGeneratorSource(
   return undefined;
 }
 
+/**
+ * Completions can exist without an activation record (work absorbed by a
+ * running generation), and completion ids embed the trigger type that minted
+ * them. Matching by generator+source keeps the scan idempotent across trigger
+ * declaration changes (e.g. the synthetic root's actor-frame → primary
+ * migration): concluded work stays concluded even when the derived id
+ * changes. First-match-wins mints at most one work item per generator per
+ * source frame, so generator+source identifies it.
+ */
+function hasCompletionForGeneratorSource(
+  state: WorkState,
+  generatorId: GeneratorId,
+  sourceFrameId: string,
+): boolean {
+  for (const completion of state.completions.values()) {
+    if (
+      completion.generatorId === generatorId &&
+      completion.sourceFrameId === sourceFrameId
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function generatorCandidatesForSource<TDataContent>(
   machine: Machine<TDataContent>,
   sourceFrame: Frame<TDataContent>,
   state: WorkState,
   generatorContributors: readonly Contributor<TDataContent>[],
-): GeneratorCandidate[] {
+): ArbitratedCandidates {
   const candidates: GeneratorCandidate[] = [];
   for (const contributor of generatorContributors) {
     const runtime = contributor.node.runtime as GeneratorRuntime;
     if (sourceFrameProducedByGenerator(sourceFrame, contributor.id)) {
       continue;
     }
-    const concurrency = runtime.concurrency ?? "serial";
-    if (!triggerMatches(contributor, runtime.trigger, sourceFrame, state)) {
+    const trigger = matchingTrigger(contributor, runtime, sourceFrame, state, machine.frames);
+    if (!trigger) {
       continue;
     }
 
+    const concurrency = runtime.concurrency ?? "serial";
     candidates.push({
       generatorId: contributor.id,
-      trigger: runtime.trigger,
+      trigger,
       concurrency,
       concurrencyKey: concurrency === "parallel"
         ? activationIdFor({
             machineId: machine.id,
             generatorId: contributor.id,
-            trigger: runtime.trigger,
+            trigger,
             sourceFrameId: sourceFrame.id,
         })
         : contributor.id,
     });
   }
-  return candidates;
+  return arbitrateFloor(candidates, generatorContributors);
+}
+
+/**
+ * The trigger a source frame satisfies, tried in declaration order — first
+ * match wins, so a generator yields at most one candidate per frame even when
+ * one frame satisfies several declared stimuli (e.g. a spawn frame that also
+ * carries an actor message). The matched trigger travels on the candidate: it
+ * mints the activation id and, for `primary`, carries admission semantics
+ * into arbitration.
+ */
+function matchingTrigger<TDataContent>(
+  contributor: Contributor<TDataContent>,
+  runtime: GeneratorRuntime,
+  sourceFrame: Frame<TDataContent>,
+  state: WorkState,
+  frames: readonly Frame<TDataContent>[],
+): RuntimeTrigger | undefined {
+  return runtimeTriggers(runtime).find((trigger) =>
+    triggerMatches(contributor, trigger, sourceFrame, state, frames),
+  );
+}
+
+/**
+ * Whether the source frame arrived at-or-after the frame that spawned or
+ * attached the contributor's runtime. Runtimes with no creating frame in the
+ * log (statically declared, or reassembled from a compacted log) are eligible
+ * for every frame.
+ */
+function primaryEligibleForFrame<TDataContent>(
+  contributor: Contributor<TDataContent>,
+  sourceFrame: Frame<TDataContent>,
+  frames: readonly Frame<TDataContent>[],
+): boolean {
+  const creationIndex = frames.findIndex((frame) => runtimeCreatedByFrame(frame, contributor.id));
+  if (creationIndex === -1) return true;
+  const sourceIndex = frames.findIndex((frame) => frame.id === sourceFrame.id);
+  return sourceIndex === -1 || sourceIndex >= creationIndex;
+}
+
+/**
+ * Floor arbitration — admission control on a contended stimulus, per source
+ * frame: a matching `primary` activates unless a matching `primary` with
+ * `suppressAncestors` exists strictly below it on its own descendant path.
+ * Peers coexist (suppression is lineage-scoped, never siblings), nested
+ * suppressors compose (the deepest wins — the outer one sits on the inner
+ * one's ancestor path), and candidates with any other trigger type pass
+ * through untouched: unarbitrated triggers are unsuppressible by
+ * construction. Suppression means do-not-activate — no activation frame, no
+ * compile, no inference; it grants nothing downstream (output, audience,
+ * abort scope keep their own owners). Pure function of (frame, instance tree,
+ * declared triggers), so replay arbitrates identically. Arbitration itself
+ * keeps no memory; the scheduler records each suppression as a "suppressed"
+ * completion (the existing per-(generator, frame) work accounting, like
+ * absorption), so an already-decided turn never re-opens when the tree later
+ * changes. Both partitions are returned for that.
+ */
+function arbitrateFloor<TDataContent>(
+  candidates: GeneratorCandidate[],
+  generatorContributors: readonly Contributor<TDataContent>[],
+): ArbitratedCandidates {
+  const primaries = candidates.filter((candidate) => candidate.trigger.type === "primary");
+  if (primaries.length <= 1) return { admitted: candidates, suppressed: [] }; // uncontended
+
+  const contributorsById = new Map(
+    generatorContributors.map((contributor) => [contributor.id, contributor]),
+  );
+  const suppressedIds = new Set<string>();
+  for (const candidate of primaries) {
+    if (candidate.trigger.type !== "primary" || !candidate.trigger.suppressAncestors) continue;
+    for (
+      let ancestor = contributorsById.get(candidate.generatorId)?.parent;
+      ancestor;
+      ancestor = ancestor.parent
+    ) {
+      suppressedIds.add(ancestor.id);
+    }
+  }
+  if (suppressedIds.size === 0) return { admitted: candidates, suppressed: [] };
+
+  const admitted: GeneratorCandidate[] = [];
+  const suppressed: GeneratorCandidate[] = [];
+  for (const candidate of candidates) {
+    if (candidate.trigger.type === "primary" && suppressedIds.has(candidate.generatorId)) {
+      suppressed.push(candidate);
+    } else {
+      admitted.push(candidate);
+    }
+  }
+  return { admitted, suppressed };
 }
 
 function triggerMatches<TDataContent>(
@@ -1857,8 +2069,21 @@ function triggerMatches<TDataContent>(
   trigger: RuntimeTrigger,
   sourceFrame: Frame<TDataContent>,
   state: WorkState,
+  frames: readonly Frame<TDataContent>[],
 ): boolean {
-  if (trigger.type === "actor-frame") {
+  // `primary` is `actor-frame`'s stimulus (same visibility and audience
+  // rules) with negotiated admission; the negotiation lives in
+  // arbitrateFloor, never in matching. One scoping difference: a primary
+  // negotiates for turns that arrive while it exists, so frames that predate
+  // its runtime's creation are not its stimulus. Without this, a specialist
+  // spawned mid-turn to take the NEXT turn would retroactively answer the
+  // current one on the full-log rescan — the double-response that making
+  // spawn-activation opt-in exists to prevent. `actor-frame` is untouched:
+  // observers hear the whole log.
+  if (trigger.type === "actor-frame" || trigger.type === "primary") {
+    if (trigger.type === "primary" && !primaryEligibleForFrame(contributor, sourceFrame, frames)) {
+      return false;
+    }
     return sourceFrame.messages.some((message) =>
       isActorMessage(message) &&
         actorMessageVisibleToGenerator(message, sourceFrame, contributor.id)
@@ -1875,9 +2100,11 @@ function triggerMatches<TDataContent>(
   if (trigger.type === "parent-completion") {
     return sourceFrame.messages.some((message) => {
       if (!isWorkCompletionMessage(message)) return false;
-      // A cancelled parent turn (abort/barge-in, orphaned generator) is not a
-      // completion to react to.
-      if (message.reason === "cancelled") return false;
+      // A cancelled parent turn (abort/barge-in, orphaned generator) and a
+      // floor-suppressed no-op are not completions to react to. (Suppressed
+      // completions also carry no activation record, so the lookup below
+      // would exclude them anyway — this keeps the rule explicit.)
+      if (message.reason === "cancelled" || message.reason === "suppressed") return false;
       const completed = state.activations.get(message.activationId);
       return completed?.generatorId === nearestAncestorGeneratorId(contributor);
     });
@@ -2046,7 +2273,14 @@ function completionReasonForRuntime(
   reason: ExecutorRunResult["completionReason"],
 ): WorkCompletionReason {
   if (reason === "cancelled" || reason === "delegated" || reason === "error" || reason === "terminal-action") return reason;
-  return runtime.type === "generator" && runtime.trigger.type === "actor-frame" ? "end-turn" : "done";
+  // A conversational responder ends the turn; `primary` is the same stimulus
+  // as `actor-frame` (different admission), so it completes the same way.
+  return runtime.type === "generator" &&
+      runtimeTriggers(runtime).some(
+        (trigger) => trigger.type === "actor-frame" || trigger.type === "primary",
+      )
+    ? "end-turn"
+    : "done";
 }
 
 function nextFrameIndex(frames: Frame<any>[]): number {

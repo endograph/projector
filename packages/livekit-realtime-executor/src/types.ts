@@ -57,7 +57,7 @@ export type LiveKitRealtimeSessionLike = {
   off?: (event: string, handler: LiveKitEventHandler) => unknown;
   updateInstructions?: (instructions: string) => unknown | Promise<unknown>;
   updateChatCtx?: (chatCtx: llm.ChatContext) => unknown | Promise<unknown>;
-  updateTools?: (tools: LiveKitToolContext) => unknown | Promise<unknown>;
+  updateTools?: (tools: llm.ToolContext) => unknown | Promise<unknown>;
   generateReply?: (instructions?: string) => unknown | Promise<unknown>;
   sendInput?: (input: string) => unknown | Promise<unknown>;
   sendEvent?: (event: unknown) => unknown | Promise<unknown>;
@@ -75,7 +75,7 @@ export type LiveKitSessionLike = {
     allowInterruptions?: boolean;
   }) => unknown;
   updateInstructions?: (instructions: string) => unknown | Promise<unknown>;
-  updateTools?: (tools: LiveKitToolContext) => unknown | Promise<unknown>;
+  updateTools?: (tools: llm.ToolContext) => unknown | Promise<unknown>;
   realtimeLLMSession?: LiveKitRealtimeSessionLike;
   realtimeSession?: LiveKitRealtimeSessionLike;
   output?: {
@@ -88,7 +88,8 @@ export type LiveKitAgentLike = {
   toolCtx?: LiveKitToolContext;
   chatCtx?: unknown;
   _instructions?: string;
-  _tools?: LiveKitToolContext;
+  _tools?: LiveKitToolContext | llm.ToolContext;
+  _toolCtx?: llm.ToolContext;
   _chatCtx?: unknown;
   _agentActivity?: {
     realtimeLLMSession?: LiveKitRealtimeSessionLike;

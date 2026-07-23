@@ -95,6 +95,8 @@ export type AiSdkExecutorConfig<
   deferredTools?: AiSdkDeferredToolsLowering<TDataContent>;
 
   maxOutputTokens?: number;
+  /** Number of retries the AI SDK performs on retryable errors (default 2). */
+  maxRetries?: number;
   temperature?: number;
   topP?: number;
   topK?: number;

@@ -32,6 +32,7 @@ import {
   replaceState,
   resolveEffectiveParams,
   runMachine,
+  runtimeTriggers,
   serializeInstance,
   serializeNode,
   serializeStateDescriptor,
@@ -75,13 +76,13 @@ function recencyParts(...texts: string[]) {
 function charter<TDataContent = never>(
   overrides: Partial<CharterConfig<TDataContent>> = {},
 ): Charter<TDataContent> {
-  return createCharter<TDataContent>({
+  return createCharter({
     nodes: [],
     tools: [],
     commands: [],
     states: [],
     ...overrides,
-  });
+  } as CharterConfig<TDataContent>);
 }
 
 /** A one-off layout whose only job is to carry a history projection. */
@@ -118,7 +119,7 @@ describe("actor message typing", () => {
   it("anchors data content types at charter and validates node output against data content", () => {
     type AppDataContent = { answer: string };
     const schema = z.object({ answer: z.string() });
-    const appNode = createNode<AppDataContent>({
+    const appNode = createNode({
       key: "typed",
       output: {
         schema,
@@ -126,8 +127,9 @@ describe("actor message typing", () => {
       },
     });
 
-    const appCharter = createCharter<AppDataContent>({
-        nodes: [appNode],
+    const appCharter = createCharter({
+      dataContent: schema,
+      nodes: [appNode],
       tools: [],
       commands: [],
       states: [],
@@ -135,21 +137,14 @@ describe("actor message typing", () => {
 
     expectTypeOf(appCharter).toMatchTypeOf<Charter<AppDataContent>>();
 
-    createNode<AppDataContent>({
-      key: "badOutput",
-      output: {
-        // @ts-expect-error output.schema must parse the configured data content.
-        schema: z.string(),
-      },
-    });
-
-    const stringOutputNode = createNode<string>({
+    const stringOutputNode = createNode({
       key: "stringOutput",
       output: { schema: z.string() },
     });
-    createCharter<AppDataContent>({
-        nodes: [
-        // @ts-expect-error registered nodes must use the charter data content type.
+    createCharter({
+      dataContent: schema,
+      nodes: [
+        // @ts-expect-error registered nodes must fit the charter's declared data-content vocabulary.
         stringOutputNode,
       ],
       tools: [],
@@ -1122,7 +1117,7 @@ describe("history projection", () => {
         const text = JSON.stringify({
           messages: actorMessages(ctx),
           state: ctx.states.memory,
-          trigger: ctx.trigger.type,
+          trigger: runtimeTriggers(ctx)[0]?.type,
         });
         return [textUserMessage(text)];
       },
@@ -2674,7 +2669,7 @@ describe("work scheduling", () => {
       },
       realizePrompt: (request: { inference: unknown }) => ({ provider: "test", input: request.inference }),
     };
-    const root = createNode<StructuredDataContent>({
+    const root = createNode({
       key: "root",
       output: {
         audience: "broadcast",
@@ -2848,7 +2843,7 @@ describe("serialization and refs", () => {
   it("serializes inline output schema and rejects inline output mappers", () => {
     type StructuredDataContent = { answer: string };
     const outputSchema = z.object({ answer: z.string() });
-    const inline = createNode<StructuredDataContent>({
+    const inline = createNode({
       key: "inlineOutput",
       output: { audience: "broadcast", schema: outputSchema },
     });
@@ -2863,10 +2858,10 @@ describe("serialization and refs", () => {
     const hydrated = hydrateInstance(serialized, registry);
     expect(hydrated.node.output?.schema?.parse({ answer: "ok" })).toEqual({ answer: "ok" });
 
-    const mapped = createNode<StructuredDataContent>({
+    const mapped = createNode({
       key: "mappedOutput",
       output: {
-        mapTextBlock: (text) => ({ answer: text }),
+        mapTextBlock: (text: string): StructuredDataContent => ({ answer: text }),
       },
     });
     expect(() => serializeInstance({ id: "m", isSource: true, node: mapped }, registry)).toThrow(

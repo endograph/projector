@@ -12,7 +12,7 @@
     "typecheck": "tsgo"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.71",
+    "@ai-sdk/openai": "catalog:",
     "@livekit/components-react": "^2.9.19",
     "@projectors/aisdk-executor": "workspace:*",
     "cli-spinners": "^3.4.0",

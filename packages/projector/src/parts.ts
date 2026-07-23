@@ -4,8 +4,11 @@ import type {
   ActionConfigEntry,
   ActionPart,
   Exposure,
+  IncludePart,
+  Node,
   Part,
   PartEntry,
+  Ref,
   SlotAddress,
   TextPart,
 } from "./types.ts";
@@ -34,11 +37,11 @@ export type ActionPartOptions = {
   exposure?: Exposure;
 };
 
-function actionPart(
+function actionPart<TAction extends ActionConfigEntry>(
   caller: ActionCaller,
-  entry: ActionConfigEntry,
+  entry: TAction,
   options: ActionPartOptions = {},
-): ActionPart {
+): ActionPart<TAction> {
   const guidance = options.guidance === undefined
     ? undefined
     : Array.isArray(options.guidance)
@@ -54,22 +57,47 @@ function actionPart(
 }
 
 /** An action operated by the generator (compiled into the tool surface). */
-export function tool(action: ActionConfigEntry, options?: ActionPartOptions): ActionPart {
+export function tool<const TAction extends ActionConfigEntry>(
+  action: TAction,
+  options?: ActionPartOptions,
+): ActionPart<TAction> {
   return actionPart("generator", action, options);
 }
 
 /** An action operated by an external caller (host/client dispatch). */
-export function command(action: ActionConfigEntry, options?: ActionPartOptions): ActionPart {
+export function command<const TAction extends ActionConfigEntry>(
+  action: TAction,
+  options?: ActionPartOptions,
+): ActionPart<TAction> {
   return actionPart("external", action, options);
 }
 
 /** An action operated by either caller. */
-export function action(
-  entry: ActionConfigEntry,
+export function action<const TAction extends ActionConfigEntry>(
+  entry: TAction,
   caller: ActionCaller = "any",
   options?: ActionPartOptions,
-): ActionPart {
+): ActionPart<TAction> {
   return actionPart(caller, entry, options);
+}
+
+/**
+ * Instance-based composition: a view of the living contributor the given node
+ * key resolves to (nearest enclosing scope matching at compile), spliced at
+ * this part's position. Pass the node object (typo-proof; the key serializes
+ * on the wire) or the node key. No options by design: an include splices the
+ * target's full canonical rendering — include-site overrides would break
+ * byte-identity with the canonical rendering.
+ */
+export function include<TDataContent = never>(
+  node: Node<TDataContent> | Ref,
+): IncludePart<TDataContent> {
+  return { kind: "include", node };
+}
+
+/** The node key an include part references (object at authoring, key on the wire). */
+export function includeNodeKey(part: IncludePart<any>): string {
+  return typeof part.node === "string" ? part.node : part.node.key;
 }
 
 export function isPart(value: unknown): value is Part<any> {
@@ -77,7 +105,7 @@ export function isPart(value: unknown): value is Part<any> {
     return false;
   }
   const kind = (value as { kind?: unknown }).kind;
-  return kind === "text" || kind === "action" || kind === "computed";
+  return kind === "text" || kind === "action" || kind === "computed" || kind === "include";
 }
 
 /**

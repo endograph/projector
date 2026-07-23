@@ -10,6 +10,7 @@ import type {
   ComputedPartDef,
   ComputedPartEnv,
   ComputedReturnPart,
+  IncludePart,
   Node,
   Ref,
   SlotAddress,
@@ -23,16 +24,36 @@ export type ComputedPartConfig<TDataContent = never> = {
   compute: (env: ComputedPartEnv) => string | ComputedReturnPart<TDataContent>[];
 };
 
+/** The action candidates a config's literal registry type declares. */
+export type RegistryActionsOf<TConfig> = TConfig extends {
+  registry: ReadonlyArray<infer TEntry>;
+}
+  ? Extract<TEntry, AnyAction>
+  : never;
+
+/** The node candidates a config's literal registry type declares. */
+export type RegistryNodesOf<TConfig, TDataContent> = TConfig extends {
+  registry: ReadonlyArray<infer TEntry>;
+}
+  ? Extract<TEntry, Node<TDataContent>>
+  : Node<TDataContent>;
+
 /**
  * A named, charter-registered computed contribution: the sanctioned form of
  * dynamism in a node's content. Naming is mandatory — identity is what diffs,
  * memoization, provenance, and serialization key on; the compute function is
  * code and never serializes. Must target a volatile slot (validated at
- * charter build).
+ * charter build). The returned def carries the registry's action types, so
+ * createNode can check their param requirements against the owning node —
+ * the type-level twin of the closure rule (registries are walkable, closures
+ * are opaque).
  */
-export function createComputedPart<TDataContent = never>(
-  config: ComputedPartConfig<TDataContent>,
-): ComputedPartDef<TDataContent> {
+export function createComputedPart<
+  const TConfig extends ComputedPartConfig<TDataContent>,
+  TDataContent = never,
+>(
+  config: TConfig & ComputedPartConfig<TDataContent>,
+): ComputedPartDef<TDataContent, RegistryActionsOf<TConfig>> {
   assertProjectorIdentifier(config.name, "Computed part name");
   return {
     kind: "computedPart",
@@ -40,7 +61,7 @@ export function createComputedPart<TDataContent = never>(
     slot: config.slot,
     ...(config.registry ? { registry: config.registry } : {}),
     compute: config.compute,
-  };
+  } as ComputedPartDef<TDataContent, RegistryActionsOf<TConfig>>;
 }
 
 export type ComputedMemberConfig<TDataContent = never> = {
@@ -54,18 +75,23 @@ export type ComputedMemberConfig<TDataContent = never> = {
  * A named computed member entry: the sanctioned form of dynamism in a node's
  * membership. Same env as computed parts (params + declared-state reader with
  * init fallback); returns registered Nodes only — the closure rule (local
- * registry → charter.nodes) bounds the universe, enforced at evaluation.
+ * registry → charter.nodes) bounds the universe, enforced at evaluation. The
+ * returned def carries the registry's node types, so charter-tier param
+ * validation walks computed members like inline ones.
  */
-export function createComputedMember<TDataContent = never>(
-  config: ComputedMemberConfig<TDataContent>,
-): ComputedMemberDef<TDataContent> {
+export function createComputedMember<
+  const TConfig extends ComputedMemberConfig<TDataContent>,
+  TDataContent = never,
+>(
+  config: TConfig & ComputedMemberConfig<TDataContent>,
+): ComputedMemberDef<TDataContent, RegistryNodesOf<TConfig, TDataContent>> {
   assertProjectorIdentifier(config.name, "Computed member name");
   return {
     kind: "computedMember",
     name: config.name,
     ...(config.registry ? { registry: config.registry } : {}),
     compute: config.compute,
-  };
+  } as ComputedMemberDef<TDataContent, RegistryNodesOf<TConfig, TDataContent>>;
 }
 
 export function isComputedMemberDef(value: unknown): value is AnyComputedMemberDef {
@@ -119,6 +145,13 @@ export function isComputedActionReturn(
   part: ComputedReturnPart<any>,
 ): part is ActionPart {
   return "kind" in part && part.kind === "action";
+}
+
+/** A compute return element carrying an include contribution. */
+export function isComputedIncludeReturn(
+  part: ComputedReturnPart<any>,
+): part is IncludePart<any> {
+  return "kind" in part && part.kind === "include";
 }
 
 /** Per-compile cache of normalized compute returns, keyed on (name, contributor). */

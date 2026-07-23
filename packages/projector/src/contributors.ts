@@ -40,12 +40,17 @@ export type Contributor<TDataContent = never> = {
   isMember: boolean;
 };
 
+// The machine's conversational protagonist: `primary` rather than
+// `actor-frame`, so a suppressing primary anywhere below (the root is an
+// ancestor of every generator) takes lineage tenure from it. With no other
+// primaries in the tree the root's admission is uncontended — behavior-
+// preserving for every existing charter.
 const rootNode = createNode({
   key: "root",
   name: "Root",
   runtime: {
     type: "generator",
-    trigger: { type: "actor-frame" },
+    trigger: { type: "primary" },
   },
 });
 

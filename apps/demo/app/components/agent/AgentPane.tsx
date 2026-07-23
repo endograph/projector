@@ -2252,7 +2252,12 @@ function Contributor({
           <span className="truncate text-terminal-cyan">{node.name}</span>
         )}
         <span className="text-terminal-green-dim">
-          {node.runtime.trigger.type}
+          {(Array.isArray(node.runtime.trigger)
+            ? node.runtime.trigger
+            : [node.runtime.trigger]
+          )
+            .map((trigger) => trigger.type)
+            .join(", ")}
         </span>
         <span className="truncate text-terminal-green-dim">
           {node.id}

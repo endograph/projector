@@ -15,6 +15,7 @@ import {
 } from "@projectors/core";
 import type {
   ActionContext,
+  ActionRequestMessage,
   ActionResultMessage,
   ActorMessage,
   AnyAction,
@@ -87,9 +88,26 @@ type RealtimeMessageItem = {
   content: RealtimeContent[];
 };
 
+type RealtimeFunctionCallItem = {
+  id: string;
+  type: "function_call";
+  call_id: string;
+  name: string;
+  arguments: string;
+};
+
+type RealtimeFunctionCallOutputItem = {
+  id: string;
+  type: "function_call_output";
+  call_id: string;
+  output: string;
+};
+
+type RealtimeConversationItem = RealtimeMessageItem | RealtimeFunctionCallItem | RealtimeFunctionCallOutputItem;
+
 type RealtimeConversationItemCreateEvent = {
   type: "conversation.item.create";
-  item: RealtimeMessageItem;
+  item: RealtimeConversationItem;
   event_id?: string;
   previous_item_id?: string;
 };
@@ -311,19 +329,62 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     return this.toolRegistry.get(name);
   }
 
+  /**
+   * Records a tool invocation that failed before the action could run
+   * (unknown tool, schema rejection) as a request + error-result frame
+   * carrying the provider's call id, then rethrows. Without a sync context
+   * there is no machine to record into, so the error propagates bare.
+   */
+  private recordFailedToolInvocation(name: string, input: unknown, callId: string, error: unknown): never {
+    if (this.currentSyncContext) {
+      const actionRequest = {
+        ...createToolActionRequest(name, input, callId),
+        source: { external: true },
+      };
+      executeActionInvocation({
+        request: actionRequest,
+        enqueueMessages: (messages) => {
+          this.enqueueFrame({
+            generatorId: this.executor.realtimeGeneratorId(),
+            inert: true,
+            messages,
+          });
+        },
+        run: () => {
+          throw error;
+        },
+      });
+    }
+    throw error;
+  }
+
   async executeTool(
     name: string,
     input: unknown,
     liveKitContext?: unknown,
   ): Promise<unknown> {
+    // LiveKit passes the provider's tool call id in the execute options; the
+    // UUID fallback covers direct executeTool calls outside a LiveKit session.
+    const callId = readString(liveKitContext, "toolCallId") ?? crypto.randomUUID();
     const action = this.toolRegistry.get(name);
     if (!action) {
-      throw new Error(`No LiveKit tool named "${name}" is registered in the current projection`);
+      this.recordFailedToolInvocation(
+        name,
+        input,
+        callId,
+        new Error(`No LiveKit tool named "${name}" is registered in the current projection`),
+      );
     }
 
-    const callId = crypto.randomUUID();
+    let parsedInput = input;
+    if (action.inputSchema) {
+      const parsed = action.inputSchema.safeParse(input);
+      if (!parsed.success) this.recordFailedToolInvocation(name, input, callId, parsed.error);
+      parsedInput = parsed.data;
+    }
+
     const actionRequest = {
-      ...createToolActionRequest(name, input, callId),
+      ...createToolActionRequest(name, parsedInput, callId),
       source: { external: true },
     };
     const context: ActionContext<unknown, TDataContent> =
@@ -333,7 +394,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       context.getState ??= (address) => this.getRetrievableState(address);
     }
     const runAction = this.config.runAction;
-    const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
+    const runInput: RunActionInput<TDataContent> = { action, input: parsedInput, context, liveKitContext };
     const result = await executeActionInvocation({
       request: actionRequest,
       throwErrors: true,
@@ -484,14 +545,25 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       : buildLiveKitInstructions(nextInference, this.config.messageToText);
     this.toolRegistry = buildToolRegistry(nextInference.tools);
     this.currentTools = buildLiveKitToolContext(nextInference, this);
+    // `session.updateTools` (and the OpenAI realtime plugin's implementation)
+    // expects a `ToolContext` instance — it calls `.flatten()` / `.tools` on the
+    // argument. Our tool map is a plain `{ name: anonymousTool }` record, which
+    // `ToolContext` accepts and normalizes (assigning each tool's id/name from
+    // its key). Passing the raw record throws `_tools.flatten is not a function`.
+    // The cast bridges our structural `LiveKitFunctionTool` to the library's
+    // branded `AnonFunctionTool`; `createLiveKitTool` produces genuine anonymous
+    // function tools via `llm.tool`, so this is safe at runtime.
+    const toolContext = new llm.ToolContext(
+      this.currentTools as unknown as ConstructorParameters<typeof llm.ToolContext>[0],
+    );
 
     if (realtimeActive) {
       this.syncRealtimeServerEventHandler(realtimeSession);
       if (realtimeSession) await this.pushInstructionsIfChanged(realtimeSession);
-      await realtimeSession?.updateTools?.(this.currentTools);
+      await realtimeSession?.updateTools?.(toolContext);
 
       await this.pushInstructionsIfChanged(this.config.session);
-      await this.config.session.updateTools?.(this.currentTools);
+      await this.config.session.updateTools?.(toolContext);
 
       if (syncContext) {
         if (realtimeSession) {
@@ -500,7 +572,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       }
     }
 
-    this.updateAgentSnapshot(this.config.agent, this.currentInstructions, this.currentTools);
+    this.updateAgentSnapshot(this.config.agent, this.currentInstructions, toolContext);
     // RoomIO can replace session.output.transcription after session.start(),
     // so install the wrapper after each sync, not only at connect time.
     this.assistantTranscripts.install();
@@ -661,8 +733,12 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     const synced = this.syncedHistoryFingerprints.get(sessionObject) ?? new Set<string>();
     this.syncedHistoryFingerprints.set(sessionObject, synced);
 
-    for (const message of context.inference.history.filter(isActorMessage<TDataContent>)) {
-      const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
+    for (const entry of historySyncEntries(context.inference.history)) {
+      if (entry.kind === "tool") {
+        synced.add(toolExchangeFingerprint(entry.request));
+        continue;
+      }
+      const fingerprint = actorMessageFingerprint(entry.message, this.config.messageToText);
       if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
       synced.add(fingerprint);
     }
@@ -676,13 +752,36 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     if (!sessionObject) return;
 
     const excludedVisible = this.visibleUserMessageFingerprintCounts(context);
-    const represented = representedChatMessages(
-      copyChatContext(realtimeSession.chatCtx)?.items ?? [],
-    );
+    const chatItems = copyChatContext(realtimeSession.chatCtx)?.items ?? [];
+    const represented = representedChatMessages(chatItems);
+    const representedToolCalls = representedToolCallIds(chatItems);
     const synced = this.syncedHistoryFingerprints.get(sessionObject) ?? new Set<string>();
     this.syncedHistoryFingerprints.set(sessionObject, synced);
 
-    for (const [index, message] of context.inference.history.filter(isActorMessage<TDataContent>).entries()) {
+    for (const [index, entry] of historySyncEntries(context.inference.history).entries()) {
+      if (entry.kind === "tool") {
+        const fingerprint = toolExchangeFingerprint(entry.request);
+        if (synced.has(fingerprint)) continue;
+        if (representedToolCalls.has(entry.request.callId)) {
+          synced.add(fingerprint);
+          continue;
+        }
+        this.executor.log("replay missing realtime tool exchange", {
+          index,
+          callId: entry.request.callId,
+          name: entry.request.name,
+        });
+        for (const item of toolExchangeToRealtimeItems(entry)) {
+          await this.sendRealtimeEvent(realtimeSession, {
+            type: "conversation.item.create",
+            item,
+          });
+        }
+        synced.add(fingerprint);
+        continue;
+      }
+
+      const message = entry.message;
       const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
       if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
       if (takeRepresentedIndex(represented, fingerprint) !== undefined) continue;
@@ -726,7 +825,14 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     const excludedVisible = this.visibleUserMessageFingerprintCounts(context);
     const existingRepresented = representedChatMessages(chatCtx.items);
     const represented = representedChatMessages(chatCtx.items);
-    for (const [index, message] of context.inference.history.filter(isActorMessage<TDataContent>).entries()) {
+    const representedToolCalls = representedToolCallIds(chatCtx.items);
+    for (const [index, entry] of historySyncEntries(context.inference.history).entries()) {
+      if (entry.kind === "tool") {
+        if (representedToolCalls.has(entry.request.callId)) continue;
+        chatCtx.items.push(...toolExchangeToLiveKitItems(entry));
+        continue;
+      }
+      const message = entry.message;
       const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
       if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
       if (takeRepresentedIndex(existingRepresented, fingerprint) !== undefined) continue;
@@ -745,11 +851,22 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
     realtimeSession: LiveKitRealtimeSessionLike,
   ): Promise<void> {
     const excludedVisible = this.visibleUserMessageFingerprintCounts(context);
-    const represented = representedChatMessages(
-      copyChatContext(realtimeSession.chatCtx)?.items ?? [],
-    );
+    const chatItems = copyChatContext(realtimeSession.chatCtx)?.items ?? [];
+    const represented = representedChatMessages(chatItems);
+    const representedToolCalls = representedToolCallIds(chatItems);
 
-    for (const [index, message] of context.inference.history.filter(isActorMessage<TDataContent>).entries()) {
+    for (const [index, entry] of historySyncEntries(context.inference.history).entries()) {
+      if (entry.kind === "tool") {
+        if (representedToolCalls.has(entry.request.callId)) continue;
+        for (const item of toolExchangeToRealtimeItems(entry)) {
+          await this.sendRealtimeEvent(realtimeSession, {
+            type: "conversation.item.create",
+            item,
+          });
+        }
+        continue;
+      }
+      const message = entry.message;
       const fingerprint = actorMessageFingerprint(message, this.config.messageToText);
       if (takeFingerprintCount(excludedVisible, fingerprint)) continue;
       if (takeRepresentedIndex(represented, fingerprint) !== undefined) continue;
@@ -976,10 +1093,13 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
   private updateAgentSnapshot(
     agent: LiveKitAgentLike | undefined,
     instructions: string,
-    tools: LiveKitToolContext,
+    tools: llm.ToolContext,
   ): void {
     if (!agent) return;
     agent._instructions = instructions;
+    // The Agent now reads tools from `_toolCtx` (a `ToolContext`); `_tools` is a
+    // legacy field kept in sync for backwards compatibility.
+    agent._toolCtx = tools;
     agent._tools = tools;
   }
 
@@ -1379,9 +1499,7 @@ export function buildLiveKitToolDefinitions(
       type: "function",
       name: action.name,
       description: action.description ?? "",
-      parameters: action.inputSchema
-        ? z.toJSONSchema(action.inputSchema)
-        : { type: "object", properties: {}, additionalProperties: false },
+      parameters: liveKitToolParameters(action),
     });
   }
 
@@ -1398,7 +1516,7 @@ export function buildLiveKitToolContext<TDataContent = never>(
   for (const action of inference.tools) {
     tools[action.name] = createLiveKitTool({
       description: action.description ?? "",
-      parameters: action.inputSchema ?? z.object({}),
+      parameters: liveKitToolParameters(action),
       execute: (input, liveKitContext) => connection.executeTool(action.name, input, liveKitContext),
     });
   }
@@ -1742,11 +1860,8 @@ function chatContentDescriptor(content: readonly llm.ChatContent[]): unknown[] {
         mimeType: part.mimeType,
       };
     }
-    // agents >= 1.0.48 adds an "instructions" chat-content variant; typed
-    // loosely so this compiles against 1.0.40 and activates on upgrade.
-    const record = part as { type: string; audio?: unknown; text?: unknown };
-    if (record.type === "instructions") {
-      return { type: "instructions", audio: record.audio, text: record.text };
+    if (part.type === "instructions") {
+      return { type: "instructions", audio: part.audio, text: part.text };
     }
     return { type: "audio", transcript: part.transcript };
   });
@@ -1767,6 +1882,27 @@ function realtimeContentDescriptor(content: readonly RealtimeContent[]): unknown
 
 function realtimeClientEventDebugSummary(event: RealtimeClientEvent): unknown {
   if (event.type === "conversation.item.create") {
+    if (event.item.type === "function_call") {
+      return {
+        type: event.type,
+        previousItemId: event.previous_item_id,
+        itemId: event.item.id,
+        itemType: event.item.type,
+        callId: event.item.call_id,
+        name: event.item.name,
+        argumentChars: event.item.arguments.length,
+      };
+    }
+    if (event.item.type === "function_call_output") {
+      return {
+        type: event.type,
+        previousItemId: event.previous_item_id,
+        itemId: event.item.id,
+        itemType: event.item.type,
+        callId: event.item.call_id,
+        outputChars: event.item.output.length,
+      };
+    }
     return {
       type: event.type,
       previousItemId: event.previous_item_id,
@@ -1854,6 +1990,124 @@ function readMessageCreatedAt(message: ActorMessage<any>): number | undefined {
 
 function realtimeTurnActivationId(sourceFrameId: string): string {
   return `activation:realtime:${hashString(sourceFrameId)}`;
+}
+
+type ToolExchange<TDataContent> = {
+  request: ActionRequestMessage;
+  result: ActionResultMessage<TDataContent>;
+};
+
+type HistorySyncEntry<TDataContent> =
+  | { kind: "actor"; message: ActorMessage<TDataContent> }
+  | ({ kind: "tool" } & ToolExchange<TDataContent>);
+
+/**
+ * Orders projected history for realtime sync: actor messages pass through,
+ * tool request/result messages pair up by call id at the result's position.
+ * An unpaired request stays pending until its result enters projected
+ * history; a result without a visible matching request is skipped so a
+ * dangling function call never reaches the realtime conversation.
+ */
+function historySyncEntries<TDataContent>(history: FrameMessage<TDataContent>[]): HistorySyncEntry<TDataContent>[] {
+  const entries: HistorySyncEntry<TDataContent>[] = [];
+  const pendingRequests = new Map<string, ActionRequestMessage>();
+  for (const message of history) {
+    if (isActorMessage<TDataContent>(message)) {
+      entries.push({ kind: "actor", message });
+      continue;
+    }
+    if (message.type !== "action" || message.action !== "tool") continue;
+    if (message.kind === "request") {
+      pendingRequests.set(message.callId, message);
+      continue;
+    }
+    if (message.kind !== "result") continue;
+    const request = pendingRequests.get(message.callId);
+    if (!request || request.name !== message.name) continue;
+    pendingRequests.delete(message.callId);
+    entries.push({ kind: "tool", request, result: message });
+  }
+  return entries;
+}
+
+function toolExchangeFingerprint(request: ActionRequestMessage): string {
+  return hashStableJson({ type: "tool", callId: request.callId });
+}
+
+function representedToolCallIds(items: readonly llm.ChatItem[]): Set<string> {
+  const callIds = new Set<string>();
+  for (const item of items) {
+    if (item.type === "function_call" || item.type === "function_call_output") {
+      callIds.add(item.callId);
+    }
+  }
+  return callIds;
+}
+
+function toolExchangeArgs(request: ActionRequestMessage): string {
+  try {
+    return JSON.stringify(request.input ?? {});
+  } catch {
+    return "{}";
+  }
+}
+
+/** Mirrors LiveKit's own tool-output serialization: JSON value or error text. */
+function toolExchangeOutput(result: ActionResultMessage<any>): { output: string; isError: boolean } {
+  if (!result.success) return { output: result.error ?? "Tool execution failed", isError: true };
+  if (result.value === undefined) return { output: "", isError: false };
+  try {
+    return { output: JSON.stringify(result.value), isError: false };
+  } catch {
+    return { output: String(result.value), isError: false };
+  }
+}
+
+function toolExchangeToLiveKitItems<TDataContent>(exchange: ToolExchange<TDataContent>): llm.ChatItem[] {
+  const { request, result } = exchange;
+  const { output, isError } = toolExchangeOutput(result);
+  return [
+    llm.FunctionCall.create({
+      id: projectorRealtimeItemId("fc", request.callId),
+      callId: request.callId,
+      name: request.name,
+      args: toolExchangeArgs(request),
+    }),
+    llm.FunctionCallOutput.create({
+      id: projectorRealtimeItemId("fo", request.callId),
+      callId: request.callId,
+      name: request.name,
+      output,
+      isError,
+    }),
+  ];
+}
+
+function toolExchangeToRealtimeItems<TDataContent>(
+  exchange: ToolExchange<TDataContent>,
+): [RealtimeFunctionCallItem, RealtimeFunctionCallOutputItem] {
+  const { request, result } = exchange;
+  return [
+    {
+      id: projectorRealtimeItemId("fc", request.callId),
+      type: "function_call",
+      call_id: request.callId,
+      name: request.name,
+      arguments: toolExchangeArgs(request),
+    },
+    {
+      id: projectorRealtimeItemId("fo", request.callId),
+      type: "function_call_output",
+      call_id: request.callId,
+      output: toolExchangeOutput(result).output,
+    },
+  ];
+}
+
+function liveKitToolParameters(action: AnyAction): unknown {
+  return action.inputSchema
+    ? z.toJSONSchema(action.inputSchema, { target: "draft-7", io: "output", reused: "inline" })
+    : { type: "object", properties: {}, additionalProperties: false };
 }
 
 function hashStableJson(value: unknown): string {

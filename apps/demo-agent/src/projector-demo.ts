@@ -336,7 +336,8 @@ export const memoryHistoryProjection = createHistoryProjectionFunction({
     // single policy dispatches: only the memory generator (the charter's one
     // parent-completion trigger) sees the extraction prompt; every other
     // generator keeps plain message history.
-    if (ctx.trigger.type !== "parent-completion") {
+    const triggers = Array.isArray(ctx.trigger) ? ctx.trigger : [ctx.trigger];
+    if (!triggers.some((trigger) => trigger.type === "parent-completion")) {
       return messages(ctx);
     }
     const previousMessages = messagesBeforeLastCompletion(ctx);

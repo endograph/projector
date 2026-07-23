@@ -12,10 +12,10 @@
     "kill-zombies": "./scripts/kill-zombies.sh"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.71",
+    "@ai-sdk/openai": "catalog:",
     "@livekit/agents": "catalog:",
     "@livekit/agents-plugin-openai": "catalog:",
-    "@livekit/rtc-node": "^0.13.24",
+    "@livekit/rtc-node": "catalog:",
     "@projectors/livekit-realtime-executor": "workspace:*",
     "@projectors/aisdk-executor": "workspace:*",
     "convex": "^1.31.2",

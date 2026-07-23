@@ -448,5 +448,5 @@ function actorMessageFromUnknown<TDataContent>(
 }
 
 function isWorkCompletionReason(value: unknown): value is WorkCompletionReason {
-  return value === "end-turn" || value === "done" || value === "cancelled" || value === "delegated" || value === "error" || value === "terminal-action" || value === "absorbed";
+  return value === "end-turn" || value === "done" || value === "cancelled" || value === "delegated" || value === "error" || value === "terminal-action" || value === "absorbed" || value === "suppressed";
 }

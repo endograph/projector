@@ -1330,10 +1330,10 @@ describe("LiveKitRealtimeExecutor", () => {
 
     expect(executor.getTool("lookup")).toBe(second);
     const toolContext = realtimeSession.updateTools.mock.calls.at(-1)?.[0];
-    expect(toolContext.lookup.description).toBe("second");
-    expect(toolContext.getState.description).toContain("Retrieve");
+    expect(toolContext.functionTools.lookup.description).toBe("second");
+    expect(toolContext.functionTools.getState.description).toContain("Retrieve");
 
-    await expect(toolContext.lookup.execute({ query: "x" })).resolves.toBe("second-result");
+    await expect(toolContext.functionTools.lookup.execute({ query: "x" })).resolves.toBe("second-result");
     expect(secondRun).toHaveBeenCalledWith(
       { query: "x" },
       expect.objectContaining({
@@ -1397,10 +1397,10 @@ describe("LiveKitRealtimeExecutor", () => {
     );
 
     const toolContext = realtimeSession.updateTools.mock.calls.at(-1)?.[0];
-    await expect(toolContext.getState.execute({ address: "profile" })).resolves.toBe(
+    await expect(toolContext.functionTools.getState.execute({ address: "profile" })).resolves.toBe(
       "state:profile",
     );
-    await expect(toolContext.getState.execute({ address: "secret" })).rejects.toThrow(
+    await expect(toolContext.functionTools.getState.execute({ address: "secret" })).rejects.toThrow(
       /Unknown retrievable state address/,
     );
     expect(createActionContext).toHaveBeenCalledWith(getStateAction);

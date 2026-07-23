@@ -15,6 +15,7 @@ import type {
   AnyComputedPartDef,
   Charter,
   Exposure,
+  IncludePart,
   Node,
 } from "./types.ts";
 
@@ -36,6 +37,43 @@ export function callerAllows(caller: ActionCaller, requirement: "generator" | "e
 export function computedRegistryActions(definition: AnyComputedPartDef): AnyAction[] {
   return (definition.registry ?? []).filter(
     (entry): entry is AnyAction => !isNode(entry),
+  );
+}
+
+/**
+ * The node candidates a computed part's registry declares — the declared
+ * include targets a compute may return (chooses among declared, never
+ * conjures). Walkable data: the static include graph and the charter-build
+ * registration check consult it; closures stay opaque.
+ */
+export function computedRegistryNodes(definition: AnyComputedPartDef): Node<any>[] {
+  return (definition.registry ?? []).filter((entry): entry is Node<any> => isNode(entry));
+}
+
+/**
+ * Resolution for a computed's returned include parts, mirroring
+ * resolveComputedActionEntry's closure rule but registry-only: an include may
+ * be returned only when its node is declared in the computed's own registry
+ * (by reference, or a string ref matching a registry node's key). Keeps every
+ * reachable render topology inside the statically-checked include graph.
+ * Sugar-lowered selects (metadata-bearing defs) never route through here —
+ * their branch include parts are walkable data, statically validated.
+ */
+export function resolveComputedIncludeKey(
+  part: IncludePart<any>,
+  definition: AnyComputedPartDef,
+): string {
+  const nodes = computedRegistryNodes(definition);
+  if (typeof part.node === "string") {
+    if (nodes.some((node) => node.key === part.node)) {
+      return part.node;
+    }
+  } else if (nodes.includes(part.node)) {
+    return part.node.key;
+  }
+  const key = typeof part.node === "string" ? part.node : part.node.key;
+  throw new Error(
+    `Computed part "${definition.name}" returned include of node "${key}" with no declared identity; list the node in the computed's registry — include targets are never conjured inside a compute closure`,
   );
 }
 

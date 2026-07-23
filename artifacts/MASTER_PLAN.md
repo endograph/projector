@@ -23,7 +23,13 @@ type HistoryProjectionFunctionRef = Ref;
 // contributions. ---
 
 type ActionCaller = "generator" | "external" | "any";
-type Exposure = "native" | "deferred";
+// `hidden`: bound/declared but the generator never encounters it — a state
+// emits no prompt content or retrieval metadata; an action contributes no
+// tool, guidance, or availability note — while staying resolvable
+// off-surface (client views, the executeCommand dispatch path). Hidden
+// contributions never reach the compiled tool surface, so executors only
+// ever see native or deferred.
+type Exposure = "native" | "deferred" | "hidden";
 
 type SlotDef = {
   kind: "slot";
@@ -96,10 +102,25 @@ type ComputedPartRef<TDataContent = never> = {
   part: ComputedPartDef<TDataContent> | Ref;
 };
 
+// Instance-based composition: a compile-layer view of a living contributor,
+// never a second mount. The referenced node resolves by key at compile via
+// nearest-enclosing-scope matching against the realized tree; the target
+// renders canonically (its own state containers, its own params — an include
+// never reconfigures its target). A part, not an instance: mutation folds and
+// source serialization never traverse it; ownership stays a strict tree while
+// the projection layer gains a DAG of views. Ref idiom: the node object at
+// authoring (typo-proof), the node key on the wire; every included node must
+// be charter-registered.
+type IncludePart<TDataContent = never> = {
+  kind: "include";
+  node: Node<TDataContent> | Ref;
+};
+
 type Part<TDataContent = never> =
   | TextPart
   | ActionPart
-  | ComputedPartRef<TDataContent>;
+  | ComputedPartRef<TDataContent>
+  | IncludePart<TDataContent>;
 // There is no SelectPart kind: select()/when() are sugar returning a
 // metadata-bearing computed part. computed is the single variation primitive.
 
@@ -289,9 +310,17 @@ type OutputConfig<TDataContent = never> = {
   mapTextBlock?: (text: string) => TDataContent;
 };
 
+// `primary` shares `actor-frame`'s stimulus (the broadcast actor frame —
+// same visibility and audience rules) but negotiates admission: per source
+// frame, a matching primary activates unless a matching primary with
+// `suppressAncestors` exists strictly below it on its own descendant path.
+// Suppression is lineage-scoped (never siblings) and means do-not-activate —
+// no compile, no inference. Every other trigger type is a pure stimulus
+// description: always honored, never arbitrated.
 type RuntimeTrigger =
   | { type: "spawn" }
   | { type: "actor-frame" }
+  | { type: "primary"; suppressAncestors?: boolean }
   | { type: "parent-activation" }
   | { type: "parent-completion" };
 
@@ -311,7 +340,7 @@ type HistoryProjectionContext<TDataContent = never> = {
   target: Generator;
   generatorId: GeneratorId;
   activationId: string;
-  trigger: RuntimeTrigger;
+  trigger: RuntimeTrigger | RuntimeTrigger[];
   history: Frame<TDataContent>[];
   states: Record<StateKey, unknown>;
 };
@@ -329,7 +358,12 @@ type HistoryProjectionFunction<TDataContent = never> = {
 type BoundaryProjection = "hidden" | "augment";
 
 type TriggeredRuntimeOptions = {
-  trigger: RuntimeTrigger;
+  // One stimulus or a union of stimuli, each keeping its own admission
+  // semantics. Singular stays valid sugar; at most one trigger of each type
+  // per runtime (validated at createNode). Per source frame the declared
+  // triggers are tried in declaration order and the first match wins, so a
+  // generator mints at most one activation per frame.
+  trigger: RuntimeTrigger | RuntimeTrigger[];
   concurrency?: RuntimeConcurrency; // default "serial"
   activationHistory?: ActivationHistory; // default "live"
   boundaryProjection?: BoundaryProjection; // default "hidden"
@@ -402,7 +436,7 @@ type StateProjection = {
   // Slot the rendered value (or deferred-availability note) addresses;
   // absent = the preamble region's default slot.
   slot?: SlotAddress;
-  exposure?: Exposure; // native renders the value; deferred exposes getState
+  exposure?: Exposure; // native renders; deferred exposes getState; hidden emits nothing
   render?: (value: unknown) => string; // code — registered descriptors only
   note?: (address: string) => string; // code — registered descriptors only
 };
@@ -682,14 +716,24 @@ const loadProfile = createAction({
 });
 ```
 
-Static compatibility is intentionally strict in the first pass:
+Static compatibility is intentionally strict, and spelled as never-on-pass
+diagnostic validators — no explicit type arguments anywhere:
 
-- `charter.params` must satisfy every registered node's `node.params`;
-- member nodes are included recursively in that type check;
-- `node.params` must satisfy every inline attached action's `action.params`;
-- string action refs are resolved later through the charter, so their params are
-  validated when real params are parsed into action contexts rather than through
-  runtime schema comparison.
+- `charter.params` must satisfy every registered node's `node.params`
+  (member nodes included recursively), and `node.params` must satisfy every
+  inline attached action's `action.params`;
+- the check compares the provider's resolved OUTPUT against the consumer's
+  INPUT: the consumer re-parses what it picks, so a key its schema can
+  default or treat as optional need not be provided;
+- on failure the validator intersects a `ParamsSatisfyError` diagnostic
+  object into the config parameter, so the assignability error names the
+  mismatched keys instead of burying them in generic instantiation noise;
+- everything the type layer cannot see — string action refs, computed-
+  closure returns, hydrated dry nodes, plain-JS callers — is covered by the
+  bind-time runtime backstop (`assertNodeActionParamsCompatibility`): every
+  param key an action's schema cannot resolve without must be declared by
+  the node, since node params filter effective params before the action
+  picks from them.
 
 The runtime does not compare params schemas to each other. Instead, it parses
 real values at the points where they matter:
@@ -910,7 +954,19 @@ type CompileDiagnostic = {
     | "unknown-slot"
     | "shadowed-action"
     | "volatile-order"
-    | "invalid-discriminator-value";
+    | "invalid-discriminator-value"
+    // Include laws: once-per-document clip (a later visit of an already
+    // rendered contributor — diamond, cycle, self-include — no-ops, same
+    // doctrine as shadowed-action); unresolved (no enclosing scope owns the
+    // key — error, no silent dangling); ambiguous (matched scope violates
+    // scope-uniqueness — loud, never a silent pick); hidden (include of a
+    // hidden generator contributes nothing per the boundary law); cyclic
+    // (static include key graph contains a cycle — lint).
+    | "clipped-include"
+    | "unresolved-include"
+    | "ambiguous-include"
+    | "hidden-include"
+    | "cyclic-include";
   message: string;
 };
 ```
@@ -1618,7 +1674,8 @@ type WorkMessage =
         | "delegated"
         | "error"
         | "terminal-action"
-        | "absorbed";
+        | "absorbed"
+        | "suppressed";
     }
   // Host-authored request to cancel pending work (user stop, voice barge-in).
   | {
@@ -2071,6 +2128,13 @@ Generator runtimes are triggered only by scoped runtime events:
   whose audience is visible to the projection address. Message `delivery` does
   not affect trigger matching; it affects only whether the actor message is
   eligible history for a particular activation.
+- `primary`: same stimulus as `actor-frame`, plus floor arbitration. Per
+  source frame, a matching primary activates unless a matching primary with
+  `suppressAncestors` exists strictly below it on its own descendant path;
+  the suppressed generator's candidate completes durably with
+  `reason: "suppressed"` (the scheduler records the no-op), and
+  `parent-completion` triggers ignore "suppressed" like "cancelled".
+  Suppression is lineage-scoped — never siblings.
 - `parent-activation`: activates when a work `activation` message opens work for
   the runtime's nearest ancestor generator.
 - `parent-completion`: activates when a work `completion` message closes work
@@ -2435,6 +2499,11 @@ A client instance should include, where applicable:
 - durable children;
 - public member/projection children with stable projection addresses;
 - visible state values and their state addresses;
+- stored state containers attached to the concrete instance
+  (`storedStates`) and the descriptors the node declares (`boundStates`,
+  with schema/scope/projection metadata);
+- the content each node contributes directly to the `preamble` and
+  `recency` regions, for inspection;
 - state schema metadata for visible or form-bindable states;
 - command metadata, command input schemas, and optional projection target addresses.
 
@@ -2835,6 +2904,7 @@ type DryPart =
       guidance?: Array<{ slot?: string; region?: LayoutRegionName; text: string }>;
     }
   | { kind: "computed"; ref: Ref }
+  | { kind: "include"; node: Ref }
   | {
       kind: "select";
       discriminator: Ref;
@@ -2982,8 +3052,9 @@ default, or one field assignment unless that detail changes runtime behavior.
 
 The conformance suites under `packages/projector/test/conformance/`
 (projection, layout, selects, state projections, serialization of parts,
-provenance, state, and lowering — which runs against the real executor
-packages) are the canonical executable form of this list.
+provenance, state, floor — primary-trigger arbitration — includes, and
+lowering — which runs against the real executor packages) are the canonical
+executable form of this list.
 
 Add focused tests for:
 

@@ -115,7 +115,7 @@ export function hydrateNode<TDataContent = never>(
   }
 
   const sourceNode = serialized.sourceNodeKey ? charter.nodes[serialized.sourceNodeKey] : undefined;
-  return createNode<TDataContent>({
+  return createNode({
     key: serialized.key,
     sourceNodeKey: serialized.sourceNodeKey,
     name: serialized.name,
@@ -150,6 +150,24 @@ function serializeParts<TDataContent>(
   return parts.map((part): DryPart => {
     if (part.kind === "text") {
       return { kind: "text", ...slotPlacement(part.slot), text: part.text };
+    }
+
+    if (part.kind === "include") {
+      // Ref idiom: the node KEY goes on the wire; every included node must be
+      // charter-registered (an include of an unregistered node cannot
+      // serialize — same recoverability invariant as every behavioral ref).
+      if (typeof part.node === "string") {
+        if (!charter.nodes[part.node]) {
+          throw new Error(`Cannot serialize include of unknown node ref "${part.node}"`);
+        }
+        return { kind: "include", node: part.node };
+      }
+      if (charter.nodes[part.node.key] !== part.node) {
+        throw new Error(
+          `Cannot serialize include of unregistered node "${part.node.key}"; include targets must be charter-registered`,
+        );
+      }
+      return { kind: "include", node: part.node.key };
     }
 
     if (part.kind === "computed") {
@@ -212,6 +230,14 @@ function hydrateParts<TDataContent>(
   return parts.map((part): Part<TDataContent> => {
     if (part.kind === "text") {
       return { kind: "text", ...hydrateSlotAddress(part), text: part.text };
+    }
+
+    if (part.kind === "include") {
+      const node = charter.nodes[part.node];
+      if (!node) {
+        throw new Error(`Unknown node ref "${part.node}" for include hydration`);
+      }
+      return { kind: "include", node };
     }
 
     if (part.kind === "computed") {

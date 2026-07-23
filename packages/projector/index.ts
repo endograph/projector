@@ -17,6 +17,7 @@ export * from "./src/params.ts";
 export * from "./src/refs.ts";
 export * from "./src/regions.ts";
 export * from "./src/scoped-actions.ts";
+export * from "./src/scopes.ts";
 export * from "./src/projection-address.ts";
 export * from "./src/serialization.ts";
 export * from "./src/state.ts";

@@ -1,22 +1,34 @@
 import * as z from "zod";
 import {
   collectContributors,
+  computedPartEnv,
   createRootInstance,
   directContributorChildren,
   type Contributor,
 } from "../contributors.ts";
+import {
+  evaluateComputedPartReturn,
+  isComputedActionReturn,
+  isComputedIncludeReturn,
+  resolveComputedPartRef,
+} from "../computed-parts.ts";
+import { implicitDefaultLayout, layoutRegionForSlot } from "../layouts.ts";
 import { encodeProjectionAddress } from "../projection-address.ts";
 import { callerAllows, resolveContributorActions, type ResolvedNodeAction } from "../scoped-actions.ts";
+import { slotPlacement } from "../slots.ts";
 import { groupStatesByContributor, resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
   ActionRequestMessage,
   ExecuteActionResult,
   Charter,
+  ContentPart,
   Instance,
+  LayoutRegionName,
   NormalizedRuntime,
   ProjectionAddress,
   StateAddress,
+  TextPart,
   Exposure,
 } from "../types.ts";
 
@@ -58,7 +70,15 @@ export type ClientStateView<TValue = unknown> = {
   address: StateAddress;
   value: TValue;
   schema?: JSONSchema;
-  projection?: { exposure: Exposure };
+  projection?: { slot?: string; region?: LayoutRegionName; exposure: Exposure };
+};
+
+export type ClientStateDescriptorView = {
+  key: string;
+  scope: "hoist" | "local";
+  onInitConflict: "error" | "replace";
+  schema: JSONSchema;
+  projection?: { slot?: string; region?: LayoutRegionName; exposure: Exposure };
 };
 
 export type ClientCommandMeta<
@@ -96,7 +116,15 @@ export type ClientInstance<
   nodeKey: string;
   name?: string;
   contributor: ClientContributorMeta;
+  /** The containers currently attached to the concrete instance. */
+  storedStates: ClientStateView[];
   states: ClientStateView<TState>[];
+  /** State descriptors declared by this node. */
+  boundStates: ClientStateDescriptorView[];
+  /** Content contributed directly by this node to the durable region. */
+  preamble: ContentPart<unknown>[];
+  /** Content contributed directly by this node to the freshness region. */
+  recency: ContentPart<unknown>[];
   tools: TTools[];
   commands: TCommands[];
   members: ClientInstance[];
@@ -453,7 +481,7 @@ export function realizeClientInstances(
   if (!rootContributor) {
     throw new Error("Unable to realize empty client instance");
   }
-  return realizeContributor(rootContributor, statesByContributor, options.charter);
+  return realizeContributor(rootContributor, states, statesByContributor, options.charter);
 }
 
 export function findClientCommand<TName extends string>(
@@ -479,6 +507,7 @@ export function findClientCommand<TName extends string>(
 
 function realizeContributor(
   contributor: Contributor,
+  resolvedStates: ResolvedState[],
   statesByContributor: Map<string, ResolvedState[]>,
   charter: Charter | undefined,
 ): ClientInstance {
@@ -495,6 +524,7 @@ function realizeContributor(
     }
   }
 
+  const content = realizeBoundContent(contributor, charter);
   return {
     kind: contributor.isMember ? "member" : "instance",
     id: contributor.isMember ? undefined : contributor.concreteInstance.id,
@@ -505,7 +535,11 @@ function realizeContributor(
       address: contributor.address,
       runtimeType: contributor.node.runtime.type,
     },
-    states: (statesByContributor.get(contributor.id) ?? []).map(realizeState),
+    storedStates: realizeStoredStates(contributor, resolvedStates),
+    states: (statesByContributor.get(contributor.id) ?? []).map((state) => realizeState(state)),
+    boundStates: contributor.node.states.map(realizeStateDescriptor),
+    preamble: content.preamble,
+    recency: content.recency,
     tools: clientActions(contributor, charter, "generator").map((entry) =>
       realizeTool(entry, contributor.address)
     ),
@@ -513,10 +547,10 @@ function realizeContributor(
       realizeCommand(entry.action, contributor.address)
     ),
     members: memberNodes.map((member) =>
-      realizeContributor(member, statesByContributor, charter)
+      realizeContributor(member, resolvedStates, statesByContributor, charter)
     ),
     children: childNodes.map((child) =>
-      realizeContributor(child, statesByContributor, charter)
+      realizeContributor(child, resolvedStates, statesByContributor, charter)
     ),
   };
 }
@@ -549,14 +583,118 @@ function realizeCommand(command: Action, target: ProjectionAddress): ClientComma
   };
 }
 
-function realizeState(state: ResolvedState): ClientStateView {
+function realizeBoundContent(
+  contributor: Contributor,
+  charter: Charter | undefined,
+): { preamble: ContentPart<unknown>[]; recency: ContentPart<unknown>[] } {
+  const layout = charter?.defaultLayout ?? implicitDefaultLayout;
+  const content: { preamble: ContentPart<unknown>[]; recency: ContentPart<unknown>[] } = {
+    preamble: [],
+    recency: [],
+  };
+
+  const add = (part: ContentPart<unknown>) => {
+    const region: LayoutRegionName = part.region
+      ?? (part.slot ? layoutRegionForSlot(layout, part.slot) ?? "preamble" : "preamble");
+    content[region].push(part);
+  };
+
+  const addGuidance = (guidance: readonly TextPart[] = []) => {
+    for (const part of guidance) {
+      add({ type: "text", text: part.text, ...slotPlacement(part.slot) });
+    }
+  };
+
+  for (const part of contributor.node.parts) {
+    if (part.kind === "text") {
+      add({ type: "text", text: part.text, ...slotPlacement(part.slot) });
+      continue;
+    }
+    if (part.kind === "action") {
+      addGuidance(part.guidance);
+      continue;
+    }
+    if (part.kind === "include") {
+      continue;
+    }
+
+    const definition = resolveComputedPartRef(part.part, charter);
+    const defaultPlacement = slotPlacement(definition.slot);
+    const returned = evaluateComputedPartReturn(definition, computedPartEnv(contributor, charter));
+    for (const item of returned) {
+      if (isComputedActionReturn(item)) {
+        addGuidance(item.guidance);
+        continue;
+      }
+      if (isComputedIncludeReturn(item)) {
+        continue;
+      }
+      if ("kind" in item) {
+        add({ type: "text", text: item.text, ...slotPlacement(item.slot ?? definition.slot) });
+        continue;
+      }
+      const hasOwnPlacement = item.slot !== undefined || item.region !== undefined;
+      add({ ...(hasOwnPlacement ? {} : defaultPlacement), ...item });
+    }
+  }
+
+  return content;
+}
+
+function realizeStoredStates(
+  contributor: Contributor,
+  resolvedStates: readonly ResolvedState[],
+): ClientStateView[] {
+  if (contributor.isMember) {
+    return [];
+  }
+  return Object.entries(contributor.concreteInstance.states ?? {}).map(([key, container]) => {
+    const state = resolvedStates.find(
+      (candidate) =>
+        candidate.address.instanceId === contributor.concreteInstance.id &&
+        candidate.address.stateKey === key,
+    );
+    return state
+      ? realizeState(state)
+      : {
+          key,
+          address: { instanceId: contributor.concreteInstance.id, stateKey: key },
+          value: container.value,
+        };
+  });
+}
+
+function realizeStateDescriptor(
+  descriptor: Contributor["node"]["states"][number],
+): ClientStateDescriptorView {
+  return {
+    key: descriptor.key,
+    scope: descriptor.scope,
+    onInitConflict: descriptor.onInitConflict,
+    schema: z.toJSONSchema(descriptor.schema),
+    projection: descriptor.projection
+      ? {
+          ...slotPlacement(descriptor.projection.slot),
+          exposure: descriptor.projection.exposure ?? "native",
+        }
+      : undefined,
+  };
+}
+
+function realizeState(
+  state: ResolvedState,
+  descriptor = state.descriptor,
+): ClientStateView {
   return {
     key: state.address.stateKey,
     address: state.address,
     value: state.container.value,
-    schema: z.toJSONSchema(state.descriptor.schema),
-    projection: state.descriptor.projection
-      ? { exposure: state.descriptor.projection.exposure ?? "native" }
+    schema: z.toJSONSchema(descriptor.schema),
+    projection: descriptor.projection
+      ? {
+          ...slotPlacement(descriptor.projection.slot),
+          exposure: descriptor.projection.exposure ?? "native",
+        }
       : undefined,
   };
 }

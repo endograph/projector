@@ -18,12 +18,16 @@ import {
 } from "./contributors.ts";
 import type { DiscriminatorMemo } from "./discriminators.ts";
 import {
+  computedPartDefinition,
   evaluateComputedPartReturn,
   isComputedActionReturn,
+  isComputedIncludeReturn,
   resolveComputedPartRef,
   type ComputedMemberMemo,
   type ComputedReturnMemo,
 } from "./computed-parts.ts";
+import { includeNodeKey, walkAllParts } from "./parts.ts";
+import { resolveIncludeTarget } from "./scopes.ts";
 import {
   actorMessages,
   isActorHistoryProjection,
@@ -39,10 +43,13 @@ import {
 import {
   callerAllows,
   collectAllNodeActions,
+  computedRegistryNodes,
   resolveActionEntry,
   resolveComputedActionEntry,
+  resolveComputedIncludeKey,
 } from "./scoped-actions.ts";
 import { slotPlacement } from "./slots.ts";
+import { assertNodeActionParamsCompatibility } from "./params.ts";
 import {
   deriveStateAliases,
   groupStatesByContributor,
@@ -70,10 +77,12 @@ import type {
   HistoryProjection,
   HistoryProjectionContext,
   HistoryProjectionFunction,
+  IncludePart,
   Instance,
   LayoutDef,
   LayoutRegionName,
   MessageHistoryProjection,
+  Node,
   ProjectionIR,
   ProjectionPart,
   ProjectionStatePart,
@@ -124,6 +133,10 @@ type CompileSession = {
   computedReturns: ComputedReturnMemo;
   /** Member-compute cache per (computed name, contributor); see evaluateComputedMemberNodes. */
   computedMembers: ComputedMemberMemo;
+  /** Include-target node keys whose static key graph was already cycle-linted. */
+  includeCycleLints: Set<string>;
+  /** Cycle labels already reported, so one cycle warns once per session. */
+  reportedIncludeCycles: Set<string>;
   diagnostics: CompileDiagnostic[];
   onDiagnostic?: (diagnostic: CompileDiagnostic) => void;
 };
@@ -136,9 +149,30 @@ function createCompileSession<TDataContent>(
     memo: new Map(),
     computedReturns: new Map(),
     computedMembers: new Map(),
+    includeCycleLints: new Set(),
+    reportedIncludeCycles: new Set(),
     diagnostics: [],
     onDiagnostic: options.onDiagnostic,
   };
+}
+
+/**
+ * Per-compile-target document state, threaded through the visitation. The
+ * visited set enforces the once-per-document law (a contributor renders into
+ * a given document at most once — first visit wins, later visits clip; one
+ * set covers cycles, diamond includes, and self-includes). `depthOffset`
+ * carries include grafts' depth adjustment: included parts shadow at the
+ * include SITE's depth (decidable from the includer's document alone), with
+ * relative depth inside the target's subtree preserved as an offset from the
+ * site — nested includes compose by re-deriving the offset at each graft.
+ */
+type DocumentVisit = {
+  visited: Set<string>;
+  depthOffset: number;
+};
+
+function newDocumentVisit(): DocumentVisit {
+  return { visited: new Set(), depthOffset: 0 };
 }
 
 /** The compile-path member view: selects and member computeds evaluated, memoized on the session. */
@@ -184,7 +218,8 @@ export type CompiledContributor<TDataContent = never> = {
   parentId?: GeneratorId;
   runtime: {
     type: "generator";
-    trigger: RuntimeTrigger;
+    /** Passed through as declared: singular sugar stays singular. */
+    trigger: RuntimeTrigger | RuntimeTrigger[];
     concurrency: RuntimeConcurrency;
     activationHistory: ActivationHistory;
   };
@@ -260,7 +295,7 @@ export function compileProjection<TDataContent = never>(
       session,
     );
   }
-  visitContributor(draft, rootContributor, options, stateByContributor, session);
+  visitContributor(draft, rootContributor, options, stateByContributor, session, newDocumentVisit());
 
   return finalizeSections(draft, compileHistory(root, options, states, session), session);
 }
@@ -352,7 +387,7 @@ export function inspectProjectionIR<TDataContent = never>(
       draft = compileGeneratorProjection(rootContributor, options, stateByContributor, session);
     } else {
       draft = emptyProjectionIR<TDataContent>();
-      visitContributor(draft, rootContributor, options, stateByContributor, session);
+      visitContributor(draft, rootContributor, options, stateByContributor, session, newDocumentVisit());
     }
   }
 
@@ -403,34 +438,57 @@ function visitContributor<TDataContent>(
   options: CompileProjectionOptions<TDataContent>,
   stateByContributor: Map<string, ResolvedState[]>,
   session: CompileSession,
+  visit: DocumentVisit,
 ): void {
   if (isGeneratorBoundary(contributor) && !belongsToGenerator(contributor, options.targetGeneratorId)) {
     const runtime = contributor.node.runtime as GeneratorRuntime;
     // A child generator's boundary is an enum: hidden exports nothing;
     // augment forwards every compiled part to the parent document as-is.
     if (runtime.boundaryProjection === "augment") {
-      const exported = compileGeneratorProjection(contributor, options, stateByContributor, session);
+      const exported = compileGeneratorProjection(contributor, options, stateByContributor, session, visit);
       forwardProjectionIR(draft, exported);
     }
     return;
   }
 
-  renderContributor(draft, contributor, options, stateByContributor, session);
+  // Once-per-document law: a contributor renders into a given document at
+  // most once — first visit wins, later visits clip to a no-op with a
+  // diagnostic (same doctrine as shadowed-action). One check covers diamond
+  // includes, include cycles (include-of-parent yields "everything except
+  // me": the walk started at the includer, so it is already visited),
+  // self-includes, and a canonical mount arriving after an include of it —
+  // which is also the dedup of double state projection: the target's state
+  // parts render exactly once per document.
+  if (visit.visited.has(contributor.id)) {
+    reportDiagnostic(session, {
+      severity: "warning",
+      code: "clipped-include",
+      message: `Contributor "${contributor.id}" (node "${contributor.node.key}") already rendered into this document; the later visit is clipped`,
+    });
+    return;
+  }
+  visit.visited.add(contributor.id);
+
+  renderContributor(draft, contributor, options, stateByContributor, session, visit);
   for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
-    visitContributor(draft, child, options, stateByContributor, session);
+    visitContributor(draft, child, options, stateByContributor, session, visit);
   }
 }
 
 /**
  * Compiles a generator's own document: the generator is its own target, so
  * visitContributor renders it and folds descendant boundaries in per their
- * boundaryProjection enum.
+ * boundaryProjection enum. `visit` is passed through when the compile feeds
+ * an enclosing document (an augment boundary crossing) so the once-per-
+ * document law spans the whole target document; top-level entries start a
+ * fresh document.
  */
 function compileGeneratorProjection<TDataContent>(
   contributor: Contributor<TDataContent>,
   options: CompileProjectionOptions<TDataContent>,
   stateByContributor: Map<string, ResolvedState[]>,
   session: CompileSession,
+  visit: DocumentVisit = newDocumentVisit(),
 ): ProjectionIR<TDataContent> {
   const draft = emptyProjectionIR<TDataContent>();
   visitContributor(
@@ -439,6 +497,7 @@ function compileGeneratorProjection<TDataContent>(
     { ...options, targetGeneratorId: contributor.id },
     stateByContributor,
     session,
+    visit,
   );
   return draft;
 }
@@ -456,12 +515,13 @@ function renderContributor<TDataContent>(
   options: CompileProjectionOptions<TDataContent>,
   stateByContributor: Map<string, ResolvedState[]>,
   session: CompileSession,
+  visit: DocumentVisit,
 ): void {
   for (const state of stateByContributor.get(contributor.id) ?? []) {
     addStateProjectionSource(draft, state, session);
   }
 
-  const depth = contributorDepth(contributor);
+  const depth = contributorDepth(contributor) + visit.depthOffset;
   for (const part of contributor.node.parts) {
     if (part.kind === "text") {
       pushContentPart(draft, session, {
@@ -470,6 +530,14 @@ function renderContributor<TDataContent>(
         ...slotPlacement(part.slot),
         partDepth: depth,
       });
+      continue;
+    }
+
+    if (part.kind === "include") {
+      // The include splices the target's canonical rendering at this position
+      // in the parts list (arrival order within the draft settles within-slot
+      // interleaving; the includer's layout arranges the slots).
+      renderIncludePart(draft, contributor, includeNodeKey(part), depth, options, stateByContributor, session, visit);
       continue;
     }
 
@@ -489,6 +557,18 @@ function renderContributor<TDataContent>(
           renderActionPart(draft, session, contributor, item, depth, (entry) =>
             resolveComputedActionEntry(entry, definition, contributor.node, options.charter),
           );
+          continue;
+        }
+        if (isComputedIncludeReturn(item)) {
+          // Computed-returned includes are registry-constrained (chooses
+          // among declared, never conjures) and then route through the exact
+          // same include path as static include parts at this contributor and
+          // depth. Sugar-lowered selects skip the registry check: their
+          // branch include parts are walkable data, validated statically.
+          const nodeKey = definition.metadata
+            ? includeNodeKey(item)
+            : resolveComputedIncludeKey(item, definition);
+          renderIncludePart(draft, contributor, nodeKey, depth, options, stateByContributor, session, visit);
           continue;
         }
         // The computed's declared slot (absent on sugar-lowered selects) is
@@ -514,9 +594,186 @@ function renderContributor<TDataContent>(
   }
 }
 
+/**
+ * Renders an include: nearest-enclosing-scope matching binds the node key to
+ * its canonical contributor, then the target's subtree is visited under THIS
+ * compile — position-independent visitation, never transclusion of the
+ * target's compiled document (parts cross, structure never: the target's
+ * layout, history projection, and cache structure belong to its own
+ * document). The target renders canonically — its own state containers, its
+ * own params — so the included rendering is byte-identical to the canonical
+ * rendering except placement metadata (depth: included parts shadow at the
+ * include site's depth). Failures are loud and render nothing: an
+ * unresolved key or a scope-uniqueness violation in the matched scope is an
+ * error diagnostic (no silent dangling, no silent pick); a hidden generator
+ * target contributes nothing per the boundary law, with a diagnostic (almost
+ * certainly a charter mistake); a target already in this document clips per
+ * the once-per-document law.
+ *
+ * Include provenance (the resolved scope root + target per include site) is
+ * carried in these diagnostics' messages; always-on provenance recording is
+ * deferred — the compile has no inspection artifact for it yet (ROADMAP 7):
+ * when that lands, record { siteId, nodeKey, scopeRootId, targetId } there.
+ */
+function renderIncludePart<TDataContent>(
+  draft: ProjectionIR<TDataContent>,
+  site: Contributor<TDataContent>,
+  nodeKey: string,
+  siteDepth: number,
+  options: CompileProjectionOptions<TDataContent>,
+  stateByContributor: Map<string, ResolvedState[]>,
+  session: CompileSession,
+  visit: DocumentVisit,
+): void {
+  lintIncludeCycles(session, options.charter, nodeKey);
+  const resolution = resolveIncludeTarget(site, nodeKey, effectiveMembers(options, session));
+  if (resolution.kind === "unresolved") {
+    reportDiagnostic(session, {
+      severity: "error",
+      code: "unresolved-include",
+      message: `Include of node "${nodeKey}" at "${site.id}" matched no contributor in any enclosing scope; nothing rendered`,
+    });
+    return;
+  }
+  if (resolution.kind === "ambiguous") {
+    reportDiagnostic(session, {
+      severity: "error",
+      code: "ambiguous-include",
+      message: `Include of node "${nodeKey}" at "${site.id}" matched ${resolution.matches.length} contributors in scope "${resolution.scopeRoot.id}" (${resolution.matches.map((match) => `"${match.id}"`).join(", ")}); a document scope owns at most one contributor per node key — nothing rendered`,
+    });
+    return;
+  }
+
+  const target = resolution.target;
+  if (visit.visited.has(target.id)) {
+    reportDiagnostic(session, {
+      severity: "warning",
+      code: "clipped-include",
+      message: `Include of node "${nodeKey}" at "${site.id}" targets "${target.id}" (scope "${resolution.scopeRoot.id}"), already rendered into this document; the include is clipped`,
+    });
+    return;
+  }
+
+  const grafted: DocumentVisit = {
+    visited: visit.visited,
+    depthOffset: siteDepth - contributorDepth(target),
+  };
+  if (isGeneratorBoundary(target)) {
+    // Include of a generator routes through the existing boundary law:
+    // runtime never crosses (no second work identity, no floor
+    // participation) — only an augment boundary's parts forward.
+    const runtime = target.node.runtime as GeneratorRuntime;
+    if (runtime.boundaryProjection !== "augment") {
+      reportDiagnostic(session, {
+        severity: "warning",
+        code: "hidden-include",
+        message: `Include of node "${nodeKey}" at "${site.id}" targets hidden generator "${target.id}" (scope "${resolution.scopeRoot.id}"); a hidden boundary exports nothing — declare boundaryProjection "augment" on the target to forward its parts`,
+      });
+      return;
+    }
+    visitContributor(
+      draft,
+      target,
+      { ...options, targetGeneratorId: target.id },
+      stateByContributor,
+      session,
+      grafted,
+    );
+    return;
+  }
+
+  visitContributor(draft, target, options, stateByContributor, session, grafted);
+}
+
+/**
+ * The include key-graph cycle lint, surfaced as a compile diagnostic: the
+ * graph over node KEYS is statically known (include parts across all sugar
+ * branches, plus bare computeds' registry node candidates), so cycles
+ * reachable from a rendered include's target are detected and warned once per
+ * session. Lives at compile rather than createCharter only because charter
+ * build has no warning channel — and a cycle must stay a warning, not an
+ * error: mutual includes are defined behavior under the once-per-document
+ * clip (each renders "the other minus me"), just usually an authoring
+ * mistake. The runtime clip is the semantic backstop either way.
+ */
+function lintIncludeCycles(
+  session: CompileSession,
+  charter: Charter<any> | undefined,
+  startKey: string,
+): void {
+  if (!charter || session.includeCycleLints.has(startKey)) {
+    return;
+  }
+  session.includeCycleLints.add(startKey);
+
+  const stack: string[] = [];
+  const onPath = new Set<string>();
+  const done = new Set<string>();
+  const visitKey = (key: string): void => {
+    if (onPath.has(key)) {
+      const label = [...stack.slice(stack.indexOf(key)), key].join(" -> ");
+      if (!session.reportedIncludeCycles.has(label)) {
+        session.reportedIncludeCycles.add(label);
+        reportDiagnostic(session, {
+          severity: "warning",
+          code: "cyclic-include",
+          message: `Include graph cycle: ${label}; each participant renders "the other minus itself" under the once-per-document clip — usually an authoring mistake`,
+        });
+      }
+      return;
+    }
+    if (done.has(key)) {
+      return;
+    }
+    onPath.add(key);
+    stack.push(key);
+    for (const next of staticIncludeTargetKeys(charter.nodes[key], charter)) {
+      visitKey(next);
+    }
+    onPath.delete(key);
+    stack.pop();
+    done.add(key);
+  };
+  visitKey(startKey);
+}
+
+/**
+ * The statically-declared include edges out of a node's own parts list:
+ * include parts (all sugar branches entered via walkAllParts) plus bare
+ * computeds' registry node candidates (the declared universe a computed
+ * include chooses from). Deliberately parts-only — a member's includes are
+ * that member's edges, so include-of-parent from a mounted member never reads
+ * as a self-cycle.
+ */
+function staticIncludeTargetKeys<TDataContent>(
+  node: Node<TDataContent> | undefined,
+  charter: Charter<TDataContent>,
+): string[] {
+  if (!node) {
+    return [];
+  }
+  const keys = new Set<string>();
+  walkAllParts(node.parts, (part) => {
+    if (part.kind === "include") {
+      keys.add(includeNodeKey(part));
+      return;
+    }
+    if (part.kind === "computed") {
+      const definition = computedPartDefinition(part.part, charter);
+      if (!definition || definition.metadata) {
+        return;
+      }
+      for (const candidate of computedRegistryNodes(definition)) {
+        keys.add(candidate.key);
+      }
+    }
+  });
+  return [...keys];
+}
+
 /** Lifts a computed-returned content contribution into draft-IR form. */
 function computedContentPart<TDataContent>(
-  item: Exclude<ComputedReturnPart<TDataContent>, ActionPart>,
+  item: Exclude<ComputedReturnPart<TDataContent>, ActionPart | IncludePart<TDataContent>>,
 ): ContentPart<TDataContent> {
   if ("kind" in item) {
     // Authoring text part: kind-tagged, slot addressed via SlotAddress.
@@ -532,7 +789,9 @@ function computedContentPart<TDataContent>(
  * action swaps its guidance atomically. Generator-callable actions resolve
  * through the given scoped resolver, validate state compatibility, emit their
  * deferred availability note, and bind into the tool surface at the
- * contributor's depth.
+ * contributor's depth. A hidden contribution emits nothing — no guidance, no
+ * note, no tool — while staying resolvable off-surface (client views, the
+ * executeCommand dispatch path).
  */
 function renderActionPart<TDataContent>(
   draft: ProjectionIR<TDataContent>,
@@ -542,6 +801,9 @@ function renderActionPart<TDataContent>(
   depth: number,
   resolve: (entry: ActionConfigEntry) => AnyAction,
 ): void {
+  if (part.exposure === "hidden") {
+    return;
+  }
   for (const guidance of part.guidance ?? []) {
     pushContentPart(draft, session, {
       type: "text",
@@ -555,6 +817,7 @@ function renderActionPart<TDataContent>(
   }
   const action = resolve(part.action);
   assertNodeActionStateCompatibility(action, contributor.node, "tool");
+  assertNodeActionParamsCompatibility(action, contributor.node, "tool");
   if (part.exposure === "deferred" && part.guidance === undefined) {
     // Auto availability note; explicit guidance (even []) replaces it.
     const summary = action.description?.split("\n", 1)[0];
@@ -791,10 +1054,10 @@ function addStateProjectionSource(
   pushContentPart(source, session, part);
 }
 
-/** A state renders per its declaration's projection config; absent = hidden. */
+/** A state renders per its declaration's projection config; absent or explicitly hidden emits nothing. */
 function stateProjectionPart(state: ResolvedState): ProjectionStatePart | undefined {
   const projection = state.descriptor.projection;
-  if (!projection) {
+  if (!projection || projection.exposure === "hidden") {
     return undefined;
   }
 
@@ -1072,6 +1335,9 @@ function collectProjectedStates(draft: ProjectionIR<any>): ProjectionStatePart[]
   const states: ProjectionStatePart[] = [];
   const seen = new Set<ProjectionStatePart>();
   const add = (state: ProjectionStatePart) => {
+    if (state.exposure === "hidden") {
+      return;
+    }
     if (!seen.has(state)) {
       seen.add(state);
       states.push(state);
@@ -1103,41 +1369,43 @@ function compileContentParts<TDataContent>(
   items: ProjectionPart<TDataContent>[],
   aliases: Map<ProjectionStatePart, string>,
 ): ContentPart<TDataContent>[] {
-  return items.map((item) => {
-    if (item.type === "text") {
-      return item;
-    }
-    if (item.type === "image" || item.type === "data") {
-      return item;
-    }
+  return items
+    .filter((item) => item.type !== "state" || item.exposure !== "hidden")
+    .map((item) => {
+      if (item.type === "text") {
+        return item;
+      }
+      if (item.type === "image" || item.type === "data") {
+        return item;
+      }
 
-    const alias = aliases.get(item);
-    if (!alias) {
-      throw new Error(`Missing alias for state "${item.stateKey}"`);
-    }
+      const alias = aliases.get(item);
+      if (!alias) {
+        throw new Error(`Missing alias for state "${item.stateKey}"`);
+      }
 
-    const placement = {
-      ...(item.slot !== undefined ? { slot: item.slot } : {}),
-      ...(item.region !== undefined ? { region: item.region } : {}),
-    };
-    if (item.exposure === "deferred") {
+      const placement = {
+        ...(item.slot !== undefined ? { slot: item.slot } : {}),
+        ...(item.region !== undefined ? { region: item.region } : {}),
+      };
+      if (item.exposure === "deferred") {
+        return {
+          type: "text",
+          ...placement,
+          text: item.note
+            ? item.note(alias)
+            : `You can call getState with address \`${alias}\` if you need that state.`,
+        };
+      }
+
       return {
         type: "text",
         ...placement,
-        text: item.note
-          ? item.note(alias)
-          : `You can call getState with address \`${alias}\` if you need that state.`,
+        text: item.render
+          ? item.render(item.value)
+          : `State \`${alias}\`: ${JSON.stringify(item.value)}`,
       };
-    }
-
-    return {
-      type: "text",
-      ...placement,
-      text: item.render
-        ? item.render(item.value)
-        : `State \`${alias}\`: ${JSON.stringify(item.value)}`,
-    };
-  });
+    });
 }
 
 function isGeneratorBoundary(contributor: Contributor<any>): boolean {
