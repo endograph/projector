@@ -1,0 +1,2374 @@
+/* projector landing — same system as the sidecar site: Schibsted Grotesk,
+   mono eyebrow labels, hand-inked annotations, hard-shadow step cards.
+   What's different here:
+   - the page is lit from the right: white paper on the left, a muted spectrum
+     thrown across the right edge — the prism metaphor as background.
+   - the hero diagram draws projection (one source, a fan of beams, one view
+     per actor) where sidecar's tree drew nesting. */
+
+:root {
+  /* Cool gray, well down from white: the ray's body is pure white and can
+     only read as light against a page with room beneath it. The original
+     warm off-white left ~10 units of headroom, which is nothing. */
+  --bg: #e1e4e9;
+  --ink: #000000;
+  --muted: #545c67;
+  --faint: #838a95;
+  --rule: #c3c9d2;
+  --wash: #d2d7de;
+  --accent: #6d28d9; /* lens violet — the projection end of the spectrum */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Schibsted Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --shadow: #aeb5bf;
+  --wrap: 43.75rem;
+  /* The nav's height is declared, not measured: the hero centres the composer
+     at the viewport midpoint by subtracting this from 50svh, so the nav must
+     actually be this tall (see .nav-inner). */
+  --nav-height: 4.25rem;
+  /* The muted spectrum. One set of hues does triple duty: the background wash,
+     the three hero beams, and the terminal roles. */
+  --spec-r: #c65b4f;
+  --spec-o: #c9913d;
+  --spec-y: #b0a03c;
+  --spec-g: #5f9c68;
+  --spec-b: #4f7fbb;
+  --spec-v: #7b5fb5;
+  /* A reusable, quiet version of the projected-light wash. Generated app
+     surfaces inherit this along with the individual spectrum hues. */
+  --spectrum-wash: linear-gradient(
+    171deg,
+    color-mix(in srgb, var(--spec-r) 18%, var(--bg)) 4%,
+    color-mix(in srgb, var(--spec-o) 18%, var(--bg)) 25%,
+    color-mix(in srgb, var(--spec-y) 17%, var(--bg)) 46%,
+    color-mix(in srgb, var(--spec-g) 18%, var(--bg)) 69%,
+    color-mix(in srgb, var(--spec-b) 18%, var(--bg)) 96%
+  );
+  --spec-a: 0.32;    /* even, luminous wash without overpowering the page */
+  /* On paper the beam is warm light throughout: a pale yellow body with a
+     slightly warmer soft glow, never a dark outline. Dark mode overrides
+     both back to white light. */
+  --ray-edge: #fff0ad;
+  --ray-body: #fff8d8;
+  /* terminal roles */
+  --t-actor: #6d28d9;
+  --t-state: #8a5a00;
+  --t-ok: #1f7a3d;
+  --t-bad: #b3261e;
+}
+
+/* Dark palette, declared twice because a media-scoped selector and a plain one
+   can't share a rule: once for an explicit choice, once for "system" (no
+   data-theme attribute). Keep the two blocks in sync. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ray-edge: #f5f7ff;
+  --ray-body: #fcfdff;
+  --bg: #000000;
+  --ink: #ffffff;
+  --muted: #999999;
+  --faint: #6e6e6e;
+  --rule: #232323;
+  --wash: #0d0d0d;
+  --accent: #a78bfa;
+  --shadow: #3a3a3a;
+  --spec-r: #e07a6c;
+  --spec-o: #e0aa55;
+  --spec-y: #cfc25a;
+  --spec-g: #7fc08a;
+  --spec-b: #77a3e0;
+  --spec-v: #a58ae0;
+  --spec-a: 0.21;
+  --t-actor: #c4b5fd;
+  --t-state: #e0aa55;
+  --t-ok: #3ddc84;
+  --t-bad: #ff6b5e;
+}
+:root[data-theme="dark"] .light .l-glow { opacity: 0.33; }
+:root[data-theme="dark"] .light .l-core { opacity: 0.34; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --ray-edge: #f5f7ff;
+    --ray-body: #fcfdff;
+    --bg: #000000;
+    --ink: #ffffff;
+    --muted: #999999;
+    --faint: #6e6e6e;
+    --rule: #232323;
+    --wash: #0d0d0d;
+    --accent: #a78bfa;
+    --shadow: #3a3a3a;
+    --spec-r: #e07a6c;
+    --spec-o: #e0aa55;
+    --spec-y: #cfc25a;
+    --spec-g: #7fc08a;
+    --spec-b: #77a3e0;
+    --spec-v: #a58ae0;
+    --spec-a: 0.17;
+    --t-actor: #c4b5fd;
+    --t-state: #e0aa55;
+    --t-ok: #3ddc84;
+    --t-bad: #ff6b5e;
+    --spec-a: 0.21;
+  }
+  /* On black the same white wedge is a faint torch beam, not a floodlight. */
+  :root:not([data-theme]) .light .l-glow { opacity: 0.33; }
+  :root:not([data-theme]) .light .l-core { opacity: 0.34; }
+}
+
+@font-face {
+  font-family: "Schibsted Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/assets/schibsted-grotesk.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+@font-face {
+  font-family: "Caveat";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/assets/caveat-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+
+* { box-sizing: border-box; }
+
+/* Locked to the viewport's width: anything that pokes past the edge (such as
+   a blur halo) is clipped, never a horizontal scroll. clip, not hidden, so no
+   scroll container is created. */
+html {
+  font-size: 125%;
+  overflow-x: clip;
+  -webkit-text-size-adjust: 100%;
+}
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+body {
+  margin: 0;
+  overflow-x: clip;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The wash. A full-height spectrum pinned to the viewport's right side, faded
+   out after reaching roughly 75% of the way back through the centred content
+   column. Slightly rotated so the bands read as thrown light, not printed
+   stripes. The mask does the fading — the gradient itself stays fully
+   saturated so the hues don't muddy.
+
+   Two nested elements, not one pseudo-element: .wash carries the load-in
+   sweep and .wash i carries the shaping masks. Stacking all of it on one
+   element meant three mask layers composited together, which is where the
+   whole thing went invisible — one mask job per element is worth the extra
+   div here. */
+.wash {
+  position: fixed;
+  inset: 0;
+  z-index: -2;   /* behind the ray: focused light washes the spectrum out */
+  pointer-events: none;
+}
+.wash i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  opacity: var(--spec-a);
+  transform: scaleX(1);
+  transform-origin: right center;
+  transition: opacity 0.8s ease-in-out, transform 0.2s ease-in-out, filter 0.8s ease-in-out;
+  mix-blend-mode: screen;
+  filter: brightness(1.18);
+  background: linear-gradient(171deg,
+    var(--spec-r) 4%,
+    var(--spec-o) 22%,
+    var(--spec-y) 40%,
+    var(--spec-g) 58%,
+    var(--spec-b) 76%,
+    var(--spec-v) 96%);
+  -webkit-mask: linear-gradient(103deg, transparent 32%, #000 97%);
+          mask: linear-gradient(103deg, transparent 32%, #000 97%);
+}
+.wash::after {
+  content: "";
+  position: absolute;
+  inset: -8%;
+  display: block;
+  opacity: 0;
+  background: linear-gradient(171deg,
+    var(--spec-r) 4%,
+    var(--spec-o) 22%,
+    var(--spec-y) 40%,
+    var(--spec-g) 58%,
+    var(--spec-b) 76%,
+    var(--spec-v) 96%);
+  mix-blend-mode: screen;
+  filter: blur(48px) brightness(1.18);
+  -webkit-mask: linear-gradient(90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.12) 18%,
+    rgba(0, 0, 0, 0.5) 44%,
+    #000 82%);
+          mask: linear-gradient(90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.12) 18%,
+    rgba(0, 0, 0, 0.5) 44%,
+    #000 82%);
+  transition: opacity 0.8s ease-in-out;
+}
+:root[data-theme="dark"] .wash i { mix-blend-mode: normal; filter: none; }
+:root[data-theme="dark"] .wash::after { mix-blend-mode: normal; filter: blur(48px); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .wash i { mix-blend-mode: normal; filter: none; }
+  :root:not([data-theme]) .wash::after { mix-blend-mode: normal; filter: blur(48px); }
+}
+
+/* The ray. A wedge of white light: wide at the middle of the left edge,
+   converging to a narrow band on whatever the page wants read next. Geometry
+   is driven per-frame from JS; everything painterly — the gradient that
+   brightens toward the focus, the blur that softens the edges — lives in the
+   SVG defs and here. It sits between the wash (-2) and the content, and is
+   pure decoration: aria-hidden, pointer-events none.
+
+   Absolute, not fixed, and sized to the whole document (inline height from
+   JS): the focus band is written in document coordinates, so during a scroll
+   it rides the compositor with the content — no rAF catch-up, no lag. Only
+   the source aperture, which really is viewport-anchored, chases scroll by a
+   frame, and that edge is 200px of blur — nothing to see. */
+.light {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+  transition: opacity 0.8s ease-in-out;
+}
+.ray-hidden .light {
+  opacity: 0;
+  transition-duration: 0.8s;
+}
+.ray-hidden .wash i {
+  opacity: 0;
+  filter: blur(48px);
+  transition-duration: 0.8s;
+}
+.ray-hidden .wash::after { opacity: calc(var(--spec-a) * 0.75); }
+/* Light mode only: the body adds light instead of tinting toward it. Normal
+   blending interpolates page -> white, so at these alphas it can only wash
+   the grey out slightly; plus-lighter sums luminance the way light does, so
+   the brightest part of the beam saturates to real white.
+
+   Dark mode keeps normal blending. Adding white to black is arithmetically
+   the same thing, but the beam does not sit on bare black — it sits over the
+   wash and the page's own glow, and summing all of that blew it out. */
+.light-body { mix-blend-mode: plus-lighter; }
+:root[data-theme="dark"] .light-body { mix-blend-mode: normal; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .light-body { mix-blend-mode: normal; }
+}
+
+/* Light mode: a warm glow around the pale-yellow core. */
+.light .l-glow { opacity: 0.12; }
+.light .l-core { opacity: 0.85; }
+
+/* ---------------------------------------------------------------------------
+   Variants — the prism family. A variant is an override block keyed on
+   [data-variant]; add one here, add its entry to VARIANTS in variants.js, and
+   it appears in the picker and on compare.html. Earlier explorations (a–e)
+   live in archive/variants-a-e.css, unlinked.
+
+   All three f variants share the spotlight optics (the tracker's `spot`
+   branch, which triggers on any variant starting with "f") and differ only in
+   how the wash disperses:
+
+     f1  wash unchanged, angularly masked into a wedge off the focus point
+     f2  wash begins *at* the target and radiates outward
+     f3  as f2, but the hues themselves fan out as rays from the target
+
+   Every one leaves --spec-a and the hues alone: masks only remove coverage,
+   so wherever the wash survives it is exactly as bright as it always was.
+   Retire the system by deleting these blocks, variants.js, its two script
+   tags, compare.html, and archive/.
+   --------------------------------------------------------------------------- */
+
+/* Shared: spotlight optics. The beam spreads its energy as it widens, so the
+   gradient dims toward the target rather than intensifying; and the body sits
+   over live text, so it runs far quieter than the beam variants did. */
+/* Light mode's profile: hot, because it is being added rather than blended. */
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 1; }
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.86; }
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.7; }
+
+/* Dark mode's profile: the gentler original, since nothing here is summed. */
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 0.66; }
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.5; }
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.34; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 0.66; }
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.5; }
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.34; }
+}
+/* ---------------------------------------------------------------------------
+   Spotlight opacities. Four independent numbers per theme — glow and core,
+   wide and narrow — and no attempt to derive one theme from the other.
+
+   They genuinely have nothing in common. On paper the glow is *ink*, drawing
+   a dark rim so the white body can be seen at all, so it runs an order of
+   magnitude below the core. On black both are light, the rim idea disappears,
+   and the two move together. A shared config kept dragging one theme wrong
+   every time the other was tuned.
+
+   Phones run *brighter* than wide layouts (the override at the bottom of
+   this section): the wedge crosses far less page there, so the same numbers
+   read faint.
+
+   Dark is written twice — once for an explicit choice, once for the system
+   media query. Keep them in sync; when only the first existed, toggling to
+   dark and booting into dark looked different.
+   --------------------------------------------------------------------------- */
+
+/* light. On a page this close to white the additive core has only ~0.09 of
+   headroom before it clips, so it runs low — enough for a tight target to
+   still burn out, not so much that a broad pool becomes a flat white slab.
+   The dark rim carries proportionally more of the definition here, since its
+   contrast doesn't depend on that headroom at all. */
+:root[data-variant^="f"] .light .l-glow { opacity: 0.24; }
+:root[data-variant^="f"] .light .l-core { opacity: 0.22; }
+
+/* dark — explicit. These are the numbers dark was *actually* rendering with
+   before the light-mode work: the f overrides only existed on this selector,
+   never in the system media query, so anyone in system dark was being served
+   the light values. Restoring those, rather than the ones this selector used
+   to carry, is what matches what was on screen. */
+:root[data-theme="dark"][data-variant^="f"] .light .l-glow { opacity: 0.14; }
+:root[data-theme="dark"][data-variant^="f"] .light .l-core { opacity: 0.68; }
+
+/* dark — system. Same values; the two paths must agree. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme])[data-variant^="f"] .light .l-glow { opacity: 0.14; }
+  :root:not([data-theme])[data-variant^="f"] .light .l-core { opacity: 0.68; }
+}
+
+/* Phones. The same optics as wide viewports — the wedge from the left edge's
+   midpoint, focused on the reading target — but run much hotter: on a screen
+   this narrow the beam crosses very little page, and at the desktop numbers
+   it barely registers. Same dark-written-twice discipline as above. */
+@media (max-width: 775px) {
+  :root[data-variant^="f"] .light .l-glow { opacity: 0.45; }
+  :root[data-variant^="f"] .light .l-core { opacity: 0.5; }
+  :root[data-theme="dark"][data-variant^="f"] .light .l-glow { opacity: 0.26; }
+  :root[data-theme="dark"][data-variant^="f"] .light .l-core { opacity: 1; }
+}
+@media (max-width: 775px) and (prefers-color-scheme: dark) {
+  :root:not([data-theme])[data-variant^="f"] .light .l-glow { opacity: 0.26; }
+  :root:not([data-theme])[data-variant^="f"] .light .l-core { opacity: 1; }
+}
+
+/* Shared wash geometry, anchored on the focus point the tracker publishes.
+   --wedge is the angular extent (a soft rightward fan, 30deg shoulders);
+   --from-target ramps the wash up with distance from the lit element, so it
+   starts there instead of at a fixed point on the page. */
+@property --wedge-half {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 38deg;
+}
+@property --wedge-feather {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 30deg;
+}
+@property --apex-fill {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+@property --apex-mid {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.6;
+}
+:root[data-variant^="f"] {
+  --fx: 50vw;
+  --fy: 50vh;
+  --fh: 40px;   /* the target's half-height, published by the tracker */
+  --fw: 36px;   /* horizontally the origin is a point; vertically it isn't */
+  --wedge-half: 38deg;
+  --wedge-feather: 30deg;
+  --apex-fill: 0;
+  --apex-mid: 0.6;
+  --wedge: conic-gradient(at var(--fx) var(--fy),
+    transparent 0deg,
+    transparent calc(90deg - var(--wedge-half) - var(--wedge-feather)),
+    #000 calc(90deg - var(--wedge-half)),
+    #000 calc(90deg + var(--wedge-half)),
+    transparent calc(90deg + var(--wedge-half) + var(--wedge-feather)),
+    transparent 360deg);
+  /* An ellipse, not a circle: the clear core is as tall as the target, so the
+     wash begins along the element's whole height rather than swelling out of
+     a point at its middle. Stops past 100% are multiples of that ellipse, so
+     the ramp stays proportional however tall the target is. */
+  --from-target: radial-gradient(var(--fw) var(--fh) at var(--fx) var(--fy),
+    transparent 0, transparent 100%, rgba(0, 0, 0, 0.5) 320%, #000 700%);
+  /* Softens the wedge's apex. A conic gradient converges to a mathematical
+     point, which is visible as a sharp arrowhead where the wash begins. This
+     clears an ellipse as tall as the target (--fh, published by the tracker)
+     and fades in outward, so the wash opens at the height of the thing the
+     ray is lighting rather than at a vertex. Horizontally tight, so it only
+     eats the apex and not the body of the wedge. */
+  --apex: radial-gradient(24px var(--fh) at var(--fx) var(--fy),
+    rgba(0, 0, 0, var(--apex-fill)) 0,
+    rgba(0, 0, 0, var(--apex-fill)) 100%,
+    rgba(0, 0, 0, var(--apex-mid)) 150%,
+    #000 250%);
+  /* Where the load-in wipe starts — the beam's tip, snapshotted by the
+     tracker. The wipe gradient itself lives on .wash; see the note there. */
+  --wash-from: 0px;
+  transition:
+    --wedge-half 0.8s ease-in-out,
+    --wedge-feather 0.8s ease-in-out,
+    --apex-fill 0.8s ease-in-out,
+    --apex-mid 0.8s ease-in-out;
+}
+:root[data-variant^="f"].ray-hidden {
+  --wedge-half: 90deg;
+  --wedge-feather: 0deg;
+  --apex-fill: 1;
+  --apex-mid: 1;
+}
+
+/* The wash waits for the beam, then wipes in left to right — colour arriving
+   only once there is light to disperse. It's a third mask layer rather than a
+   clip: a clip-path edge is infinitely hard, and at this scale that read as a
+   sheet of colour sliding across the page. Here the leading edge is a 320px
+   gradient, so the wash fades up as the front passes.
+
+   --wash-wipe is a registered property so it can actually animate (custom
+   properties are otherwise interpolated as strings). The tracker snapshots
+   --wash-from at the beam's tip when it fires the sweep, so the front starts
+   where the wash itself starts — beginning at x=0 spends half the animation
+   revealing page that has no wash on it, which is what felt like lag. */
+@property --wash-wipe {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+@keyframes wash-sweep {
+  from { --wash-wipe: 0px; }
+  to   { --wash-wipe: 135vw; }
+}
+/* The colour also rises in place, so the wash settles in rather than simply
+   arriving. It starts partly up and finishes early — running it from zero
+   over a longer arc than the sweep meant the fade was doing nearly all of
+   the visible work and the travelling front was lost inside it. Now it takes
+   the edge off the first moment and gets out of the way, leaving the sweep
+   as the motion you actually read. */
+@keyframes wash-fade {
+  from { opacity: 0.16; }
+  to   { opacity: 1; }
+}
+/* The sweep rides the wrapper — its own element, its own single mask, so it
+   never has to composite with the shaping masks below it. Opaque behind the
+   front, transparent ahead of it, with a 320px shoulder so the wash fades up
+   instead of sliding in.
+
+   The gradient is written out here rather than pulled from a --sweep variable
+   on :root: a custom property's var() references are substituted where the
+   property is *declared*, so --wash-wipe would have been frozen at :root's
+   value and animating it on .wash would have done nothing at all. It has to
+   be used on the same element that animates it.
+
+   Linear, like the beam: a wavefront travels at a constant speed. */
+.wash {
+  -webkit-mask-image: linear-gradient(90deg,
+    #000 0,
+    #000 calc(var(--wash-from) + var(--wash-wipe)),
+    rgba(0, 0, 0, 0.94) calc(var(--wash-from) + var(--wash-wipe) + 150px),
+    rgba(0, 0, 0, 0.78) calc(var(--wash-from) + var(--wash-wipe) + 300px),
+    rgba(0, 0, 0, 0.58) calc(var(--wash-from) + var(--wash-wipe) + 450px),
+    rgba(0, 0, 0, 0.35) calc(var(--wash-from) + var(--wash-wipe) + 600px),
+    rgba(0, 0, 0, 0.16) calc(var(--wash-from) + var(--wash-wipe) + 750px),
+    rgba(0, 0, 0, 0.05) calc(var(--wash-from) + var(--wash-wipe) + 880px),
+    transparent calc(var(--wash-from) + var(--wash-wipe) + 1000px));
+          mask-image: linear-gradient(90deg,
+    #000 0,
+    #000 calc(var(--wash-from) + var(--wash-wipe)),
+    rgba(0, 0, 0, 0.94) calc(var(--wash-from) + var(--wash-wipe) + 150px),
+    rgba(0, 0, 0, 0.78) calc(var(--wash-from) + var(--wash-wipe) + 300px),
+    rgba(0, 0, 0, 0.58) calc(var(--wash-from) + var(--wash-wipe) + 450px),
+    rgba(0, 0, 0, 0.35) calc(var(--wash-from) + var(--wash-wipe) + 600px),
+    rgba(0, 0, 0, 0.16) calc(var(--wash-from) + var(--wash-wipe) + 750px),
+    rgba(0, 0, 0, 0.05) calc(var(--wash-from) + var(--wash-wipe) + 880px),
+    transparent calc(var(--wash-from) + var(--wash-wipe) + 1000px));
+}
+/* Hidden until the beam calls for it. Sweep duration comes from the tracker
+   (distance / SPEED, the same px-per-ms the beam travels at); the fade runs
+   just past it, so colour is still gathering as the front finishes crossing
+   — the two motions share the reveal rather than one carrying it. */
+.wash { opacity: 0; }
+:root.wash-in .wash {
+  animation:
+    wash-sweep var(--wash-ms, 900ms) linear forwards,
+    wash-fade calc(var(--wash-ms, 900ms) * 0.9) cubic-bezier(0.3, 0.25, 0.4, 1) forwards;
+}
+/* Final resting state, set by the tracker's backstop — also the safety net if
+   the animations never run. */
+:root.wash-done .wash {
+  opacity: 1;
+  --wash-wipe: 135vw;
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wash { opacity: 1; --wash-wipe: 135vw; animation: none; }
+}
+
+/* f1 — an evenly luminous wash clipped to the wedge, with a softened apex
+   where it emerges from beneath the beam. */
+:root[data-variant="f"] .wash i {
+  -webkit-mask-image: var(--wedge), var(--apex);
+          mask-image: var(--wedge), var(--apex);
+  -webkit-mask-composite: source-in;
+          mask-composite: intersect;
+}
+
+/* f2 — the diagonal fade is replaced by distance from the target: the wash
+   emerges at the lit element and builds as it travels outward, rather than
+   always starting around the middle of the page. */
+:root[data-variant="f2"] .wash i {
+  -webkit-mask-image: var(--from-target), var(--wedge);
+          mask-image: var(--from-target), var(--wedge);
+  -webkit-mask-composite: source-in;
+          mask-composite: intersect;
+}
+
+/* f3 — f2's mask, but the spectrum itself is now angular: a conic gradient
+   centred on the target turns the bands into rays fanning out from it, the
+   way a prism throws colour, instead of the near-horizontal stripes the
+   linear gradient draws. Same hues, same --spec-a. */
+:root[data-variant="f3"] .wash i {
+  background: conic-gradient(at var(--fx) var(--fy),
+    var(--spec-r) 30deg,
+    var(--spec-o) 54deg,
+    var(--spec-y) 76deg,
+    var(--spec-g) 98deg,
+    var(--spec-b) 122deg,
+    var(--spec-v) 150deg);
+  -webkit-mask-image: var(--from-target), var(--wedge);
+          mask-image: var(--from-target), var(--wedge);
+  -webkit-mask-composite: source-in;
+          mask-composite: intersect;
+}
+a { color: var(--ink); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 0.1875rem; }
+
+main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
+
+.label {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 1.125rem;
+}
+
+/* nav */
+
+.nav-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: var(--nav-height);
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 2.25rem;
+}
+.nav-inner::after,
+.foot-inner::before {
+  content: "";
+  position: absolute;
+  left: 2.25rem;
+  right: 2.25rem;
+}
+.nav-inner::after { bottom: 0; border-top: 1px solid var(--rule); }
+.foot-inner::before { top: 0; border-top: 1px solid var(--rule); }
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.nav-brand:hover { text-decoration: none; }
+.nav-links {
+  display: flex;
+  gap: 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+}
+.nav-links a { color: var(--muted); }
+.nav-links a:hover { color: var(--ink); text-decoration: none; }
+
+/* Every icon is stacked at the left of a fixed-size box, so nothing here can
+   reflow the nav: the drop simply translates off the theme icon on hover. */
+.theme {
+  position: relative;
+  align-self: center;
+  /* Exactly the icon: the button's right edge sits flush with the rule's
+     edge, and the drop escapes the box — past the rule — when revealed. */
+  width: 1rem;
+  height: 1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.theme:hover { color: var(--ink); }
+.theme svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.theme .i-drop {
+  /* Smaller than the theme icons, so it needs its own vertical centring: the
+     drop is drawn from y=1.6 to y=13.4 of a 16 box, not edge to edge. */
+  width: 0.8125rem;
+  height: 0.8125rem;
+  top: 0.125rem;
+  stroke-width: 1.7;
+  transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.theme:focus .i-drop { transform: translateX(1.375rem); }
+
+/* The theme icons only exist to be uncovered — hidden until the drop moves. */
+.theme .i-light,
+.theme .i-dark {
+  opacity: 0;
+  transition: opacity 0.18s ease 0.06s;
+}
+.theme[data-mode="light"]:focus .i-light,
+.theme[data-mode="dark"]:focus .i-dark { opacity: 1; }
+@media (min-width: 776px) and (hover: hover) {
+  .theme:hover .i-drop { transform: translateX(1.375rem); }
+  .theme[data-mode="light"]:hover .i-light,
+  .theme[data-mode="dark"]:hover .i-dark { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme .i-drop, .theme svg { transition: none; }
+}
+
+/* hero */
+
+.hero {
+  --talk-height: calc(2.25rem + 0.75rem + 3px);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100svh - var(--nav-height));
+  text-align: center;
+  padding: 2rem 0;
+}
+
+.hero h1 {
+  position: absolute;
+  /* Center the headline in the whitespace bounded by the nav's bottom and
+     the composer's top edge—not between the nav and the composer's center. */
+  top: calc((50svh - var(--nav-height) - var(--talk-height) / 2) / 2);
+  left: 50%;
+  /* Sized to sit inside the content column (--wrap minus main's padding),
+     not the viewport: the cap is the column fit, the vw term takes over on
+     narrow screens. 23.4 ≈ this headline's measured em-width at this tracking. */
+  font-size: min(clamp(1.25rem, 5.5vw, calc((43.75rem - 4.5rem) / 23.4)), calc((100vw - 4.75rem) / 23.4));
+  white-space: nowrap;
+  font-weight: 450;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  margin: 0;
+  transform: translate(-50%, -50%);
+}
+
+/* Hot words: typographically part of the headline, behaviorally part of the
+   composer. The headline is the white beam and the hot words disperse it:
+   each takes one hue of the muted spectrum, warm to cool in reading order,
+   as a dotted underline. Hover turns the underline solid and lets the hue
+   into the word itself. */
+.hero h1 .hot {
+  --hot: var(--spec-o);
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--hot);
+  text-decoration-style: dotted;
+  text-decoration-thickness: 0.045em;
+  text-underline-offset: 0.18em;
+  transition: color 0.12s, text-decoration-color 0.12s;
+}
+.hero h1 .hot:nth-of-type(2) { --hot: var(--spec-g); }
+.hero h1 .hot:nth-of-type(3) { --hot: var(--spec-b); }
+.hero h1 .hot:hover,
+.hero h1 .hot[data-active] {
+  color: var(--hot);
+  text-decoration-style: solid;
+}
+.hero h1 .hot:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 0.1875rem;
+  border-radius: 0.125rem;
+}
+
+/* Proofreader's insertion, verbatim from the template: zero-width slot, caret
+   below the baseline, annotation hung under it. */
+.insert {
+  position: relative;
+  display: inline-block;
+  width: 0;
+}
+.caret {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 0.4em;
+  height: 0.25em;
+  margin-top: 0.08em;
+  margin-left: -0.19em;
+  overflow: visible;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url(#ink-rough);
+  transform: rotate(-7deg);
+}
+.caret .s1 { stroke-width: 4.8; }
+.caret .s2 { stroke-width: 3.5; opacity: 0.45; }
+.caret .s3 { stroke-width: 3.2; opacity: 0.4; }
+
+.note {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%) rotate(-3.5deg);
+  margin-top: 0.95em;
+  font-family: "Caveat", ui-rounded, cursive;
+  font-weight: 600;
+  font-size: 0.54em;
+  line-height: 1;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  color: var(--accent);
+  filter: url(#ink);
+}
+.note i {
+  display: inline-block;
+  font-style: normal;
+  transform: translateY(var(--y, 0)) rotate(var(--r, 0deg)) scale(var(--s, 1));
+}
+.note i:nth-of-type(1)  { --r: -5deg;  --y: 0.012em;  --s: 1.03; }
+.note i:nth-of-type(2)  { --r: 2deg;   --y: -0.02em;  --s: 0.97; }
+.note i:nth-of-type(3)  { --r: -1deg;  --y: 0.026em;  --s: 1.05; }
+.note i:nth-of-type(4)  { --r: 4deg;   --y: -0.01em;  --s: 0.99; }
+.note i:nth-of-type(5)  { --r: -3deg;  --y: 0.018em;  --s: 1.02; }
+.note i:nth-of-type(6)  { --r: 1deg;   --y: -0.026em; --s: 0.96; }
+.note i:nth-of-type(7)  { --r: 5deg;   --y: 0.008em;  --s: 1.04; }
+.note i:nth-of-type(8)  { --r: -2deg;  --y: -0.014em; --s: 1.01; }
+.note i:nth-of-type(9)  { --r: 3deg;   --y: 0.03em;   --s: 0.98; }
+.note i:nth-of-type(10) { --r: -4deg;  --y: -0.006em; --s: 1.05; }
+.note i:nth-of-type(11) { --r: 0deg;   --y: 0.022em;  --s: 0.97; }
+
+
+/* install steps */
+
+.start {
+  position: static;
+  width: auto;
+  padding: 0;
+}
+.steps {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  max-width: none;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--faint);
+  border-radius: 0.375rem;
+  background: transparent;
+  box-shadow: 0.1rem 0.1rem 0 var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
+}
+.step:hover {
+  border-color: var(--ink);
+  transform: translate(0.125rem, 0.125rem);
+  box-shadow: 0.0625rem 0.0625rem 0 var(--shadow);
+  text-decoration: none;
+}
+.step:active {
+  transform: translate(0.1875rem, 0.1875rem);
+  box-shadow: 0 0 0 var(--shadow);
+}
+.step:focus-visible {
+  border-color: var(--ink);
+  outline: 2px solid var(--ink);
+  outline-offset: 0.1875rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .step { transition: none; }
+}
+
+.step-body { min-width: 0; }
+.step-label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 0;
+}
+.step-body code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.step-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--faint);
+}
+.step:hover .step-act { color: var(--ink); }
+.step-act svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.step-act .i-star { fill: currentColor; stroke-width: 0; }
+/* The GitHub mark only exists for the narrow nav, where the step collapses
+   to an icon button. */
+.step .i-gh {
+  display: none;
+  width: 1.0625rem;
+  height: 1.0625rem;
+  fill: currentColor;
+  stroke: none;
+}
+.step-stars {
+  align-self: stretch;
+  gap: 0.3125rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--rule);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.65625rem;
+  font-variant-numeric: tabular-nums;
+}
+.step:hover .step-stars { border-left-color: var(--ink); }
+.step-act .i-done { display: none; }
+.step[data-copied] .step-act { color: var(--t-ok); }
+.step[data-copied] .i-copy { display: none; }
+.step[data-copied] .i-done { display: block; }
+
+
+/* boxed code — terminal */
+
+.box {
+  border: 1px solid var(--rule);
+  margin-bottom: 4.5rem;
+  background: var(--bg);
+}
+.box-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6875rem 1.125rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--wash);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.box pre {
+  margin: 0;
+  padding: 1.375rem 1.125rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.85;
+}
+.box .c, .box .p { color: var(--faint); }
+.box .l, .box .q { color: var(--muted); }
+.box .m { color: var(--t-actor); }
+.box .b { color: var(--t-state); }
+.box .g { color: var(--t-ok); }
+.box .r { color: var(--t-bad); }
+
+/* numbered features */
+
+.features { margin-bottom: 4.5rem; }
+.features .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  border-top: 1px solid var(--rule);
+  border-left: 1px solid var(--rule);
+}
+.feature {
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.625rem 1.375rem 1.75rem;
+}
+.feature .num {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  margin-bottom: 0.75rem;
+}
+.feature h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.5625rem;
+}
+.feature p { margin: 0; color: var(--muted); font-size: 0.90625rem; line-height: 1.6; }
+
+/* why */
+
+.why { max-width: 38.75rem; margin: 0 auto 4.5rem; }
+.why p { color: var(--muted); font-size: 1.03125rem; }
+.why p:first-of-type { margin-top: 0; }
+.why em { color: var(--ink); font-style: italic; }
+
+/* docs */
+
+.docs { margin-bottom: 4.5rem; }
+.docs ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.docs li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0.875rem;
+  align-items: baseline;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.docs li a { font-size: 0.9375rem; }
+.docs li span { color: var(--faint); font-size: 0.84375rem; }
+
+/* footer */
+
+.foot-inner {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.375rem;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 1.625rem 2.25rem 2.875rem;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.foot-inner a { color: var(--faint); }
+.foot-inner a:hover { color: var(--ink); }
+.foot-inner .end { margin-left: auto; }
+
+/* ---------------------------------------------------------------------------
+   Draw-in: the headline's caret scribble. CSS-only, same pathLength="1"
+   trick as the template.
+   --------------------------------------------------------------------------- */
+
+@keyframes ink-draw { to { stroke-dashoffset: 0; } }
+
+.caret path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation-name: ink-draw;
+  animation-fill-mode: forwards;
+  animation-duration: 0.12s;
+  animation-timing-function: cubic-bezier(0.18, 0.85, 0.3, 1);
+}
+.caret .s1 { animation-delay: 0.20s; animation-timing-function: cubic-bezier(0.08, 0.5, 0.92, 0.5); }
+.caret .s2 { animation-delay: 0.37s; animation-duration: 0.08s; stroke-dashoffset: -1; }
+.caret .s3 { animation-delay: 0.50s; animation-duration: 0.06s; animation-timing-function: cubic-bezier(0.1, 0.9, 0.4, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .caret path,
+  .caret .s2 {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The talk composer: the hero's primary CTA and the shared element that     */
+/* morphs into the conversation. Same card language as .step — ink border,   */
+/* hard shadow — but wider and hot: this is the one the beam should love.    */
+
+.talk {
+  position: absolute;
+  /* .hero begins below the nav, so subtracting that offset places the card
+     at the viewport's true midpoint rather than the remaining-page midpoint. */
+  top: calc(50svh - var(--nav-height));
+  left: 50%;
+  /* Above the explainer band (a later sibling), so the past-conversations
+     link under the card stays clickable. */
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(100%, 34rem);
+  margin: 0;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+.talk-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0.375rem 0.375rem 0.375rem 1rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.625rem;
+  background: var(--bg);
+  box-shadow: 0.1875rem 0.1875rem 0 var(--shadow);
+  transition: transform 0.12s, box-shadow 0.12s;
+  view-transition-name: composer;
+}
+.talk-card::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.95rem;
+  width: 1px;
+  height: 1.15rem;
+  background: var(--ink);
+  transform: translateY(-50%);
+  animation: talk-caret 1s steps(1, end) infinite;
+}
+.talk-card:focus-within::before,
+.talk-card:has(.talk-input:not(:placeholder-shown))::before { display: none; }
+@keyframes talk-caret { 50% { opacity: 0; } }
+.talk-card:focus-within {
+  transform: translate(0.125rem, 0.125rem);
+  box-shadow: 0.0625rem 0.0625rem 0 var(--shadow);
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.talk-explainers {
+  position: absolute;
+  top: calc(50svh - var(--nav-height) + var(--talk-height) / 2);
+  bottom: 1.5rem;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: min(calc(100vw - 2rem), 44rem);
+  transform: translateX(-50%);
+}
+.explainer {
+  grid-area: 1 / 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+  gap: 0.5rem;
+  width: min(100%, 44rem);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.34s ease-in-out, visibility 0s linear 0.34s;
+}
+.explainer[data-active] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+/* Resting panels hold two cards, not four — narrower so they read as a
+   centered pair rather than two stretched slabs. */
+.explainer-rest { width: min(100%, 26rem); }
+.explainer button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  min-height: 4.5rem;
+  padding: 0.6875rem 0.75rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  opacity: 0.62;
+  transition: color 0.12s, opacity 0.12s, transform 0.12s;
+}
+.explainer-title {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--ink);
+  font: 600 0.75rem/1.3 var(--mono);
+}
+.explainer-copy {
+  color: var(--muted);
+  font: 400 0.6875rem/1.4 var(--sans);
+}
+.ts-mark {
+  display: inline-grid;
+  place-items: end;
+  width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.1rem 0.05rem 0;
+  background: #3178c6;
+  color: #fff;
+  font: 700 0.4375rem/1 var(--sans);
+  letter-spacing: -0.03em;
+}
+.explainer button:hover {
+  color: var(--ink);
+  opacity: 1;
+  transform: translateY(-0.0625rem);
+}
+.explainer button:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ink);
+  outline-offset: 0.125rem;
+}
+.talk-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 500 0.9375rem/1.4 var(--sans);
+  padding: 0.5rem 0;
+  outline: none;
+}
+.talk-input::placeholder { color: var(--faint); }
+.talk-mic, .talk-clear, .talk-go {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+}
+.talk-mic svg, .talk-clear svg, .talk-go svg {
+  width: 1.0625rem;
+  height: 1.0625rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.talk-clear { color: var(--faint); }
+.talk-clear:hover { color: var(--ink); }
+.talk-input:placeholder-shown + .talk-clear { display: none; }
+.talk-mic {
+  flex: none;
+  color: var(--faint);
+  cursor: default;
+}
+.talk-mic[disabled] { opacity: 0.55; }
+.talk-go {
+  background: var(--ink);
+  color: var(--bg);
+  transition: transform 0.12s;
+}
+.talk-go:hover { transform: translateX(0.125rem); }
+.talk-clear:focus-visible, .talk-go:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
+
+/* Past conversations: a quiet mono link under the composer (boot.ts unhides
+   it when localStorage holds sessions) and the picker dialog it opens. */
+.talk-past {
+  margin-top: 0.875rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: none;
+  /* Same voice as the explainer cards' subtext, dimmed to placeholder level
+     — it's an aside, not a call to action. letter-spacing pinned because the
+     font shorthand doesn't reset it. */
+  font: 400 0.6875rem/1.4 var(--sans);
+  letter-spacing: normal;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+}
+.talk-past:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
+.talk-past:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.125rem; }
+.past-dialog {
+  width: min(92vw, 26rem);
+  border: 1.5px solid var(--ink);
+  border-radius: 0.625rem;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0.25rem 0.25rem 0 var(--shadow);
+  padding: 1rem;
+}
+.past-dialog::backdrop { background: rgb(0 0 0 / 0.35); }
+.past-head {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+.past-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(60vh, 20rem);
+  overflow-y: auto;
+}
+.past-row {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  border-bottom: 1px solid var(--rule);
+}
+.past-row:last-child { border-bottom: 0; }
+.past-open {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: 0.5rem 0.25rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.past-open:hover .past-title { color: var(--accent); }
+.past-open:focus-visible,
+.past-remove:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -0.125rem;
+  border-radius: 0.25rem;
+}
+.past-remove {
+  flex: 0 0 auto;
+  width: 2rem;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font: 400 1rem/1 var(--sans);
+  cursor: pointer;
+}
+.past-remove:hover { color: var(--ink); }
+.past-remove[data-confirm] {
+  width: 4.5rem;
+  color: var(--ink);
+  font: 600 0.5625rem/1 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.past-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.past-when {
+  font: 400 0.6875rem/1.4 var(--sans);
+  color: var(--faint);
+  flex-shrink: 0;
+}
+/* Submitted before the chunk finished loading: breathe until it has. */
+.talk-waiting { animation: talk-pulse 0.9s ease-in-out infinite; }
+@keyframes talk-pulse {
+  50% { box-shadow: 0.1875rem 0.1875rem 0 var(--accent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .talk-card, .talk-go { transition: none; }
+  .talk-waiting { animation: none; }
+  .talk-card::before { animation: none; }
+  .explainer { transition: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Narrow and short viewports. These blocks live below every base rule they
+   override — same specificity, so order is what makes them win.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 775px) {
+  :root { --nav-height: 3.5rem; }
+  .nav-links a { display: none; }
+  .nav-inner { gap: 0.75rem; padding-inline: 1.5rem; }
+  .nav-inner::after,
+  .foot-inner::before { left: 1.5rem; right: 1.5rem; }
+  main { padding-inline: 1.5rem; }
+  .foot-inner { padding-inline: 1.5rem; }
+  /* Nobody installs from a phone; the install step goes. GitHub keeps its
+     seat but collapses to the mark alone, packed right against the theme
+     toggle instead of centred. */
+  .step[data-copy] { display: none; }
+  .start { margin-left: auto; }
+  /* A bare glyph, not a card: the step chrome comes off with the text. */
+  .step-github {
+    justify-content: center;
+    width: 1.875rem;
+    height: 1.875rem;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    color: var(--muted);
+  }
+  .step-github:hover,
+  .step-github:active {
+    transform: none;
+    box-shadow: none;
+  }
+  .step-github .step-body,
+  .step-github .step-stars { display: none; }
+  .step-github .i-gh {
+    display: block;
+    width: 0.9375rem;
+    height: 0.9375rem;
+  }
+  /* Same invisible target and optical centre as GitHub; the outlined drop
+     stays a hair smaller because its lighter construction needs less trim. */
+  .theme {
+    width: 1.875rem;
+    height: 1.875rem;
+  }
+  .theme svg {
+    top: 0.4375rem;
+    left: 0.4375rem;
+  }
+  .theme .i-drop {
+    top: calc(0.46875rem + 0.5px);
+    left: calc(0.46875rem - 0.5px);
+    width: calc(0.9375rem + 1px);
+    height: calc(0.9375rem + 1px);
+  }
+  /* Neutralize touch browsers' sticky hover; real pointer hover is restored
+     immediately below. */
+  .theme:hover { color: var(--muted); }
+  .step-github:focus-visible,
+  .theme:focus-visible { color: var(--ink); }
+  .hero { padding: 1.5rem 0; }
+  /* Fit-to-width would shrink the one-liner below legibility here; let it
+     wrap at a comfortable size instead — 2–3 lines is fine as long as the
+     block clears the composer, so height caps the size too. Full width:
+     shrink-to-fit against left:50% would otherwise hand it half the column. */
+  .hero h1 {
+    white-space: normal;
+    text-wrap: balance;
+    width: 100%;
+    font-size: clamp(1.25rem, min(7.2vw, 6svh), 2rem);
+  }
+  /* One column, two cards tall. Panels with more cards page through them on
+     a timer (boot.ts), so nothing ever overflows the band. */
+  .explainer { grid-template-columns: 1fr; gap: 0.375rem; }
+  .explainer button { min-height: 0; }
+  .explainer button[data-cycle-hidden] { display: none; }
+  .foot-inner .end { margin-left: 0; }
+}
+@media (max-width: 775px) and (hover: hover) {
+  .step-github:hover,
+  .theme:hover { color: var(--ink); }
+}
+
+/* Super-short viewports (landscape phones): centring the composer at 50svh
+   leaves no room for the headline, so the hero falls back to normal flow. */
+@media (max-height: 430px) {
+  .hero { justify-content: center; }
+  .hero h1,
+  .talk,
+  .talk-explainers {
+    position: static;
+    transform: none;
+  }
+  .hero h1 {
+    white-space: normal;
+    width: 100%;
+    margin: 0 0 1.5rem;
+    font-size: clamp(1.25rem, 4.5vw, 1.75rem);
+  }
+  .talk { margin: 0 auto; }
+  .talk-explainers { width: min(100%, 44rem); margin: 1.25rem auto 0; }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The handoff. When the conversation is up, the marketing page and its      */
+/* light layers go away; #app owns the viewport. The composer card carries   */
+/* the same view-transition-name on both sides, so the browser morphs the    */
+/* hero input down into the conversation's composer — the one object that    */
+/* visibly persists from the page into the app.                              */
+
+:root[data-app] .page,
+:root[data-app] .wash,
+:root[data-app] .light { display: none; }
+#app { display: none; }
+:root[data-app] #app { display: block; }
+
+::view-transition-old(composer),
+::view-transition-new(composer) {
+  height: 100%;
+  animation-duration: 0.34s;
+  animation-timing-function: cubic-bezier(0.35, 0, 0.15, 1);
+}
+::view-transition-old(root) { animation-duration: 0.28s; }
+::view-transition-new(root) { animation-duration: 0.28s; }
+::view-transition-old(brand),
+::view-transition-new(brand) { animation-duration: 0.34s; }
+.nav-brand { view-transition-name: brand; }
+.nav-inner > .start,
+.app-nav > .start { view-transition-name: nav-actions; }
+.nav-inner > .nav-links,
+.app-nav > .nav-links { view-transition-name: nav-utilities; }
+::view-transition-old(nav-actions),
+::view-transition-new(nav-actions),
+::view-transition-old(nav-utilities),
+::view-transition-new(nav-utilities) {
+  height: 100%;
+  animation-duration: 0.34s;
+  animation-timing-function: cubic-bezier(0.35, 0, 0.15, 1);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The conversation app. Same paper, same ink: this is the marketing page's  */
+/* world with the sections swapped for a live machine.                       */
+
+.app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+}
+/* Same chrome as the marketing nav: brand left, the two CTA steps dead
+   centre, Why/Docs/theme right. The steps/nav-links/theme rules are shared
+   with the landing — only the frame differs (grid, so the centre is the
+   viewport's centre regardless of how wide each side is). */
+.app-nav {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.875rem clamp(1rem, 4vw, 2rem);
+  border-bottom: 1px solid var(--rule);
+}
+.app-nav-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+.app-nav-links { justify-self: end; }
+.app-nav-session {
+  font-family: var(--mono);
+  font-size: 0.71875rem;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Narrow: the same rules as the landing nav (install hidden, GitHub a bare
+   glyph — that part rides the shared .step classes). The grid's middle
+   column collapses so the glyph packs right beside the theme toggle, and
+   the gutters widen to the landing's so the theme drop clears the edge. */
+@media (max-width: 775px) {
+  .app-nav {
+    grid-template-columns: 1fr auto auto;
+    gap: 0.75rem;
+    padding-inline: 1.5rem;
+  }
+}
+@media (max-width: 900px) {
+  /* A slight bottom bias gives the rule-mounted chips room without making
+     the nav's contents look vertically low. */
+  .app-nav { padding-bottom: 1rem; }
+}
+
+.app-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+/* Pane chips sit beneath the nav on desktop. Mobile pulls the same controls
+   upward onto the rule, turning them into contextual page navigation. */
+.pane-toggle {
+  position: absolute;
+  top: 0.75rem;
+  z-index: 6;
+}
+.pane-toggle-left { left: 1rem; }
+.pane-toggle-right { right: 1rem; }
+.pane-toggle-label { display: inline; white-space: nowrap; }
+/* A response that also wrote the app surface ends with this offer; rendered
+   only while the pane isn't on screen. Same chip language as .xp-asks. */
+.msg-open-pane {
+  align-self: flex-start;
+  margin-top: 0.125rem;
+  border: 1px solid var(--rule);
+  border-radius: 1rem;
+  background: none;
+  padding: 0.375rem 0.75rem;
+  font: 500 0.75rem var(--mono);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.msg-open-pane:hover { color: var(--ink); border-color: var(--ink); }
+.msg-open-pane:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.125rem; }
+.app-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.app-scroll {
+  flex: 1;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.app-scroll,
+.app-pane-body,
+.app-inspector-body {
+  scrollbar-gutter: auto;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .app-scroll,
+  .app-pane-body,
+  .app-inspector-body {
+    scrollbar-color: color-mix(in srgb, var(--ink) 24%, transparent) transparent;
+    scrollbar-width: thin;
+  }
+}
+.app-scroll::-webkit-scrollbar,
+.app-pane-body::-webkit-scrollbar,
+.app-inspector-body::-webkit-scrollbar {
+  width: 0.25rem;
+  height: 0.25rem;
+  background: transparent;
+}
+.app-scroll::-webkit-scrollbar-track,
+.app-pane-body::-webkit-scrollbar-track,
+.app-inspector-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.app-scroll::-webkit-scrollbar-thumb,
+.app-pane-body::-webkit-scrollbar-thumb,
+.app-inspector-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 24%, transparent);
+}
+.app-scroll:hover::-webkit-scrollbar-thumb,
+.app-pane-body:hover::-webkit-scrollbar-thumb,
+.app-inspector-body:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+.app-thread {
+  max-width: 44rem;
+  margin: 0 auto;
+  /* The tall bottom padding is the paging runway: the newest turn must be
+     able to scroll all the way to the top of the viewport even when nothing
+     follows it, so there is always ~a screen of blank paper below. */
+  padding: 2rem clamp(1rem, 4vw, 2rem) max(2rem, calc(100svh - 12rem));
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.msg { display: flex; flex-direction: column; gap: 0.375rem; }
+.msg-role {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.msg-user .msg-role { color: var(--accent); }
+.msg-body {
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.msg-user .msg-body { font-weight: 500; }
+.msg-pending .msg-body::after {
+  content: "▋";
+  color: var(--accent);
+  animation: msg-blink 1s steps(2) infinite;
+}
+@keyframes msg-blink { 50% { opacity: 0; } }
+
+/* Rich explainer widgets: an assistant turn rendered as a diagram card. Same
+   paper vocabulary as the rest of the app — hairline border, mono labels —
+   with the spectrum colours doing the same job they do in the hero: one
+   source, a fan of beams, each child its own hue. */
+.xp {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 0.25rem;
+  padding: 1rem 1rem 1.125rem;
+  border: 1px solid var(--rule);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--wash) 45%, transparent);
+}
+.xp-b1, .xp-c1, .xp-f1 { --lane: var(--spec-b); }
+.xp-b2, .xp-c2, .xp-f2 { --lane: var(--spec-g); }
+.xp-b3, .xp-c3, .xp-f3 { --lane: var(--spec-v); }
+.xp-parent, .xp-fp { --lane: var(--ink); }
+.xp-diagram { display: block; width: 100%; height: auto; }
+.xp-node rect { fill: none; stroke: var(--ink); stroke-width: 1.4; }
+.xp-node text {
+  fill: var(--ink);
+  font: 600 0.6875rem var(--mono);
+  letter-spacing: 0.06em;
+  text-anchor: middle;
+}
+.xp-child rect { stroke: var(--lane); }
+.xp-child text { fill: var(--lane); }
+.xp-beam { fill: none; stroke: var(--lane); stroke-width: 1.6; }
+.xp-drop {
+  fill: none;
+  stroke: var(--lane);
+  stroke-width: 1.1;
+  stroke-dasharray: 3 4;
+  opacity: 0.5;
+}
+.xp-log line { stroke: var(--muted); stroke-width: 1.2; }
+.xp-log-label {
+  fill: var(--faint);
+  font: 500 0.625rem var(--mono);
+  letter-spacing: 0.1em;
+}
+.xp-frames rect { fill: var(--lane); }
+/* Draw-in: source first, beams, children, then the log fills frame by frame. */
+@keyframes xp-in { from { opacity: 0; } }
+@keyframes xp-pop { from { opacity: 0; transform: translateY(0.25rem); } }
+.xp-node, .xp-beam, .xp-drop, .xp-log { animation: xp-in 0.45s ease-out both; }
+.xp-beam, .xp-drop { animation-delay: 0.25s; }
+.xp-child { animation-delay: 0.5s; }
+.xp-drop { animation-delay: 0.7s; }
+.xp-frames rect { animation: xp-pop 0.3s ease-out both; }
+.xp-frames rect:nth-child(1) { animation-delay: 0.85s; }
+.xp-frames rect:nth-child(2) { animation-delay: 0.97s; }
+.xp-frames rect:nth-child(3) { animation-delay: 1.09s; }
+.xp-frames rect:nth-child(4) { animation-delay: 1.21s; }
+.xp-frames rect:nth-child(5) { animation-delay: 1.33s; }
+.xp-frames rect:nth-child(6) { animation-delay: 1.45s; }
+.xp-frames rect:nth-child(7) { animation-delay: 1.57s; }
+.xp-frames rect:nth-child(8) { animation-delay: 1.69s; }
+.xp-frames rect:nth-child(9) { animation-delay: 1.81s; }
+.xp-points {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+.xp-points div { display: flex; flex-direction: column; gap: 0.25rem; }
+.xp-points dt {
+  font: 600 0.6875rem var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.xp-points dd {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.xp-asks { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.xp-asks button {
+  border: 1px solid var(--rule);
+  border-radius: 1rem;
+  background: none;
+  padding: 0.375rem 0.75rem;
+  font: 500 0.75rem var(--mono);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.xp-asks button:hover { color: var(--ink); border-color: var(--ink); }
+.xp-asks button:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.125rem; }
+@media (prefers-reduced-motion: reduce) {
+  .xp-node, .xp-beam, .xp-drop, .xp-log, .xp-frames rect { animation: none; }
+}
+
+/* Floats over everything — chat and inspector alike — centered on the full
+   viewport, so the input reads as the one fixed object the pages move under.
+   Absolute against .app (the fixed viewport shell), out of the chat column's
+   flow; the thread's runway padding keeps content clear of it. */
+.app-composer {
+  position: absolute;
+  z-index: 5;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 0.5rem clamp(1rem, 4vw, 2rem) 1.25rem;
+}
+/* The landing composer card, landed. */
+.app-composer .talk-card { view-transition-name: composer; }
+.app-composer .talk-card::before { display: none; }
+.auth-gate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  width: 100%;
+  padding: 0.75rem 0.875rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.625rem;
+  background: var(--bg);
+  box-shadow: 0.1875rem 0.1875rem 0 var(--shadow);
+}
+.auth-gate-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.auth-gate-copy strong { font: 600 0.8125rem/1.35 var(--sans); }
+.auth-gate-copy span,
+.auth-gate-public { font: 400 0.65rem/1.4 var(--sans); }
+.auth-gate-copy span,
+.auth-gate-public { color: var(--muted); }
+.auth-gate-github {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.75rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--ink);
+  color: var(--bg);
+  font: 600 0.7rem/1 var(--sans);
+  cursor: pointer;
+}
+.auth-gate-github svg { width: 1rem; height: 1rem; fill: currentColor; }
+.auth-gate-github:hover { transform: translateX(0.0625rem); }
+.auth-gate-github:disabled { opacity: 0.6; cursor: wait; }
+.auth-gate-public { margin: 0; }
+.auth-gate-github:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
+@media (max-width: 560px) {
+  .auth-gate { grid-template-columns: 1fr; }
+  .auth-gate-github { width: 100%; }
+}
+
+/* Pane chrome: the t3-style panel glyphs that toggle the side panes from the
+   nav and minimize them from their own headers. aria-pressed marks the open
+   ones in the nav. */
+.pane-btn {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0.25rem;
+  background: none;
+  padding: 0.25rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.pane-btn:hover { color: var(--ink); }
+.pane-btn[aria-pressed="true"] { color: var(--ink); }
+.pane-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.125rem; }
+.pane-btn svg {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.pane-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 1.25rem;
+  border: 1px solid var(--rule);
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.5rem;
+  background: var(--bg);
+  color: var(--muted);
+  font: 500 0.625rem/1 var(--mono);
+  letter-spacing: 0.02em;
+  transition: color 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.pane-toggle:hover { color: var(--ink); border-color: var(--ink); }
+.pane-toggle svg { display: block; }
+.pane-toggle > svg:not(.pane-toggle-close) {
+  width: 0.625rem;
+  height: 0.625rem;
+}
+.pane-toggle .pane-toggle-close {
+  display: block;
+  width: 0.75rem;
+  height: 0.75rem;
+  stroke-linecap: round;
+}
+.app-pane-spacer { flex: 1; }
+
+/* Drag rails: a slim grab strip straddling each pane's inner edge. Width is
+   live-local while dragging; the machine hears the final value once, as a
+   setPanes command on release. */
+.pane-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0.4375rem;
+  cursor: col-resize;
+  z-index: 7;
+}
+.pane-resize-app { right: -0.21875rem; }
+.pane-resize-inspector { left: -0.21875rem; }
+.pane-resize:hover { background: color-mix(in srgb, var(--ink) 16%, transparent); }
+:root[data-resizing] { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+:root[data-resizing] .pane-resize { background: color-mix(in srgb, var(--ink) 16%, transparent); }
+
+/* The app pane: the left surface the agent will draw dynamic UI into.
+   Width comes inline from the panes machine state. */
+.app-pane {
+  position: relative;
+  border-right: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 0;
+}
+.app-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  /* Left inset clears the floating app chip sitting over this header. */
+  padding: 0.625rem 0.75rem 0.625rem 3.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+.app-pane-title {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0.25rem 0.5rem;
+}
+.app-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem 0.75rem max(7rem, calc(5rem + env(safe-area-inset-bottom)));
+  scroll-padding-bottom: max(7rem, calc(5rem + env(safe-area-inset-bottom)));
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+
+/* The inspector: the machine, visible. Frame log rows borrow the terminal   */
+/* box's vocabulary — mono, role-coloured.                                   */
+.app-inspector {
+  position: relative;
+  width: min(26rem, 38vw); /* fallback; live width comes from panes state */
+  border-left: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 0;
+}
+/* Narrow: a pane is a full-screen layer over the chat — the phone idiom for
+   side-by-side. One at a time, chosen locally (App.tsx renders only the
+   active layer); the toggles keep their corners, so the same button in the
+   same spot opens and closes. The layers sit above the floating composer
+   (z 5) and below the toggles. */
+@media (max-width: 900px) {
+  .pane-resize { display: none; }
+  .pane-toggle svg { display: none; }
+  .pane-toggle {
+    top: 0;
+    z-index: 7;
+    transform: translateY(-50%);
+  }
+  /* Touch browsers can retain :hover after a tap; keep the newly revealed
+     pager chip quiet unless the device has a real hovering pointer. */
+  .pane-toggle:hover { color: var(--muted); border-color: var(--rule); }
+  .pane-toggle[data-mobile-hidden] {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .app-pane,
+  .app-inspector {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    width: auto !important; /* inline width comes from desktop pane state */
+    border-left: 0;
+    border-right: 0;
+    background: var(--bg);
+  }
+  .app-pane > .app-pane-head,
+  .app-inspector > .app-inspector-head {
+    padding: 0.875rem 1rem 0.75rem;
+  }
+  .app-pane { animation: layer-in-left 0.22s ease-out; }
+  .app-inspector { animation: layer-in-right 0.22s ease-out; }
+  .app-body[data-layer-closing="app"] .app-pane {
+    animation: layer-out-left 0.22s ease-in forwards;
+    pointer-events: none;
+  }
+  .app-body[data-layer-closing="inspector"] .app-inspector {
+    animation: layer-out-right 0.22s ease-in forwards;
+    pointer-events: none;
+  }
+}
+@media (max-width: 900px) and (hover: hover) {
+  .pane-toggle:hover { color: var(--ink); border-color: var(--ink); }
+}
+
+/* A persistent way home when a mobile pane is quiet. An arriving Projector
+   notice replaces it, so the two chat affordances never compete. */
+.pane-chat-return {
+  position: absolute;
+  right: 1.25rem;
+  bottom: max(1.25rem, env(safe-area-inset-bottom));
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 2.625rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.75rem 0.75rem 0.1875rem 0.75rem;
+  background: var(--spectrum-wash);
+  color: var(--ink);
+  filter: drop-shadow(0.125rem 0.125rem 0 var(--shadow));
+  transition: border-color 0.12s, color 0.12s;
+  cursor: pointer;
+}
+.pane-chat-return-mark {
+  display: flex;
+  align-items: center;
+}
+.pane-chat-return-mark svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+.pane-chat-return:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 0.1875rem;
+}
+@media (hover: hover) {
+  .pane-chat-return:hover { color: var(--ink); border-color: var(--ink); }
+}
+
+/* A new agent message remains visible while a narrow pane covers the chat.
+   The bubble is intentionally compact: tapping it closes the layer and lets
+   the full conversation carry the message from there. */
+.pane-agent-notice {
+  position: absolute;
+  z-index: 8;
+  right: auto;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  left: 1rem;
+  display: none;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: min(calc(100% - 2rem), 32rem);
+  margin: 0;
+  padding: 0.75rem 0.875rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.75rem 0.75rem 0.75rem 0.25rem;
+  /* The landing's angled projected-light bands, lifted a little closer to the
+     surface here but still mixed through the paper. Stops at blue: no violet
+     or purple accent enters this notification. */
+  background: var(--spectrum-wash);
+  box-shadow: 0.1875rem 0.1875rem 0 var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  animation: pane-agent-notice-in 0.18s ease-out;
+}
+.pane-agent-notice[data-pending] {
+  align-items: center;
+  width: 3rem;
+  min-height: 2.625rem;
+  padding: 0.6875rem;
+}
+.pane-agent-notice-cursor {
+  display: block;
+  width: 0.4375rem;
+  height: 1rem;
+  background: var(--ink);
+  animation: pane-agent-notice-blink 0.9s steps(2, end) infinite;
+}
+.pane-agent-notice-role {
+  color: var(--ink);
+  font: 600 0.625rem/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.pane-agent-notice-copy {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.pane-agent-notice:hover { border-color: var(--ink); }
+.pane-agent-notice:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
+@media (max-width: 900px) {
+  .pane-agent-notice { display: flex; }
+}
+@keyframes pane-agent-notice-in {
+  from { opacity: 0; transform: translateY(0.75rem); }
+}
+@keyframes pane-agent-notice-blink { 50% { opacity: 0; } }
+@keyframes layer-in-left { from { transform: translateX(-2rem); opacity: 0; } }
+@keyframes layer-in-right { from { transform: translateX(2rem); opacity: 0; } }
+@keyframes layer-out-left { to { transform: translateX(-2rem); opacity: 0; } }
+@keyframes layer-out-right { to { transform: translateX(2rem); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .app-pane, .app-inspector, .pane-agent-notice, .pane-agent-notice-cursor { animation: none; }
+  .app-body[data-layer-closing="app"] .app-pane,
+  .app-body[data-layer-closing="inspector"] .app-inspector { opacity: 0; }
+}
+.app-inspector-head {
+  display: flex;
+  gap: 0.25rem;
+  /* Right inset clears the floating inspector chip sitting over this header. */
+  padding: 0.625rem 3.25rem 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.app-inspector-head button {
+  border: 0;
+  background: none;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+}
+.app-inspector-head button[data-active] { color: var(--ink); background: var(--wash); }
+.app-inspector-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem 0.75rem max(7rem, calc(5rem + env(safe-area-inset-bottom)));
+  scroll-padding-bottom: max(7rem, calc(5rem + env(safe-area-inset-bottom)));
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+.frame-row {
+  display: flex;
+  gap: 0.625rem;
+  align-items: baseline;
+  padding: 0.125rem 0;
+}
+.frame-row .l { color: var(--faint); }
+.frame-row .m { color: var(--t-actor); }
+.frame-row .b { color: var(--t-state); }
+.frame-row .g { color: var(--t-ok); }
+.frame-row .frame-detail {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.state-json {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--muted);
+}
+.state-json .k { color: var(--ink); }
+
+/* State tab: the machine as a tree. Same terminal vocabulary as the frame
+   log — mono, faint chrome, --t-state amber for state keys — plus a flash
+   when a value changes so cause (chat, surface click) meets effect. */
+.state-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.25rem;
+}
+.state-tools button {
+  font: inherit;
+  font-size: 0.6875rem;
+  color: var(--faint);
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 0.5rem;
+  cursor: pointer;
+}
+.state-tools button[data-active] { color: var(--ink); background: var(--wash); }
+.state-inst + .state-inst,
+.state-children { margin-top: 0.375rem; }
+.state-inst-head { display: flex; gap: 0.5rem; align-items: baseline; }
+.state-inst-key { color: var(--ink); }
+.state-inst-tag {
+  color: var(--t-actor);
+  font-size: 0.6875rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 0.375rem;
+}
+.state-children {
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--rule);
+}
+.state-row { padding: 0.0625rem 0; }
+.state-row-head {
+  display: flex;
+  gap: 0.625rem;
+  align-items: baseline;
+  border-radius: 3px;
+}
+.state-row-head[data-flash="0"] { animation: state-flash-a 1.4s ease-out; }
+.state-row-head[data-flash="1"] { animation: state-flash-b 1.4s ease-out; }
+@keyframes state-flash-a {
+  from { background: color-mix(in srgb, var(--t-state) 24%, transparent); }
+  to { background: transparent; }
+}
+@keyframes state-flash-b {
+  from { background: color-mix(in srgb, var(--t-state) 24%, transparent); }
+  to { background: transparent; }
+}
+.state-key { color: var(--t-state); flex-shrink: 0; }
+.state-inline { display: flex; gap: 0.375rem; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.state-scalar { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+.state-faint { color: var(--faint); }
+.state-note { color: var(--faint); overflow-wrap: anywhere; }
+.state-bad { color: var(--t-bad); }
+.state-chip {
+  color: var(--faint);
+  font-size: 0.6875rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 0.375rem;
+  white-space: nowrap;
+}
+.state-chip[data-on] { color: var(--t-ok); }
+.state-branch { min-width: 0; }
+.state-branch > summary {
+  cursor: pointer;
+  color: var(--faint);
+  list-style-position: outside;
+  overflow-wrap: anywhere;
+}
+.state-branch > summary:hover { color: var(--muted); }
+.state-entries { padding-left: 0.875rem; }
+.state-entry { display: flex; gap: 0.625rem; align-items: baseline; }
+.state-entry-key { color: var(--ink); flex-shrink: 0; }
+.inspector-empty { color: var(--faint); padding: 1rem 0.25rem; }
+.inspector-overview {
+  font-family: var(--sans);
+  padding: 0.25rem;
+}
+.inspector-overview-label {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font: 600 0.625rem/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.inspector-title-form label {
+  display: block;
+  margin-bottom: 0.375rem;
+  color: var(--faint);
+  font: 500 0.6875rem/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.inspector-title-control {
+  display: flex;
+  align-items: stretch;
+  gap: 0.375rem;
+}
+.inspector-title-control input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.5rem 0.625rem;
+  font: 400 0.8125rem/1.35 var(--sans);
+}
+.inspector-title-control input:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 0.125rem;
+}
+.inspector-title-control button {
+  border: 1px solid var(--ink);
+  border-radius: 0.375rem;
+  background: var(--ink);
+  color: var(--bg);
+  padding: 0.5rem 0.625rem;
+  font: 600 0.625rem/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.inspector-title-control button:disabled {
+  border-color: var(--rule);
+  background: var(--wash);
+  color: var(--faint);
+  cursor: default;
+}
+.inspector-title-control button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 0.125rem;
+}
+.inspector-title-status {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font: 400 0.6875rem/1.4 var(--sans);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Agent-authored surfaces in the app pane. The surface's own styles live in */
+/* its shadow root (ds stylesheet + whatever <style> it renders); this is    */
+/* just the host chrome around it.                                           */
+
+.app-pane-version {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  color: var(--faint);
+  margin-left: 0.5rem;
+}
+.surface-host { min-height: 100%; }
+.surface-failure {
+  font-family: var(--mono);
+  font-size: 0.71875rem;
+  color: var(--t-bad);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  margin: 0 0 0.75rem;
+}
+.surface-error {
+  border: 1.5px solid var(--t-bad);
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+}
+.surface-error p {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--t-bad);
+  margin: 0 0 0.5rem;
+  overflow-wrap: break-word;
+}
+.surface-error button {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.375rem;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+}
+.surface-error button:hover { background: var(--wash); }
+
+/* Inline chat cards: same runtime as the app pane, framed as part of the
+   turn. The card's own look lives in its shadow root; this is the frame. */
+.msg-card {
+  border: 1px solid var(--rule);
+  border-radius: 0.625rem;
+  padding: 0.75rem;
+  max-width: 32rem;
+}
+.msg-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.625rem;
+}
+.msg-card-title {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  flex: 1;
+}
+.msg-card .surface-host { min-height: 0; }

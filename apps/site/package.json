@@ -1,0 +1,33 @@
+{
+  "name": "@projectors/site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "convex": "convex dev",
+    "typecheck": "tsgo"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "catalog:",
+    "@convex-dev/auth": "0.0.95",
+    "@convex-dev/rate-limiter": "0.3.2",
+    "@projectors/aisdk-executor": "workspace:*",
+    "@projectors/core": "workspace:*",
+    "ai": "catalog:",
+    "convex": "^1.31.2",
+    "lucide-react": "^1.32.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "sucrase": "^3.35.1",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5",
+    "vite": "^7.3.2"
+  }
+}

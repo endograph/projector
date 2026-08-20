@@ -24,7 +24,11 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@typescript/native-preview": "latest"
+    "@typescript/native-preview": "latest",
+    "sidecarsync": "^1.4.0"
   },
-  "peerDependencies": {}
+  "peerDependencies": {},
+  "trustedDependencies": [
+    "sidecarsync"
+  ]
 }

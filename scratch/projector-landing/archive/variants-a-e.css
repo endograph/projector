@@ -1,0 +1,56 @@
+/* ---------------------------------------------------------------------------
+   ARCHIVED variants a–e. Not linked from index.html; kept only as a record of
+   what was tried before the f (prism) direction won.
+
+   To bring one back: paste its block into style.css, add an entry to VARIANTS
+   in variants.js, and — for `e` — restore the tracker's spotlight test, which
+   now reads `variant[0] === "f"`.
+
+     a  the live beam design at the time: pure-white body, warm dark edge,
+        wide source converging to a blunt tip. (No block — it was the
+        baseline, inheriting everything in style.css.)
+     b  brighter wash, cooler beam edge
+     c  quiet wash, harder-edged beam
+     d  no dark boundary: pure white body on a deeper warm-gray page
+     e  spotlight: inverted optics, narrow source spreading over the target.
+        Superseded by f, which is e plus the wash dispersing from the target.
+   --------------------------------------------------------------------------- */
+
+/* b — brighter wash, cooler beam edge */
+:root[data-variant="b"] {
+  --spec-a: 0.42;
+  --ray-edge: #2f3a4a;
+}
+
+/* c — quiet wash, harder-edged beam (dark boundary doing the work) */
+:root[data-variant="c"] {
+  --spec-a: 0.22;
+  --ray-edge: #3a3226;
+}
+:root[data-variant="c"] .light .l-glow { opacity: 0.2; }
+:root[data-variant="c"] .light .l-core { opacity: 0.7; }
+
+/* d — no dark boundary at all: pure white body on a deeper warm-gray page */
+:root[data-variant="d"] {
+  --bg: #e9e6dd;
+  --spec-a: 0.32;
+  --ray-edge: #ffffff;
+}
+:root[data-variant="d"] .light .l-glow { opacity: 0.5; }
+:root[data-variant="d"] .light .l-core { opacity: 0.95; }
+
+/* e — spotlight: variant a's colours, inverted optics. A narrow source opens
+   out to cover the whole target, so the light falls *on* the element instead
+   of stopping at its edge. The gradient dims toward the target (a spreading
+   beam dilutes) and the body runs quieter than a's because it sits over live
+   text. */
+:root[data-variant="e"] #ray-grad-edge stop:nth-child(1),
+:root[data-variant="e"] #ray-grad-body stop:nth-child(1) { stop-opacity: 0.66; }
+:root[data-variant="e"] #ray-grad-edge stop:nth-child(2),
+:root[data-variant="e"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.5; }
+:root[data-variant="e"] #ray-grad-edge stop:nth-child(3),
+:root[data-variant="e"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.34; }
+:root[data-variant="e"] .light .l-glow { opacity: 0.06; }
+:root[data-variant="e"] .light .l-core { opacity: 0.3; }
+:root[data-theme="dark"][data-variant="e"] .light .l-glow { opacity: 0.05; }
+:root[data-theme="dark"][data-variant="e"] .light .l-core { opacity: 0.07; }

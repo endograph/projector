@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>projector — favicon riffs, round 4</title>
+<style>
+  body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f5f7; color: #111; }
+  h1 { font-size: 18px; margin: 0; padding: 20px 24px 4px; }
+  .sub { padding: 0 24px 16px; font-size: 13px; opacity: 0.6; }
+  .section-label { padding: 14px 24px 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.5; }
+  .row { display: flex; align-items: center; gap: 28px; padding: 18px 24px; border-bottom: 1px solid #e2e4e8; }
+  .row.ref { opacity: 0.55; }
+  .dark .row { border-bottom-color: #26292f; }
+  .dark { background: #16181d; color: #eee; }
+  .meta { width: 300px; }
+  .name { font-size: 13px; font-weight: 600; }
+  .note { font-size: 12px; opacity: 0.65; margin-top: 3px; line-height: 1.45; }
+  .sizes { display: flex; align-items: center; gap: 22px; }
+  .sizes img { display: block; }
+  .tab { display: flex; align-items: center; gap: 7px; background: #fff; border: 1px solid #d6d9de;
+         border-radius: 8px 8px 0 0; padding: 6px 14px 6px 10px; font-size: 12px; width: 120px; }
+  .dark .tab { background: #2b2e35; border-color: #3a3e46; color: #ddd; }
+</style>
+</head>
+<body>
+<h1>projector — favicon riffs, round 4</h1>
+<div class="sub">1a3: beam meets the fan with width instead of a point. 2a3: no white ray, smaller triangle shifted up-left. Previous versions dimmed.</div>
+<div id="light"></div>
+<div id="dark" class="dark"></div>
+
+<script>
+const riffs = [
+  {
+    name: "1a2 · more-rainbow (prev)", ref: true,
+    note: "For reference.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0E1116"/><polygon points="16,32 56,8 56,17.6" fill="#FF4D6D"/><polygon points="16,32 56,17.6 56,27.2" fill="#FFC53D"/><polygon points="16,32 56,27.2 56,36.8" fill="#3DDC97"/><polygon points="16,32 56,36.8 56,46.4" fill="#4D9FFF"/><polygon points="16,32 56,46.4 56,56" fill="#A78BFA"/><polygon points="3,25 17,30.8 17,33.2 3,39" fill="#FFFFFF"/></svg>`
+  },
+  {
+    name: "1a3 · thick-waist",
+    note: "No pinch to a point — the white beam meets the spectrum at an 8px-wide waist, each color peeling off a slice of it.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0E1116"/><polygon points="16,28 16,29.6 56,17.6 56,8" fill="#FF4D6D"/><polygon points="16,29.6 16,31.2 56,27.2 56,17.6" fill="#FFC53D"/><polygon points="16,31.2 16,32.8 56,36.8 56,27.2" fill="#3DDC97"/><polygon points="16,32.8 16,34.4 56,46.4 56,36.8" fill="#4D9FFF"/><polygon points="16,34.4 16,36 56,56 56,46.4" fill="#A78BFA"/><polygon points="3,24 17,28 17,36 3,40" fill="#FFFFFF"/></svg>`
+  },
+  {
+    name: "2a2 · small-prism (prev)", ref: true,
+    note: "For reference.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0E1116"/><polygon points="34,28 58,24 58,30.4" fill="#FF4D6D"/><polygon points="34,28 58,30.4 58,36.8" fill="#FFC53D"/><polygon points="34,28 58,36.8 58,43.2" fill="#3DDC97"/><polygon points="34,28 58,43.2 58,49.6" fill="#4D9FFF"/><polygon points="34,28 58,49.6 58,56" fill="#A78BFA"/><line x1="4" y1="20" x2="25" y2="28" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round"/><polygon points="30,18 20,38 40,38" fill="#1B2230" stroke="#E8ECF2" stroke-width="3" stroke-linejoin="round"/></svg>`
+  },
+  {
+    name: "2a3 · no-beam",
+    note: "White ray dropped entirely; triangle nudged up-left, spectrum pours out toward the lower right.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0E1116"/><polygon points="30,24 58,22 58,28.8" fill="#FF4D6D"/><polygon points="30,24 58,28.8 58,35.6" fill="#FFC53D"/><polygon points="30,24 58,35.6 58,42.4" fill="#3DDC97"/><polygon points="30,24 58,42.4 58,49.2" fill="#4D9FFF"/><polygon points="30,24 58,49.2 58,56" fill="#A78BFA"/><polygon points="26,14 16,34 36,34" fill="#1B2230" stroke="#E8ECF2" stroke-width="3" stroke-linejoin="round"/></svg>`
+  }
+];
+
+function render(containerId) {
+  const el = document.getElementById(containerId);
+  el.insertAdjacentHTML("beforeend",
+    `<div class="section-label">${containerId} page</div>`);
+  for (const r of riffs) {
+    const src = "data:image/svg+xml," + encodeURIComponent(r.svg);
+    el.insertAdjacentHTML("beforeend", `
+      <div class="row${r.ref ? " ref" : ""}">
+        <div class="meta">
+          <div class="name">${r.name}</div>
+          <div class="note">${r.note}</div>
+        </div>
+        <div class="sizes">
+          <img src="${src}" width="64" height="64">
+          <img src="${src}" width="32" height="32">
+          <img src="${src}" width="16" height="16">
+          <div class="tab"><img src="${src}" width="16" height="16"><span>projector</span></div>
+        </div>
+      </div>`);
+  }
+}
+render("light");
+render("dark");
+</script>
+</body>
+</html>

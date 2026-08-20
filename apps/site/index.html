@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>projector — agent framework for evolutionary software</title>
+<meta name="description" content="An agent framework for state-complete agents. One shared model of the world, backed by a durable frame log, rendered through projections — every actor sees the slice meant for them.">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/src/site.css">
+<meta name="color-scheme" content="light dark">
+<script>
+  // Applied before first paint so the theme never flashes. No stored choice
+  // means follow the system.
+  try {
+    var t = localStorage.getItem("theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+  document.documentElement.dataset.variant = "f";
+  // Deep link straight into a conversation: hide the marketing page before
+  // first paint and let boot.ts load the app eagerly. The marketing DOM stays
+  // in place underneath so "back to /" is a cheap reveal, not a reload.
+  try {
+    if (/^\/s\//.test(location.pathname)) document.documentElement.dataset.app = "1";
+  } catch (e) {}
+</script>
+</head>
+<body>
+
+<!-- The wash: the spectrum, dispersed. The wrapper carries the load-in sweep,
+     the inner element the shaping masks — see the .wash rules in site.css. -->
+<div class="wash" aria-hidden="true"><i></i></div>
+
+<!-- The ray: a wedge of white light from the left edge — its origin riding
+     half of the way from the viewport's midline toward the target — focused
+     to a narrow band on the current reading target (headline, CTAs, section
+     labels). Two polygons share the geometry: a wide soft glow and a tighter
+     core inside it, so the light has a hot centre the way a real beam does.
+     Points are set per-frame by the tracker script at the end of the body. -->
+<svg class="light" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="ray-grad-edge" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" style="stop-color: var(--ray-edge)" stop-opacity="0.34"/>
+      <stop offset="0.5" style="stop-color: var(--ray-edge)" stop-opacity="0.44"/>
+      <stop offset="1" style="stop-color: var(--ray-edge)" stop-opacity="0.62"/>
+    </linearGradient>
+    <linearGradient id="ray-grad-body" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" style="stop-color: var(--ray-body)" stop-opacity="0.34"/>
+      <stop offset="0.5" style="stop-color: var(--ray-body)" stop-opacity="0.44"/>
+      <stop offset="1" style="stop-color: var(--ray-body)" stop-opacity="0.62"/>
+    </linearGradient>
+    <filter id="ray-soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+    <filter id="ray-core" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="ray-soft-spot" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <filter id="ray-core-spot" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <filter id="ray-soft-spot-thin" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <filter id="ray-soft-spot-dark" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="44"/>
+    </filter>
+    <filter id="ray-core-spot-dark" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <!-- Tighter mobile diffusion for compact targets. The composer keeps the
+         full-size filters above so its larger illuminated field is unchanged. -->
+    <filter id="ray-soft-spot-compact" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+    <filter id="ray-core-spot-compact" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="11"/>
+    </filter>
+    <filter id="ray-soft-spot-thin-compact" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <filter id="ray-soft-spot-dark-compact" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="34"/>
+    </filter>
+    <filter id="ray-core-spot-dark-compact" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="23"/>
+    </filter>
+  </defs>
+  <polygon class="l-glow" fill="url(#ray-grad-edge)" filter="url(#ray-soft)" points="0,0 0,0 0,0 0,0"/>
+</svg>
+
+<svg class="light light-body" aria-hidden="true" focusable="false">
+  <polygon class="l-core" fill="url(#ray-grad-body)" filter="url(#ray-core)" points="0,0 0,0 0,0 0,0"/>
+</svg>
+
+<!-- Wobbles the ink of the caret and the handwritten note: position-varying
+     displacement keeps repeated letters from reading as a typeface. -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="ink" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.045 0.09" numOctaves="3" seed="7" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <filter id="ink-rough" x="-35%" y="-35%" width="170%" height="170%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.19 0.26" numOctaves="3" seed="11" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="0.9" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
+
+<div class="page">
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="/">projector</a>
+    <div class="start" aria-label="Project actions">
+      <div class="steps">
+        <button class="step" type="button" data-copy>
+          <span class="step-body"><span class="step-label">Install</span><code>npm i @projectors/core</code></span>
+          <span class="step-act"><span class="vh">Copy</span><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></span>
+        </button>
+        <a class="step step-github" href="https://github.com/markov-machines/markov-machines" aria-label="Star markov-machines on GitHub">
+          <svg class="i-gh" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.9-.39.98 0 1.97.13 2.9.39 2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.56A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+          <span class="step-body"><span class="step-label">GitHub</span><code>Star</code></span>
+          <span class="step-act step-stars"><svg class="i-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.9 6 6.5.9-4.7 4.6 1.1 6.5L12 17.9 6.2 21l1.1-6.5L2.6 9.9 9.1 9z"/></svg><span class="count">1</span><span class="vh">stars</span></span>
+        </a>
+      </div>
+    </div>
+    <nav class="nav-links">
+      <a href="#why">Why</a>
+      <a href="#docs">Docs</a>
+      <button class="theme" type="button" data-mode="light" aria-label="Theme: light">
+        <svg class="i-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 .9v1.8M8 13.3v1.8M15.1 8h-1.8M2.7 8H.9M13 3l-1.3 1.3M4.3 11.7 3 13M13 13l-1.3-1.3M4.3 4.3 3 3"/></svg>
+        <svg class="i-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.6A6 6 0 1 1 6.4 2.5a4.8 4.8 0 0 0 7.1 7.1Z"/></svg>
+        <svg class="i-drop" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6c2.7 3 4.4 5.2 4.4 7.1a4.4 4.4 0 0 1-8.8 0c0-1.9 1.7-4.1 4.4-7.1Z"/></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <!-- The three load-bearing words are hot: hovering previews a question in
+       the composer, clicking/tapping sends it. Buttons, so the beam tracker
+       and keyboard focus treat them like any other interactive target. -->
+  <h1>agent <button class="hot" type="button" data-topic="framework" data-ask="What kind of agent framework is this?" aria-pressed="false">framework</button> for <button class="hot" type="button" data-topic="evolutionary" data-ask="What makes software evolutionary?" aria-pressed="false">evolutionary</button> <button class="hot" type="button" data-topic="software" data-ask="What can I build with this?" aria-pressed="false">software</button></h1>
+
+  <!-- The primary CTA: not a button, a conversation. The demo agent is built
+       with projector and knows it — the marketing page's input IS the first
+       turn. boot.ts warms the app chunk on intent and morphs this card into
+       the conversation composer on submit (shared view-transition-name). -->
+  <form class="talk" id="talk" autocomplete="off">
+    <div class="talk-card">
+      <input class="talk-input" type="text" name="q" placeholder="hi" spellcheck="false" enterkeyhint="send" aria-label="Ask projector">
+      <button class="talk-clear" type="button" aria-label="Clear input">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+      </button>
+      <button class="talk-mic" type="button" disabled title="voice — coming soon" aria-label="Voice input, coming soon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+      </button>
+      <button class="talk-go" type="submit" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    <!-- Shown by boot.ts when localStorage holds past sessions. -->
+    <button class="talk-past" type="button" hidden>past conversations</button>
+  </form>
+  <dialog class="past-dialog" aria-label="Past conversations">
+    <p class="past-head">past conversations</p>
+    <div class="past-list"></div>
+  </dialog>
+  <!-- aria-live starts off: the resting cards below cycle on a timer, and a
+       polite region would narrate every rotation. boot.ts flips it to polite
+       the first time a change is visitor-driven (a hot word). -->
+  <div class="talk-explainers" aria-live="off">
+    <div class="explainer" data-explainer="framework" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: classify the fox?"><span class="explainer-title">Vulpes <span class="ts-mark" aria-hidden="true">LX</span></span><span class="explainer-copy">Lorem animalium: vulpes habitat inter silvas et campos.</span></button>
+      <button type="button" data-prompt="Lorem: describe the honeybee colony?"><span class="explainer-title">Apis socialis</span><span class="explainer-copy">Lorem apium: colonia diligenter favos per prata construit.</span></button>
+      <button type="button" data-prompt="Lorem: catalogue the river otter?" data-demo="subagents"><span class="explainer-title">Lutra fluviatilis</span><span class="explainer-copy">Lorem lutrarum: turmae ludunt iuxta ripas aquae dulcis.</span></button>
+      <button type="button" data-prompt="Lorem: identify the barn owl?"><span class="explainer-title">Tyto nocturna</span><span class="explainer-copy">Lorem avium: noctua tacitis alis per tenebras venatur.</span></button>
+    </div>
+    <div class="explainer" data-explainer="evolutionary" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: trace the horse lineage?"><span class="explainer-title">Equus mutabilis</span><span class="explainer-copy">Lorem equorum: formae per aetates variant et pergunt.</span></button>
+      <button type="button" data-prompt="Lorem: explain finch adaptation?"><span class="explainer-title">Aves adaptivae</span><span class="explainer-copy">Lorem avium: rostra variantur secundum semina insularum.</span></button>
+      <button type="button" data-prompt="Lorem: compare the tortoise species?"><span class="explainer-title">Testudines variae</span><span class="explainer-copy">Lorem testudinum: naturae seligunt formas aptissimas.</span></button>
+    </div>
+    <div class="explainer" data-explainer="software" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: survey the coral reef?"><span class="explainer-title">Corallium fabrica</span><span class="explainer-copy">Lorem marinum: polypi parvi ingentia scopulorum regna struunt.</span></button>
+      <button type="button" data-prompt="Lorem: describe dolphin pods?"><span class="explainer-title">Delphini sociales</span><span class="explainer-copy">Lorem delphinorum: greges navigant, vocant, et ludunt.</span></button>
+      <button type="button" data-prompt="Lorem: catalogue the nautilus?"><span class="explainer-title">Nautilus</span><span class="explainer-copy">Lorem molluscorum: camerae spirales corpus pelagicum portant.</span></button>
+    </div>
+    <!-- Resting cards: until the visitor engages, the band cycles through a
+         couple of things worth asking. Same machinery as the topic panels —
+         boot.ts rotates data-active and retires the cycle on first intent. -->
+    <div class="explainer explainer-rest" data-explainer="rest-0" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: begin with the red panda?"><span class="explainer-title">Fauna incipit</span><span class="explainer-copy">Lorem animalium: panda rubra inter ramos quiescit.</span></button>
+      <button type="button" data-prompt="Lorem: show the smallest shrew?"><span class="explainer-title">Bestiola prima</span><span class="explainer-copy">Lorem minima: sorex parvus sub foliis celeriter currit.</span></button>
+    </div>
+    <div class="explainer explainer-rest" data-explainer="rest-1" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: record the wolf tracks?"><span class="explainer-title">Vestigia</span><span class="explainer-copy">Lorem luporum: quodque vestigium in nive manet.</span></button>
+      <button type="button" data-prompt="Lorem: compare cats and civets?"><span class="explainer-title">Cur animalia?</span><span class="explainer-copy">Lorem comparatum: felidae et viverridae formis differunt.</span></button>
+    </div>
+    <div class="explainer explainer-rest" data-explainer="rest-2" aria-hidden="true">
+      <button type="button" data-prompt="Lorem: how do ants share a nest?" data-demo="subagents"><span class="explainer-title">Formicae</span><span class="explainer-copy">Lorem coloniae: formicae unum nidum operose communicant.</span></button>
+      <button type="button" data-prompt="Lorem: which animal comes first?"><span class="explainer-title">Faunam tempta</span><span class="explainer-copy">Hoc exemplum est — quaere de quolibet animali.</span></button>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <p class="label">The shape</p>
+  <div class="grid">
+    <article class="feature">
+      <span class="num">01</span>
+      <h3>Fauna completa</h3>
+      <p>Lorem animalium: elephantus memoriam longam servat, dum mus parvus sub radicibus quiete habitat.</p>
+    </article>
+    <article class="feature">
+      <span class="num">02</span>
+      <h3>Vestigia durabilia</h3>
+      <p>Lorem luporum: vestigia per nivem pergunt, a prima silva usque ad ultimam vallem.</p>
+    </article>
+    <article class="feature">
+      <span class="num">03</span>
+      <h3>Oculi diversi</h3>
+      <p>Lorem avium: aquila montes desuper spectat, talpa autem terram obscuram subtus cognoscit.</p>
+    </article>
+    <article class="feature">
+      <span class="num">04</span>
+      <h3>Grex concordis</h3>
+      <p>Lorem gregum: zebra et gnu eandem viam sequuntur, trans campos latos atque flumina.</p>
+    </article>
+  </div>
+</section>
+
+<section id="why" class="why">
+  <p class="label">Why</p>
+  <p>
+    Lorem animalium incipit cum vulpe curiosa, quae inter filices ambulat et
+    scarabaeos sub foliis numerat. Supra eam aves matutinae cantant, dum
+    castores patientes iuxta flumen domos suas ex ramis componunt.
+  </p>
+  <p>
+    Cur animalia? Quia silva plena est formis mirabilibus: polypus colores
+    mutat, formicae <em>unum nidum communicant</em>, et balaenae per oceanum
+    cantus longissimos mittunt. Quaelibet bestia suam viam invenit.
+  </p>
+</section>
+
+<section class="box">
+  <div class="box-head"><span>terminal</span><span>projector replay</span></div>
+<pre><code><span class="p">$</span> projector replay --tail
+<span class="l">0041</span>  <span class="m">user.message</span>   "add oat milk to the list"
+<span class="l">0042</span>  <span class="b">state.todos</span>    +{ title: "oat milk" }
+<span class="l">0043</span>  <span class="m">agent.tool</span>     grocery.search("oat milk")
+<span class="l">0044</span>  <span class="m">agent.say</span>      "added — want the barista kind?"
+<span class="q">      replayed 44/44 frames ·</span> <span class="g">state identical ✓</span></code></pre>
+</section>
+
+<section id="docs" class="docs">
+  <p class="label">Docs</p>
+  <ul>
+    <li><a href="https://github.com/markov-machines/markov-machines">How projections work</a><span>state slices, tools, and instructions per actor</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">The frame log</a><span>durability, replay, and time travel</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">Actors &amp; executors</a><span>users, models, and everything after</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">Client &amp; server</a><span>one machine, typesafe on both sides</span></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>MIT</span>
+    <span>pre-release</span>
+    <a href="https://www.npmjs.com/package/@projectors/core">@projectors/core</a>
+    <a class="end" href="https://github.com/anteprojector/projector">@anteprojector/projector</a>
+  </div>
+</footer>
+
+</div><!-- /.page -->
+
+<!-- The conversation mounts here; the marketing page above goes inert but
+     stays in the DOM so returning to / is a reveal, not a reload. -->
+<div id="app"></div>
+
+<script>
+  // The light tracker. Interaction and layout changes wake it to pick the
+  // focus target nearest the viewport midline; it runs frame-by-frame only
+  // while the intro or a retarget is actually moving. Otherwise it sleeps.
+  // The SVG is document-anchored and its focus band uses document coordinates.
+  {
+    const svgs = [...document.querySelectorAll(".light")];
+    const glow = document.querySelector(".l-glow");
+    const core = document.querySelector(".l-core");
+    const edgeGradient = document.querySelector("#ray-grad-edge");
+    const bodyGradient = document.querySelector("#ray-grad-body");
+    const composer = document.querySelector(".talk-card");
+    const targets = [
+      composer,
+      ...document.querySelectorAll(".steps .step"),
+      ...document.querySelectorAll(".features .feature"),
+      ...document.querySelectorAll(".why > p:not(.label)"),
+      document.querySelector(".box"),
+      ...document.querySelectorAll(".docs li"),
+    ].filter(Boolean);
+    const mainEl = document.querySelector("main");
+    const still = matchMedia("(prefers-reduced-motion: reduce)");
+    const sysDarkMq = matchMedia("(prefers-color-scheme: dark)");
+    const isDark = () => {
+      const t = document.documentElement.dataset.theme;
+      return t === "dark" || (!t && sysDarkMq.matches);
+    };
+    const SELECTION = {};
+    const CENTER = {};
+    const contentTargetSelector = ".features .feature, .why > p:not(.label), .box, .docs li, .talk-card";
+    let hoverEl = null;
+    let lastDirect = null;
+    let releasedByFade = null;
+    let effectsHidden = scrollY > 50;
+    let rafId = 0;
+    let frame;
+    const schedule = () => {
+      if (!rafId) rafId = requestAnimationFrame(frame);
+    };
+    // The composer is the hero: the beam opens on it and holds until the
+    // reader points or focuses somewhere else.
+    let sticky = composer;
+    document.documentElement.classList.toggle("ray-hidden", effectsHidden);
+    addEventListener("scroll", () => {
+      const wasHidden = effectsHidden;
+      effectsHidden = scrollY > 50;
+      document.documentElement.classList.toggle("ray-hidden", effectsHidden);
+      if (effectsHidden && !wasHidden) {
+        releasedByFade = lastDirect || sticky;
+        lastDirect = null;
+        hoverEl = null;
+        sticky = null;
+      }
+      schedule();
+    }, { passive: true });
+    document.addEventListener("pointermove", (e) => {
+      if (e.pointerType && e.pointerType !== "mouse") return;
+      hoverEl = e.target.closest(contentTargetSelector) || e.target.closest("a, button");
+      releasedByFade = null;
+      schedule();
+    }, { passive: true });
+    document.addEventListener("pointerout", (e) => {
+      if (!e.relatedTarget) {
+        hoverEl = null;
+        schedule();
+      }
+    });
+    document.addEventListener("focusin", (e) => {
+      if (!(e.target instanceof Element)) return;
+      // The composer input claims the ray for its card; other interactive
+      // targets claim themselves.
+      const claim = e.target.matches(".talk-input")
+        ? e.target.closest(".talk-card")
+        : e.target.matches("a, button") ? e.target : null;
+      if (claim) {
+        hoverEl = null;
+        releasedByFade = null;
+        lastDirect = claim;
+        sticky = claim;
+        schedule();
+      }
+    });
+    document.addEventListener("input", (e) => {
+      if (!(e.target instanceof Element) || !e.target.matches(".talk-input")) return;
+      const card = e.target.closest(".talk-card");
+      if (!card) return;
+      hoverEl = null;
+      releasedByFade = null;
+      lastDirect = card;
+      sticky = card;
+      schedule();
+    });
+    const cur = { x: -1, x2: 0, y: scrollY + innerHeight * 0.5, h: 12 };
+    let drawn = null;
+    const SPEED = 1.15;
+    const INTRO_DELAY = 200;
+    const WASH_AT = 0.65;
+    let introStart = null, introMs = 900, washed = false;
+    let washX = null, washY = null, washH = null, washDocY = null;
+    let locked = null;
+    let settling = true;
+    let docH = 0;
+    frame = (t) => {
+      rafId = 0;
+      // The conversation is up: the marketing page is hidden, so the beam has
+      // nothing to light. App-state observation wakes us for the return trip.
+      if (document.documentElement.dataset.app) {
+        return;
+      }
+      if (effectsHidden) {
+        if (washDocY !== null) {
+          const py = Math.round(washDocY - scrollY);
+          if (py !== washY) {
+            washY = py;
+            document.documentElement.style.setProperty("--fy", py + "px");
+          }
+        }
+        return;
+      }
+      const mid = innerHeight / 2;
+      const h = document.documentElement.scrollHeight;
+      if (h !== docH) { docH = h; for (const s of svgs) s.style.height = h + "px"; }
+      let best = null, bestEl = null, bestD = Infinity;
+      for (const el of targets) {
+        const r = el.getBoundingClientRect();
+        const c = r.top + r.height / 2;
+        if (c < 0 || c > innerHeight) continue;
+        const d = c <= mid ? mid - c : (c - mid) * 4;
+        if (d < bestD) { bestD = d; best = r; bestEl = el; }
+      }
+      const hovered = hoverEl && hoverEl.isConnected ? hoverEl : null;
+      // Pointer targets claim continuously while hovered. Keyboard focus and
+      // input changes claim once in their event handlers above, so a control
+      // cannot keep pulling the ray back merely because it remains focused.
+      const candidate = hovered;
+      const direct = candidate === releasedByFade ? null : candidate;
+      if (direct) {
+        lastDirect = direct;
+      } else if (lastDirect && !lastDirect.isConnected) {
+        lastDirect = null;
+      }
+      const ovr = lastDirect;
+      let claimed = false;
+      if (ovr) {
+        const r = ovr.getBoundingClientRect();
+        best = r;
+        bestEl = ovr;
+        sticky = ovr;
+        claimed = true;
+      } else {
+        const sel = getSelection();
+        if (sel && !sel.isCollapsed && sel.rangeCount) {
+          const r = sel.getRangeAt(0).getBoundingClientRect();
+          const c = r.top + r.height / 2;
+          const sane = r.height <= innerHeight * 0.55;
+          if ((r.width || r.height) && sane && c >= 0 && c <= innerHeight) {
+            best = r; bestEl = SELECTION; sticky = SELECTION; claimed = true;
+          }
+        }
+      }
+      if (!claimed && sticky) {
+        if (sticky === SELECTION) {
+          best = null; bestEl = locked;
+        } else if (sticky.isConnected) {
+          const r = sticky.getBoundingClientRect();
+          const c = r.top + r.height / 2;
+          if (c >= 0 && c <= innerHeight) { best = r; bestEl = sticky; }
+          else sticky = null;
+        } else {
+          sticky = null;
+        }
+      }
+      if (!best && sticky !== SELECTION) {
+        const mr = mainEl.getBoundingClientRect();
+        best = { left: mr.left, right: mr.right, top: mid - 12, height: 24, bottom: mid + 12 };
+        bestEl = CENTER;
+      }
+      if (bestEl && bestEl !== locked) { locked = bestEl; settling = true; }
+      if (best) {
+        const tx = Math.max(48, best.left - 6);
+        const ty = scrollY + best.top + best.height / 2;
+        const th = Math.max(12, best.height / 2);
+        const far = best.right ?? best.left;
+        // Hand illumination off to dispersion around the target midpoint.
+        const tx2 = best.left + (far - best.left) * 0.5;
+        if (cur.x < 0) {
+          cur.x = 0; cur.x2 = 0; cur.y = ty; cur.h = th;
+          if (still.matches) { washed = true; document.documentElement.classList.add("wash-done"); }
+          else { introStart = t; introMs = Math.max(260, tx / SPEED); }
+        }
+        if (introStart !== null) {
+          const p = Math.min(1, Math.max(0, t - introStart - INTRO_DELAY) / introMs);
+          const e = p;
+          const sY = scrollY + mid;
+          cur.x = tx * e;
+          cur.x2 = tx2 * e;
+          cur.y = sY + (ty - sY) * e;
+          cur.h = th * e;
+          if (p >= WASH_AT && !washed) {
+            washed = true;
+            const root = document.documentElement;
+            const ms = Math.round((innerWidth * 1.35 - cur.x) / SPEED);
+            root.style.setProperty("--wash-from", Math.round(cur.x) + "px");
+            root.style.setProperty("--wash-ms", ms + "ms");
+            root.classList.add("wash-in");
+            setTimeout(() => root.classList.add("wash-done"), ms + 400);
+          }
+          if (p >= 1) { introStart = null; settling = false; }
+        } else if (settling && !still.matches) {
+          const k = 0.18;
+          cur.x += (tx - cur.x) * k;
+          cur.x2 += (tx2 - cur.x2) * k;
+          cur.y += (ty - cur.y) * k;
+          cur.h += (th - cur.h) * k;
+          if (Math.abs(tx - cur.x) < 0.5 && Math.abs(ty - cur.y) < 0.5 && Math.abs(th - cur.h) < 0.5) settling = false;
+        } else {
+          cur.x = tx; cur.x2 = tx2; cur.y = ty; cur.h = th;
+          settling = false;
+        }
+      }
+      const fy = Math.min(Math.max(cur.y, scrollY), scrollY + innerHeight);
+      const dark = isDark();
+      const thin = !dark && cur.h < 16;
+      const compact = innerWidth <= 775 && bestEl !== composer;
+      const shape = "spot" + (dark ? "-d" : "") + (thin ? "-t" : "") + (compact ? "-c" : "");
+      if (shape !== drawn) {
+        drawn = shape;
+        glow.setAttribute("filter",
+          dark ? compact ? "url(#ray-soft-spot-dark-compact)" : "url(#ray-soft-spot-dark)"
+               : thin ? compact ? "url(#ray-soft-spot-thin-compact)" : "url(#ray-soft-spot-thin)"
+                      : compact ? "url(#ray-soft-spot-compact)" : "url(#ray-soft-spot)");
+        core.setAttribute("filter",
+          dark ? compact ? "url(#ray-core-spot-dark-compact)" : "url(#ray-core-spot-dark)"
+               : compact ? "url(#ray-core-spot-compact)" : "url(#ray-core-spot)");
+      }
+      {
+        const sg = 26, sc = 9;
+        // Follow the focus a little more closely on mobile, where the shorter
+        // horizontal run otherwise exaggerates the angle at the left edge.
+        // Desktop retains the original halfway rule.
+        const sourceFollow = innerWidth <= 775 ? 0.6 : 0.5;
+        const viewportCenterY = scrollY + mid;
+        const sy = viewportCenterY + (fy - viewportCenterY) * sourceFollow;
+        const L = Math.max(cur.x, 1);
+        const X = Math.max(cur.x2, L + 1);
+        const half = Math.max(cur.h, 24);
+        // On mobile, continue the ray well beyond the left edge so the blur
+        // samples beam rather than transparency at the viewport boundary.
+        const sourceOverscan = innerWidth <= 775 ? 256 : 0;
+        const shapePts = (pad, src, overscan = 0) => {
+          const t2 = fy - half - pad, b = fy + half + pad;
+          const pts = [[-overscan, sy - src]];
+          if (overscan) pts.push([0, sy - src]);
+          if (t2 < sy) pts.push([L, t2]);
+          pts.push([X, t2], [X, b]);
+          if (b > sy) pts.push([L, b]);
+          if (overscan) pts.push([0, sy + src]);
+          pts.push([-overscan, sy + src]);
+          return pts;
+        };
+        const gp = shapePts(dark ? 20 : 12, sg, sourceOverscan);
+        const cp = shapePts(2, sc, sourceOverscan);
+        const visibleCp = shapePts(2, sc);
+        glow.setAttribute("points", gp.map((p) => p.join(",")).join(" "));
+        core.setAttribute("points", cp.map((p) => p.join(",")).join(" "));
+        // Keep the gradient fixed to the visible portion of the ray rather
+        // than allowing the mobile-only cap to shift its stops.
+        edgeGradient.setAttribute("x2", String(X));
+        bodyGradient.setAttribute("x2", String(X));
+        let a2 = 0;
+        for (let i = 0, n = visibleCp.length; i < n; i++) {
+          const [x1, y1] = visibleCp[i], [x2, y2] = visibleCp[(i + 1) % n];
+          a2 += x1 * y2 - x2 * y1;
+        }
+        const frac = Math.abs(a2) / 2 / (innerWidth * innerHeight);
+        // Normalize out horizontal distance: a target farther right creates a
+        // longer polygon, but should not receive a weaker beam merely because
+        // there is more length to draw. Calibrate at half the viewport so the
+        // existing midpoint appearance remains the baseline.
+        const distanceNormalizedFrac = frac * (innerWidth * 0.5 / Math.max(X, 1));
+        const f = Math.min(1, Math.max(0.3, Math.pow(0.0108 / distanceNormalizedFrac, 0.7)));
+        glow.setAttribute("fill-opacity", f.toFixed(3));
+        core.setAttribute("fill-opacity", f.toFixed(3));
+        const px = Math.round(L + (X - L) * 0.25), py = Math.round(fy - scrollY);
+        const ph = Math.round(half);
+        washDocY = fy;
+        if (px !== washX || py !== washY || ph !== washH) {
+          washX = px; washY = py; washH = ph;
+          const s = document.documentElement.style;
+          s.setProperty("--fx", px + "px");
+          s.setProperty("--fy", py + "px");
+          s.setProperty("--fh", ph + "px");
+          // Past the midpoint the wash has less room to fan out. Preserve its
+          // color strength, but widen the angular feather so the compressed
+          // wedge still dissolves gently at its boundaries.
+          const focusFrac = X / innerWidth;
+          const pastMid = Math.max(0, Math.min(1, (focusFrac - 0.5) / 0.5));
+          s.setProperty("--wedge-feather", (30 + pastMid * 24).toFixed(1) + "deg");
+        }
+        if (introStart !== null || settling) schedule();
+      }
+    };
+    addEventListener("resize", schedule, { passive: true });
+    document.addEventListener("selectionchange", schedule);
+    sysDarkMq.addEventListener("change", schedule);
+    new ResizeObserver(schedule).observe(mainEl);
+    new MutationObserver(schedule).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-app", "data-theme"],
+    });
+    schedule();
+  }
+
+  // Theme toggle. A click flips between light and dark from whatever is
+  // currently in effect; the choice persists.
+  {
+    const btn = document.querySelector(".theme");
+    const sysDark = matchMedia("(prefers-color-scheme: dark)");
+    const effective = () => document.documentElement.dataset.theme || (sysDark.matches ? "dark" : "light");
+    const paint = () => {
+      btn.dataset.mode = effective();
+      btn.setAttribute("aria-label", "Theme: " + effective());
+    };
+    btn.addEventListener("click", () => {
+      const next = effective() === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem("theme", next); } catch {}
+      paint();
+    });
+    sysDark.addEventListener("change", paint);
+    paint();
+  }
+
+  // Copy buttons.
+  for (const el of document.querySelectorAll("[data-copy]")) {
+    el.addEventListener("click", async () => {
+      try {
+        const text = el.querySelector("code").textContent;
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const input = document.createElement("textarea");
+          input.value = text;
+          input.setAttribute("readonly", "");
+          input.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+          document.body.append(input);
+          input.select();
+          const copied = document.execCommand("copy");
+          input.remove();
+          if (!copied) throw new Error("Copy failed");
+        }
+        el.setAttribute("data-copied", "");
+        setTimeout(() => el.removeAttribute("data-copied"), 3000);
+      } catch {}
+    });
+  }
+</script>
+<script type="module" src="/src/boot.ts"></script>
+</body>
+</html>

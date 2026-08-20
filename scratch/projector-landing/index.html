@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>projector — the framework for evolutionary agents</title>
+<meta name="description" content="An agent framework for state-complete agents. One shared model of the world, backed by a durable frame log, rendered through projections — every actor sees the slice meant for them.">
+<link rel="stylesheet" href="./style.css">
+<meta name="color-scheme" content="light dark">
+<script>
+  // Applied before first paint so the theme never flashes. No stored choice
+  // means follow the system.
+  try {
+    var t = localStorage.getItem("theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+  // Variant, also before first paint — see variants.js. The URL decides; a
+  // bare address is always the blessed design. Scratch tooling.
+  try {
+    var q = new URLSearchParams(location.search).get("variant");
+    document.documentElement.dataset.variant = q || "f";
+  } catch (e) {
+    document.documentElement.dataset.variant = "f";
+  }
+</script>
+</head>
+<body>
+
+<!-- The wash: the spectrum, dispersed. The wrapper carries the load-in sweep,
+     the inner element the shaping masks — see the .wash rules in style.css. -->
+<div class="wash" aria-hidden="true"><i></i></div>
+
+<!-- The ray: a wedge of white light from the middle of the left edge, focused
+     to a narrow band on the current reading target (headline, CTAs, section
+     labels). Two polygons share the geometry: a wide soft glow and a tighter
+     core inside it, so the light has a hot centre the way a real beam does.
+     Points are set per-frame by the tracker script at the end of the body. -->
+<svg class="light" aria-hidden="true" focusable="false">
+  <defs>
+    <!-- Brightens toward the focus: a converging beam concentrates its energy. -->
+    <!-- Nearly even along the beam: real presence right at the screen edge,
+         only a gentle intensifying into the focus. The subtlety lives in the
+         layer opacities, not in fading the beam away. Colours come from CSS
+         vars (style= because var() doesn't resolve in presentation
+         attributes): in light mode the glow polygon takes --ray-edge (a warm
+         dark boundary) and the core takes --ray-body (pure white) — the
+         white shaft outlined in shade is what stays visible on paper. On
+         black both vars are white and the pair collapses back into one beam
+         of light. -->
+    <linearGradient id="ray-grad-edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" style="stop-color: var(--ray-edge)" stop-opacity="0.34"/>
+      <stop offset="0.5" style="stop-color: var(--ray-edge)" stop-opacity="0.44"/>
+      <stop offset="1" style="stop-color: var(--ray-edge)" stop-opacity="0.62"/>
+    </linearGradient>
+    <linearGradient id="ray-grad-body" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" style="stop-color: var(--ray-body)" stop-opacity="0.34"/>
+      <stop offset="0.5" style="stop-color: var(--ray-body)" stop-opacity="0.44"/>
+      <stop offset="1" style="stop-color: var(--ray-body)" stop-opacity="0.62"/>
+    </linearGradient>
+    <filter id="ray-soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+    <filter id="ray-core" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <!-- Horizontal-mode blurs. A blur is a fixed physical size, and the level
+         shaft is ~72px tall against the wide wedge's ~450px aperture — the
+         same kernel that softens the big wedge's edges flattens the whole
+         shaft's peak alpha. Tighter kernels (plus the opacity boost in CSS)
+         bring the narrow beam back to the same visual strength. -->
+    <filter id="ray-soft-h" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <filter id="ray-core-h" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="4.5"/>
+    </filter>
+    <!-- Spotlight blurs. This shape lands *on* live text, so it has to be far
+         softer than either beam mode — big kernels are what turn the cone
+         into a diffuse pool rather than a lit polygon. -->
+    <!-- Light mode only (dark has its own pair below). The dark boundary has
+         to stay tighter than the white body it edges — at 44/30 their soft
+         edges read as separate bands, a beam diffracted into several shafts.
+         Tighter again at 22/14 because the shaft aimed at the lens is only
+         ~18px thick: a kernel that size doesn't soften such a shape, it
+         averages the whole thing away. -->
+    <filter id="ray-soft-spot" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <filter id="ray-core-spot" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <!-- Dark mode keeps the original, wider pair. The tightening above was to
+         stop a dark rim reading as separate bands on paper; on black there is
+         no rim, so the wide soft falloff is simply what the beam looked like
+         and there is nothing to fix. -->
+    <!-- Light mode, thin beams. A blur spreads a shape by roughly a fixed
+         distance, so on a shaft only ~10px thick the same 22 that reads as
+         soft diffusion around a card reads as a hard-edged shadow hugging it:
+         there is not enough shape for the falloff to develop across. Widening
+         the kernel for those cases restores the diffusion without touching
+         the rim's weight or size. -->
+    <filter id="ray-soft-spot-thin" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <filter id="ray-soft-spot-dark" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="44"/>
+    </filter>
+    <filter id="ray-core-spot-dark" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <!-- Narrow layouts run the spotlight level and stop it in the gutter, so
+         the shape is a fraction of the size these kernels were sized for; at
+         44/30 the blur ate most of its peak alpha and smeared it over the
+         text it was supposed to stay clear of. -->
+    <filter id="ray-soft-spot-h" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="15"/>
+    </filter>
+    <filter id="ray-core-spot-h" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+  </defs>
+  <polygon class="l-glow" fill="url(#ray-grad-edge)" filter="url(#ray-soft)" points="0,0 0,0 0,0 0,0"/>
+</svg>
+
+<!-- The body rides its own layer so it can blend additively against the page.
+     Inside one SVG it would only ever have blended with the rim beside it —
+     a blend mode sees the backdrop of its own stacking context, and the SVG
+     root is one. Defs live in the layer above; url(#id) crosses fragments
+     fine within a document. -->
+<svg class="light light-body" aria-hidden="true" focusable="false">
+  <polygon class="l-core" fill="url(#ray-grad-body)" filter="url(#ray-core)" points="0,0 0,0 0,0 0,0"/>
+</svg>
+
+<!-- Wobbles the ink of the caret and the handwritten note, same trick as the
+     sidecar site: position-varying displacement keeps repeated letters from
+     reading as a typeface. -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="ink" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.045 0.09" numOctaves="3" seed="7" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <filter id="ink-rough" x="-35%" y="-35%" width="170%" height="170%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.19 0.26" numOctaves="3" seed="11" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="0.9" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="./">projector</a>
+    <nav class="nav-links">
+      <a href="#why">Why</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/markov-machines/markov-machines">GitHub</a>
+      <!-- Fixed-size box, straight from sidecar: the ink drop slides right on
+           hover to uncover the icon for the current theme, so the control
+           never changes the space it takes. Light and dark only, for now. -->
+      <button class="theme" type="button" data-mode="light" aria-label="Theme: light">
+        <svg class="i-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 .9v1.8M8 13.3v1.8M15.1 8h-1.8M2.7 8H.9M13 3l-1.3 1.3M4.3 11.7 3 13M13 13l-1.3-1.3M4.3 4.3 3 3"/></svg>
+        <svg class="i-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.6A6 6 0 1 1 6.4 2.5a4.8 4.8 0 0 0 7.1 7.1Z"/></svg>
+        <svg class="i-drop" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6c2.7 3 4.4 5.2 4.4 7.1a4.4 4.4 0 0 1-8.8 0c0-1.9 1.7-4.1 4.4-7.1Z"/></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <!-- The mark: a lamp and its beam. Mono-weight line art so it follows --ink
+       into dark mode, like sidecar's masked logo. -->
+  <span class="hero-mark">
+    <svg viewBox="0 0 96 56" role="img" aria-label="projector">
+      <rect x="4" y="17" width="26" height="22" rx="4"/>
+      <circle cx="30" cy="28" r="8"/>
+      <path class="ray r1" d="M39 24 88 8"/>
+      <path class="ray r2" d="M40 28 92 28"/>
+      <path class="ray r3" d="M39 32 88 48"/>
+    </svg>
+  </span>
+
+  <h1>the framework for evolutionary agents</h1>
+
+  <!-- The hero diagram: where sidecar drew nesting (a tree), projector draws
+       projection — one source, a fan of beams, one view per actor. -->
+  <div class="fan" role="img" aria-label="one shared state projected to the user, the agent, and replay — each sees their own slice">
+    <div class="fan-src">
+      <b>state</b>
+      <span># one machine</span>
+    </div>
+    <svg class="fan-beams" viewBox="0 0 240 144" aria-hidden="true">
+      <path class="wedge w1" d="M16 72 L238 8 L238 36 Z"/>
+      <path class="wedge w2" d="M16 72 L238 58 L238 86 Z"/>
+      <path class="wedge w3" d="M16 72 L238 108 L238 136 Z"/>
+      <path class="beam b1" pathLength="1" d="M16 71 238 22"/>
+      <path class="beam b2" pathLength="1" d="M16 72 238 72"/>
+      <path class="beam b3" pathLength="1" d="M16 73 238 122"/>
+      <circle class="lens" cx="11" cy="72" r="4.5"/>
+    </svg>
+    <div class="fan-out">
+      <p><b>user</b><span># sees the app</span></p>
+      <p><b>agent</b><span># sees tools + instructions</span></p>
+      <p><b>replay</b><span># sees any frame, again</span></p>
+    </div>
+  </div>
+  <p class="fan-cap">one shared state — <u class="u1">durable<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1.5 3.1C14 4.6 28 5.1 44 4.3 58 3.6 76 4.9 101 3.5"/><path class="p2" pathLength="1" d="M3.5 4.9C18 6.5 33 6 47 5.3 61 4.3 79 6.4 96 5.2"/></svg></u>, <u class="u2">replayable<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1 4.7C16 3.1 38 2.8 58 3.6 76 4.3 88 4 100.5 4.8"/><path class="p2" pathLength="1" d="M2.5 6.4C18 4.8 36 3.9 57 5.2 74 6.1 90 5.1 102.5 6.5"/></svg></u>, <u class="u3">typesafe<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M0.5 2.8C18 4.5 30 5.3 47 4.6 63 4 78 5.4 100.8 4.9"/><path class="p2" pathLength="1" d="M-2 4.4C16 6.3 33 6.7 49 5.5 65 4.7 81 6.8 97 6.2"/></svg></u>, <u class="u4">multiplayer<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1 5C12 3.3 26 2.9 41 3.7 55 4.4 70 3 84 3.4 92 3.7 96 2.8 101 3.1"/><path class="p2" pathLength="1" d="M2 6.5C14 4.8 29 4.4 44 5.5 58 6.2 72 4.5 87 5 95 5.4 99 4.3 103.5 4.7"/></svg></u></p>
+
+  <div class="steps">
+    <button class="step" type="button" data-copy>
+      <span class="step-body">
+        <span class="step-label">Install</span>
+        <code>npm i @projectors/core</code>
+      </span>
+      <span class="step-act">
+        <span class="vh">Copy</span>
+        <svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+        <svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+      </span>
+    </button>
+
+    <button class="step" type="button" data-copy>
+      <span class="step-body">
+        <span class="step-label">Define</span>
+        <code>const agent = machine({ state, actors })</code>
+      </span>
+      <span class="step-act">
+        <span class="vh">Copy</span>
+        <svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+        <svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+      </span>
+    </button>
+
+    <a class="step" href="https://github.com/markov-machines/markov-machines">
+      <span class="step-body">
+        <span class="step-label">GitHub</span>
+        <code>Star on GitHub</code>
+      </span>
+      <span class="step-act step-stars">
+        <svg class="i-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.9 6 6.5.9-4.7 4.6 1.1 6.5L12 17.9 6.2 21l1.1-6.5L2.6 9.9 9.1 9z"/></svg>
+        <span class="count">1</span>
+        <span class="vh">stars</span>
+      </span>
+    </a>
+  </div>
+
+  <p class="req">Pre-release. TypeScript, runs on Bun and Node.</p>
+</section>
+
+<section class="features">
+  <p class="label">The shape</p>
+  <div class="grid">
+    <article class="feature">
+      <span class="num">01</span>
+      <h3>State complete</h3>
+      <p>The agent is its state. Everything needed to run, resume, or reason about it is recoverable application state — no hidden context in a transcript.</p>
+    </article>
+    <article class="feature">
+      <span class="num">02</span>
+      <h3>Durable frame log</h3>
+      <p>Every meaningful transition is a frame. Replay the log and you're back exactly where you were — inspect it, audit it, time-travel it.</p>
+    </article>
+    <article class="feature">
+      <span class="num">03</span>
+      <h3>Projections</h3>
+      <p>Each actor sees the slice of state, tools, and instructions meant for them. Same world, different views — that's the whole trick.</p>
+    </article>
+    <article class="feature">
+      <span class="num">04</span>
+      <h3>Client/server unified</h3>
+      <p>Client and server are typesafe representations of the same machine. No parallel schemas quietly drifting apart.</p>
+    </article>
+  </div>
+</section>
+
+<section id="why" class="why">
+  <p class="label">Why</p>
+  <p>
+    Most agent frameworks are built around a message list: the transcript is
+    the source of truth and everything else hangs off it. That holds up until
+    the agent needs to be resumed, inspected, shared with a second actor, or
+    rendered as a real app.
+  </p>
+  <p>
+    projector inverts it. Agents are multiplayer apps — the user and the LLM
+    are just the first two actors. They share <em>one model of the world</em>,
+    backed by a durable frame log, and each sees it through their own
+    projection. All you need is state.
+  </p>
+</section>
+
+<section class="box">
+  <div class="box-head"><span>terminal</span><span>projector replay</span></div>
+<pre><code><span class="p">$</span> projector replay --tail
+<span class="l">0041</span>  <span class="m">user.message</span>   "add oat milk to the list"
+<span class="l">0042</span>  <span class="b">state.todos</span>    +{ title: "oat milk" }
+<span class="l">0043</span>  <span class="m">agent.tool</span>     grocery.search("oat milk")
+<span class="l">0044</span>  <span class="m">agent.say</span>      "added — want the barista kind?"
+<span class="q">      replayed 44/44 frames ·</span> <span class="g">state identical ✓</span></code></pre>
+</section>
+
+<section id="docs" class="docs">
+  <p class="label">Docs</p>
+  <ul>
+    <li><a href="https://github.com/markov-machines/markov-machines">How projections work</a><span>state slices, tools, and instructions per actor</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">The frame log</a><span>durability, replay, and time travel</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">Actors &amp; executors</a><span>users, models, and everything after</span></li>
+    <li><a href="https://github.com/markov-machines/markov-machines">Client &amp; server</a><span>one machine, typesafe on both sides</span></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>MIT</span>
+    <span>pre-release</span>
+    <a href="https://www.npmjs.com/package/@projectors/core">@projectors/core</a>
+    <a class="end" href="https://github.com/markov-machines/markov-machines">markov-machines</a>
+  </div>
+</footer>
+
+<script>
+  // The light tracker. Every frame: pick the focus target — the candidate
+  // whose centre sits above the viewport midline, nearest to it (candidates
+  // still below the midline only count when nothing is above, weighted so the
+  // beam reaches down rather than going dark). The beam only *animates* on a
+  // retarget; otherwise it is scroll-locked for real: the SVG is document-
+  // anchored and the focus band is written in document coordinates, so while
+  // the target is unchanged the band moves with the content on the compositor
+  // thread — a dropped main-thread frame can't make it trail. The source
+  // aperture is the one viewport-anchored piece, re-aimed each frame; its
+  // frame of lag hides inside the glow's blur.
+  {
+    // Two layers now — rim and body — kept in lockstep: same classes, same
+    // document height, same geometry. See the .light-body note in the markup.
+    const svgs = [...document.querySelectorAll(".light")];
+    const glow = document.querySelector(".l-glow");
+    const core = document.querySelector(".l-core");
+    // Not the headline: the beam lands on the fan diagram's lens, so the
+    // page's ray feeds the projector that fans out to the actors. The lens is
+    // also the one target exempt from the minimum-height floors — see `exact`
+    // below.
+    const lensEl = document.querySelector(".fan-beams .lens");
+    const targets = [
+      lensEl,
+      ...document.querySelectorAll(".steps .step"),
+      ...document.querySelectorAll(".features .feature"),
+      ...document.querySelectorAll(".why > p:not(.label)"),
+      document.querySelector(".box"),
+      ...document.querySelectorAll(".docs li"),
+    ].filter(Boolean);
+    const mainEl = document.querySelector("main");
+    // Where the text column actually starts. Cached: it only changes with the
+    // root font size, and narrow mode stops the light here.
+    const mainPad = parseFloat(getComputedStyle(mainEl).paddingLeft) || 0;
+    const still = matchMedia("(prefers-reduced-motion: reduce)");
+    // Which theme is actually in effect. The beam's *shape* differs by theme,
+    // not just its colour: light mode draws a dark rim that has to stay tight,
+    // dark mode has no rim and keeps the original wide falloff.
+    const sysDarkMq = matchMedia("(prefers-color-scheme: dark)");
+    const isDark = () => {
+      const t = document.documentElement.dataset.theme;
+      return t === "dark" || (!t && sysDarkMq.matches);
+    };
+    // Interaction outranks reading order: a hovered or keyboard-focused
+    // control is where attention actually is, so the beam goes there first.
+    // Mouse hover only — pointerType filters touch, so an iPad stays purely
+    // scroll-targeted.
+    const SELECTION = {};   // lock identity for text selections (no element to point at)
+    const CENTER = {};      // lock identity for the no-target resting spot
+    const contentTargetSelector = ".features .feature, .why > p:not(.label), .box, .docs li";
+    let hoverEl = null;
+    // An interaction target outlives the interaction: falling off a hover or
+    // blurring a control leaves the beam where it was. Only scrolling hands
+    // control back to reading order.
+    let sticky = null;
+    addEventListener("scroll", () => { sticky = null; }, { passive: true });
+    document.addEventListener("pointermove", (e) => {
+      if (e.pointerType && e.pointerType !== "mouse") return;
+      // The whole centre diagram represents the projection, but the physical
+      // thing receiving the page's light is its prism/lens aperture.
+      if (e.target.closest(".fan")) hoverEl = lensEl;
+      // Resolve content blocks before their interactive descendants. In the
+      // docs this makes the full padded row the light target, even while the
+      // pointer is directly over the text link inside it.
+      else hoverEl = e.target.closest(contentTargetSelector) || e.target.closest("a, button");
+    }, { passive: true });
+    document.addEventListener("pointerout", (e) => {
+      if (!e.relatedTarget) hoverEl = null;   // pointer left the window
+    });
+    // All in document coordinates. The focus is the vertical centre of the
+    // target's left edge. h is the target's half-height, tracked alongside
+    // position so horizontal mode can size the band to the element.
+    // x starts unset (-1). On the first frame the beam is collapsed against
+    // the left edge at its target's height, so the load-in is the light
+    // switching on and reaching across the page — the settle glide does the
+    // travelling, and the wash (which hangs off the same coordinates) sweeps
+    // in with it.
+    // x2 is the element's right edge — only the spotlight variant uses it, to
+    // spread the cone across the whole element instead of stopping at its
+    // near side.
+    const cur = { x: -1, x2: 0, y: scrollY + innerHeight * 0.5, h: 12 };
+    let drawn = null;   // which shape/filter set is currently applied
+    // The load-in is a timed tween, not the retarget lerp: an exponential
+    // ease covers 80% of the reach in ~160ms, which is over before the eye
+    // catches it. This runs on a clock so the sweep is actually watchable.
+    // One speed, in px/ms, for every wavefront on the page: the beam reaching
+    // out and the wash sweeping after it are the same light travelling, so
+    // their durations are derived from the distance each has to cover rather
+    // than being set independently.
+    const SPEED = 1.15;
+    const INTRO_DELAY = 200;   // a beat of stillness before the light arrives
+    // The wash starts before the beam lands, so the two motions overlap
+    // rather than running back to back.
+    const WASH_AT = 0.65;
+    let introStart = null, introMs = 900, washed = false;
+    let washX = null, washY = null, washH = null;   // last wash origin written to CSS
+    let locked = null;      // the element the beam is welded to
+    let settling = true;    // gliding toward a new target (true at load: fade-in glide)
+    let docH = 0;
+    const frame = (t) => {
+      const mid = innerHeight / 2;
+      const h = document.documentElement.scrollHeight;
+      if (h !== docH) { docH = h; for (const s of svgs) s.style.height = h + "px"; }
+      // Only on-screen candidates are eligible: a beam aimed at something the
+      // reader can't see is always wrong, and (because the pin-to-edge clamp
+      // below runs a frame behind the compositor) visibly wrong during a fast
+      // scroll. If nothing qualifies — a gap between sections on a short
+      // viewport — the beam keeps its current target and the clamp holds it
+      // at the page edge until something scrolls in.
+      let best = null, bestEl = null, bestD = Infinity;
+      for (const el of targets) {
+        const r = el.getBoundingClientRect();
+        const c = r.top + r.height / 2;
+        if (c < 0 || c > innerHeight) continue;
+        const d = c <= mid ? mid - c : (c - mid) * 4;
+        if (d < bestD) { bestD = d; best = r; bestEl = el; }
+      }
+      // Interaction override: hover first (immediate pointer intent), then
+      // keyboard focus, then selected text — reading-order default only when
+      // none apply. All still subject to the visibility rule. A selection has
+      // no element, so SELECTION stands in as its lock identity; its rect is
+      // re-read every frame, which makes the beam track a drag live.
+      let ovr = hoverEl && hoverEl.isConnected ? hoverEl : null;
+      if (!ovr) {
+        const ae = document.activeElement;
+        if (ae && ae !== document.body && ae.matches && ae.matches("a, button")) ovr = ae;
+      }
+      let claimed = false;
+      if (ovr) {
+        const r = ovr.getBoundingClientRect();
+        const c = r.top + r.height / 2;
+        if (c >= 0 && c <= innerHeight) { best = r; bestEl = ovr; sticky = ovr; claimed = true; }
+      } else {
+        const sel = getSelection();
+        if (sel && !sel.isCollapsed && sel.rangeCount) {
+          const r = sel.getRangeAt(0).getBoundingClientRect();
+          const c = r.top + r.height / 2;
+          // A selection past ~half the viewport stops being a thing the light
+          // can point at — select-all makes the target the page itself, the
+          // origin lands at the middle of the screen, and the wash reads as
+          // radiating from nowhere in particular. Better to decline the
+          // target and let the beam hold its previous one.
+          const sane = r.height <= innerHeight * 0.55;
+          if ((r.width || r.height) && sane && c >= 0 && c <= innerHeight) {
+            best = r; bestEl = SELECTION; sticky = SELECTION; claimed = true;
+          }
+        }
+      }
+      // No live interaction, but a sticky one from before: hold it. A sticky
+      // element keeps being tracked; a vanished selection can't be, so the
+      // beam simply freezes where the selection was. Scroll clears both.
+      if (!claimed && sticky) {
+        if (sticky === SELECTION) {
+          best = null; bestEl = locked;   // hold position, touch nothing
+        } else if (sticky.isConnected) {
+          const r = sticky.getBoundingClientRect();
+          const c = r.top + r.height / 2;
+          if (c >= 0 && c <= innerHeight) { best = r; bestEl = sticky; }
+          else sticky = null;
+        } else {
+          sticky = null;
+        }
+      }
+      // Nothing to point at — no interaction, no sticky hold, no candidate in
+      // view (the stretch between the CTAs and the terminal, mostly): rest at
+      // the default spot, viewport centre at the content column's left edge.
+      // Viewport-anchored, so it rides scroll a frame behind like the clamp;
+      // fine for a resting state.
+      if (!best && sticky !== SELECTION) {
+        const ml = mainEl.getBoundingClientRect().left + 51;
+        best = { left: ml, top: mid - 12, height: 24, bottom: mid + 12 };
+        bestEl = CENTER;
+      }
+      if (bestEl && bestEl !== locked) { locked = bestEl; settling = true; }
+      // The lens is a ~10px dot and the whole point of aiming at it is that
+      // the beam pinches down to the aperture the diagram's own fan comes
+      // out of. Every other target keeps the floors that stop the light
+      // becoming a slit.
+      const exact = locked === lensEl;
+      if (best) {
+        const tx = Math.max(48, best.left - 6);
+        const ty = scrollY + best.top + best.height / 2;
+        const th = exact ? best.height / 2 : Math.max(12, best.height / 2);
+        // Let the white pool enter ordinary targets only halfway, leaving the
+        // far half to the spectrum wash instead of stacking both effects over
+        // the full block. The diagram lens remains a true aperture and is lit
+        // through its far edge.
+        const far = best.right ?? best.left;
+        const tx2 = exact ? far + 16 : best.left + (far - best.left) * 0.5;
+        // First frame: collapse at the left edge, already at the target's
+        // height and depth, so the only motion is the reach outward.
+        if (cur.x < 0) {
+          cur.x = 0; cur.x2 = 0; cur.y = ty; cur.h = th;
+          // Reduced motion gets no intro, so the wash can't wait on one.
+          if (still.matches) { washed = true; document.documentElement.classList.add("wash-done"); }
+          else { introStart = t; introMs = Math.max(260, tx / SPEED); }
+        }
+        if (introStart !== null) {
+          // Reach out from the source along the *final* direction: the tip's
+          // y is interpolated from the aperture to the target as well as its
+          // x, and the pool's height scales with it. That makes the intro a
+          // scaling of the finished shape, so the beam is already at its
+          // angle on the first frame and only grows — interpolating x alone
+          // starts it near-vertical and swings it down into place.
+          //
+          // Linear, deliberately: light does not decelerate into place. The
+          // easing belongs to retargets, where the *lamp* is what's moving.
+          const p = Math.min(1, Math.max(0, t - introStart - INTRO_DELAY) / introMs);
+          const e = p;
+          const sY = innerWidth < 1150 ? ty : scrollY + mid;
+          cur.x = tx * e;
+          cur.x2 = tx2 * e;
+          cur.y = sY + (ty - sY) * e;
+          cur.h = th * e;
+          // Hand the wash its starting point — the beam's own tip — so the
+          // wipe begins where the colour does instead of crossing dead page.
+          if (p >= WASH_AT && !washed) {
+            washed = true;
+            const root = document.documentElement;
+            // The sweep runs at the beam's speed: its duration is the ground
+            // it has to cover — from the beam's tip to past the right edge —
+            // divided by SPEED, so the front never changes pace as it hands
+            // off from beam to wash.
+            const ms = Math.round((innerWidth * 1.35 - cur.x) / SPEED);
+            root.style.setProperty("--wash-from", Math.round(cur.x) + "px");
+            root.style.setProperty("--wash-ms", ms + "ms");
+            root.classList.add("wash-in");
+            // Backstop: if the animations never run (no @property support, a
+            // dropped animation), the wash stays masked away and transparent
+            // for good. Pin the finished state once they should have ended;
+            // a no-op when they did run, since it's the same end state.
+            setTimeout(() => root.classList.add("wash-done"), ms + 400);
+          }
+          if (p >= 1) { introStart = null; settling = false; }
+        } else if (settling && !still.matches) {
+          const k = 0.18;
+          cur.x += (tx - cur.x) * k;
+          cur.x2 += (tx2 - cur.x2) * k;
+          cur.y += (ty - cur.y) * k;
+          cur.h += (th - cur.h) * k;
+          if (Math.abs(tx - cur.x) < 0.5 && Math.abs(ty - cur.y) < 0.5 && Math.abs(th - cur.h) < 0.5) settling = false;
+        } else {
+          cur.x = tx; cur.x2 = tx2; cur.y = ty; cur.h = th;   // locked: constant in doc space until retarget
+          settling = false;
+        }
+      }
+      // The wedges converge to a blunt tip rather than a true point — a beam
+      // ends in a spot, not a needle. The tip is clamped to the viewport at
+      // draw time only: a fast scroll can carry the beam off-screen (target
+      // gap on a short viewport), and pinning to the page edge until the next
+      // retarget beats aiming somewhere the reader can't see. cur itself
+      // stays unclamped, so the lock's doc-space geometry is untouched
+      // whenever the target is visible.
+      const tip = 7.5;
+      const fy = Math.min(Math.max(cur.y, scrollY), scrollY + innerHeight);
+      const horiz = innerWidth < 1150;
+      // Spotlight variant: the optics run the other way — a narrow source
+      // opening out to wash over the whole target rather than a wide source
+      // converging on its near edge.
+      const variant = document.documentElement.dataset.variant || "";
+      const spot = variant[0] === "f";
+      // Each shape gets its own blur kernels and CSS opacity hooks; swap only
+      // when the shape actually changes.
+      const dark = isDark();
+      // A thin beam needs a wider rim blur to read as diffuse rather than as
+      // a hard shadow — the shaft aimed at the lens is the case that matters.
+      const thin = !dark && spot && !horiz && cur.h < 16;
+      const shape = (spot ? "spot" : "beam") + (horiz ? "-h" : "") + (dark ? "-d" : "") + (thin ? "-t" : "");
+      if (shape !== drawn) {
+        drawn = shape;
+        for (const s of svgs) {
+          s.classList.toggle("horiz", horiz);
+          s.classList.toggle("spot", spot);
+        }
+        glow.setAttribute("filter",
+          spot ? (horiz ? "url(#ray-soft-spot-h)"
+                        : dark ? "url(#ray-soft-spot-dark)"
+                        : thin ? "url(#ray-soft-spot-thin)" : "url(#ray-soft-spot)")
+               : (horiz ? "url(#ray-soft-h)" : "url(#ray-soft)"));
+        core.setAttribute("filter",
+          spot ? (horiz ? "url(#ray-core-spot-h)" : dark ? "url(#ray-core-spot-dark)" : "url(#ray-core-spot)")
+               : (horiz ? "url(#ray-core-h)" : "url(#ray-core)"));
+        if (!spot) {   // only the spotlight normalises its fill by target size
+          glow.removeAttribute("fill-opacity");
+          core.removeAttribute("fill-opacity");
+        }
+      }
+      if (spot) {
+        // A hexagon, not a cone: the light tapers from the narrow source out
+        // to the element's *near* edge, then runs parallel across the element
+        // to its far edge. Extending the taper past the box (a true tangent
+        // fan) throws light above and below it — the beam has to stop where
+        // its target does, and let the blur do the spilling.
+        const sg = 26, sc = 9;
+        const sy = horiz ? fy : scrollY + mid;
+        // Wide layouts wash the pool across the whole element. Narrow ones
+        // stop at the *layout's* left boundary — not the target's, which is
+        // wherever that element happens to sit and would send the band across
+        // the text for anything but a full-width one. Ending at the column
+        // edge makes it a marker in the gutter: the light still says which
+        // element by its height and position, and never crosses content.
+        // Clamping rather than replacing keeps the load-in reach animating,
+        // since cur.x is still sweeping out from zero underneath it.
+        // The lens is the exception: it sits in open space inside the diagram
+        // with nothing to cross, and the beam actually reaching the aperture
+        // the fan comes out of is the one moment worth projecting into the
+        // page for. Every other narrow-mode target stays in the gutter.
+        let L, X;
+        if (horiz && !exact) {
+          const edge = mainEl.getBoundingClientRect().left + mainPad - 6;
+          X = Math.max(Math.min(edge, cur.x), 2);
+          L = Math.max(X - 4, 1);
+        } else {
+          L = Math.max(cur.x, 1);
+          X = Math.max(cur.x2, L + 1);
+        }
+        const half = exact ? cur.h : Math.max(cur.h, 24);   // see `exact`
+        // Each boundary follows the corner that is angularly extreme from the
+        // source, then rides the element's silhouette to its far edge. For a
+        // box above the source that means the top edge hugs the near-top
+        // corner and runs flat across the top, while the bottom edge is one
+        // straight line to the *far*-bottom corner — the beam widens all the
+        // way across the element instead of stopping at its near side.
+        // Mirrored for a box below; a box straddling the source hugs both
+        // near corners.
+        const shape = (pad, src) => {
+          const t = fy - half - pad, b = fy + half + pad;
+          const pts = [[0, sy - src]];
+          if (t < sy) pts.push([L, t]);
+          pts.push([X, t], [X, b]);
+          if (b > sy) pts.push([L, b]);
+          pts.push([0, sy + src]);
+          return pts;
+        };
+        // The rim keeps its size and weight — what a thin beam needs is more
+        // diffusion, not less shadow (see the -thin filters).
+        const gp = shape(dark ? 20 : 12, sg), cp = shape(2, sc);
+        glow.setAttribute("points", gp.map((p) => p.join(",")).join(" "));
+        core.setAttribute("points", cp.map((p) => p.join(",")).join(" "));
+        // Fill scales with the lit area (shoelace over the drawn polygon, as
+        // a fraction of the viewport so it doesn't drift between a laptop and
+        // a big display). The 0.7 power is tuned on the small end, where the
+        // lens and the CTA cards sit; the floor then stops the compensation
+        // once the pool is roughly card-sized, because past that point
+        // dimming further stops reading as "same brightness, more area" and
+        // starts reading as the light going out. A tall text selection is
+        // therefore lit like a card rather than fading toward nothing.
+        let a2 = 0;
+        for (let i = 0, n = cp.length; i < n; i++) {
+          const [x1, y1] = cp[i], [x2, y2] = cp[(i + 1) % n];
+          a2 += x1 * y2 - x2 * y1;
+        }
+        const frac = Math.abs(a2) / 2 / (innerWidth * innerHeight);
+        const f = Math.min(1, Math.max(0.3, Math.pow(0.0108 / frac, 0.7)));
+        glow.setAttribute("fill-opacity", f.toFixed(3));
+        core.setAttribute("fill-opacity", f.toFixed(3));
+        // The f variants hang the wash's dispersion off the lit element,
+        // anchored at its geometric centre. Anchoring on the far edge instead
+        // looked wrong on anything large — a multi-line text selection threw
+        // its colour from a point floating off its right side rather than
+        // from the body of what was lit. Viewport coords (the wash is a fixed
+        // layer), written only when they actually move, since this restyles a
+        // full-screen masked layer.
+        if (spot) {
+          // A quarter in from the near edge rather than dead centre: anchored
+          // at the centre, the wash's opening cleared the right half of the
+          // pool and only reached strength past it, leaving a dim band
+          // between where the ray ends and where the colour starts. Sitting
+          // further left the two overlap. Target-relative, so it scales with
+          // whatever is lit instead of needing a different constant per size.
+          const px = Math.round(L + (X - L) * 0.25), py = Math.round(fy - scrollY);
+          const ph = Math.round(half);
+          if (px !== washX || py !== washY || ph !== washH) {
+            washX = px; washY = py; washH = ph;
+            const s = document.documentElement.style;
+            s.setProperty("--fx", px + "px");
+            s.setProperty("--fy", py + "px");
+            s.setProperty("--fh", ph + "px");
+          }
+        }
+        requestAnimationFrame(frame);
+        return;
+      }
+      if (horiz) {
+        // Narrow: the gutter is too short for an angled wedge to read, so the
+        // beam unanchors from the viewport's vertical centre and levels out.
+        // No focusing here at all — a purely horizontal band of light, sized
+        // to the element: the core matches its height, the glow halos past
+        // it. Both ends live in document space, so this mode is entirely
+        // scroll-locked; retargets glide and resize the band together.
+        glow.setAttribute("points",
+          `0,${fy - cur.h - 18} ${cur.x},${fy - cur.h - 18} ${cur.x},${fy + cur.h + 18} 0,${fy + cur.h + 18}`);
+        core.setAttribute("points",
+          `0,${fy - cur.h} ${cur.x},${fy - cur.h} ${cur.x},${fy + cur.h} 0,${fy + cur.h}`);
+      } else {
+        // Wide: source aperture at the middle of the *viewport's* left edge,
+        // so its document position follows scroll.
+        const sy = scrollY + mid;
+        glow.setAttribute("points",
+          `0,${sy - innerHeight * 0.21} ${cur.x},${fy - tip} ${cur.x},${fy + tip} 0,${sy + innerHeight * 0.21}`);
+        core.setAttribute("points",
+          `0,${sy - innerHeight * 0.09} ${cur.x},${fy - tip} ${cur.x},${fy + tip} 0,${sy + innerHeight * 0.09}`);
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+
+  // Theme toggle. A click flips between light and dark from whatever is
+  // currently in effect; the choice persists. The drop's uncovered icon
+  // always shows the *current* theme, sidecar-style.
+  {
+    const btn = document.querySelector(".theme");
+    const sysDark = matchMedia("(prefers-color-scheme: dark)");
+    const effective = () => document.documentElement.dataset.theme || (sysDark.matches ? "dark" : "light");
+    const paint = () => {
+      btn.dataset.mode = effective();
+      btn.setAttribute("aria-label", "Theme: " + effective());
+    };
+    btn.addEventListener("click", () => {
+      const next = effective() === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem("theme", next); } catch {}
+      paint();
+    });
+    sysDark.addEventListener("change", paint);
+    paint();
+  }
+
+  // Copy buttons only — no analytics, no star fetch in the mock.
+  for (const el of document.querySelectorAll("[data-copy]")) {
+    el.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(el.querySelector("code").textContent);
+        el.setAttribute("data-copied", "");
+        setTimeout(() => el.removeAttribute("data-copied"), 1400);
+      } catch {}
+    });
+  }
+</script>
+<!-- Ray/wash variant picker (bottom-right) — scratch tooling, see variants.js -->
+<script type="module" src="./variants.js"></script>
+</body>
+</html>

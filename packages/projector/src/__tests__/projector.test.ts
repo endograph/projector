@@ -956,6 +956,42 @@ describe("state resolution and state projection", () => {
       resolveStates({ id: "r", isSource: true, node: erroring, states: { x: { value: "bad" } } }),
     ).toThrow(/invalid/);
   });
+
+  it("heals schema-evolved object state by merging init under the existing value", () => {
+    // The common evolution: a new required field. The existing value keeps
+    // everything it had; init fills only what is missing.
+    const evolved = createNode({
+      key: "evolved",
+      states: [
+        {
+          key: "panes",
+          schema: z.object({ open: z.boolean(), width: z.number() }),
+          init: { open: false, width: 22 },
+          onInitConflict: "replace",
+        },
+      ],
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: evolved,
+      states: { panes: { value: { open: true } } },
+    };
+    const resets: unknown[] = [];
+    resolveStates(instance, { onReset: (reset) => resets.push(reset) });
+    expect(instance.states?.panes?.value).toEqual({ open: true, width: 22 });
+    expect(resets).toHaveLength(1);
+
+    // A field whose type broke can't be healed by merging: full init reset.
+    const broken: Instance = {
+      id: "r",
+      isSource: true,
+      node: evolved,
+      states: { panes: { value: { open: "yes" } } },
+    };
+    resolveStates(broken);
+    expect(broken.states?.panes?.value).toEqual({ open: false, width: 22 });
+  });
 });
 
 describe("retrieval aliases", () => {
@@ -2909,3 +2945,193 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("address-based state writes", () => {
+  const panesState = {
+    key: "panes",
+    schema: z.object({ open: z.boolean() }),
+    init: { open: false },
+  };
+
+  it("lets a bound action write a sibling state by descriptor in the same run", async () => {
+    const surfaceState = {
+      key: "surface",
+      schema: z.object({ version: z.number(), source: z.string() }),
+      init: { version: 0, source: "" },
+    };
+    const writeSurface = createAction({
+      state: surfaceState,
+      name: "writeSurface",
+      inputSchema: z.object({ source: z.string(), requestOpenPane: z.boolean() }),
+      run: ({ source, requestOpenPane }, ctx) => {
+        ctx.updateState?.(patchState({ source, version: (ctx.state?.version ?? 0) + 1 }));
+        if (requestOpenPane) {
+          ctx.updateStateAt?.(panesState, patchState({ open: true }));
+        }
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({
+        key: "ui",
+        states: [surfaceState, panesState],
+        commands: [writeSurface],
+      }),
+    };
+    const machine = createMachine({ instance, charter: charter() });
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "writeSurface",
+      input: { source: "<App/>", requestOpenPane: true },
+      callId: "write-1",
+    });
+
+    expect(instance.states?.surface?.value).toEqual({ version: 1, source: "<App/>" });
+    expect(instance.states?.panes?.value).toEqual({ open: true });
+    expect(machine.frames[0]?.messages).toMatchObject([
+      { type: "action", kind: "request", callId: "write-1" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "surface" },
+      { type: "instance", kind: "state.update", instanceId: "r", stateKey: "panes" },
+      { type: "action", kind: "result", success: true },
+    ]);
+  });
+
+  it("gives stateless actions address writes and validates against the target schema", async () => {
+    const breakPanes = createAction({
+      state: null,
+      name: "breakPanes",
+      run: (_input, ctx) => {
+        ctx.updateStateAt?.(panesState, replaceState({ open: "nope" }));
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({ key: "ui", states: [panesState], commands: [breakPanes] }),
+    };
+    const machine = createMachine({ instance, charter: charter() });
+
+    const result = await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "breakPanes",
+      input: null,
+      callId: "break-1",
+    });
+
+    expect(result.success).toBe(false);
+    // The failed write never realized the container: reads still see init.
+    expect(instance.states?.panes).toBeUndefined();
+    const mutations = machine.frames.flatMap((frame) =>
+      frame.messages.filter((message) => message.type === "instance"),
+    );
+    expect(mutations).toHaveLength(0);
+  });
+
+  it("writes a spawned child's local inline state by StateAddress", async () => {
+    const itemsState = {
+      key: "items",
+      schema: z.array(z.string()),
+      init: [] as string[],
+      scope: "local" as const,
+    };
+    const listNode = createNode({ key: "list", states: [itemsState] });
+    const spawnList = createAction({
+      state: null,
+      name: "spawnList",
+      run: (_input, ctx) => {
+        ctx.instance.spawn(listNode);
+      },
+    });
+    const addItem = createAction({
+      state: null,
+      name: "addItem",
+      inputSchema: z.object({ instanceId: z.string(), value: z.string() }),
+      run: ({ instanceId, value }, ctx) => {
+        ctx.updateStateAt?.({ instanceId, stateKey: "items" }, appendState(value));
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({ key: "ui", commands: [spawnList, addItem] }),
+    };
+    const machine = createMachine({ instance, charter: charter() });
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "spawnList",
+      input: null,
+      callId: "spawn-1",
+    });
+    const child = instance.children?.[0];
+    expect(child?.node.key).toBe("list");
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "addItem",
+      input: { instanceId: child!.id, value: "milk" },
+      callId: "add-1",
+    });
+
+    expect(child?.states?.items?.value).toEqual(["milk"]);
+    expect(machine.frames[1]?.messages).toMatchObject([
+      { type: "action", kind: "request", callId: "add-1" },
+      { type: "instance", kind: "state.update", instanceId: child!.id, stateKey: "items" },
+      { type: "action", kind: "result", success: true },
+    ]);
+  });
+
+  it("rejects alias strings outside a generator run and unresolvable descriptors", async () => {
+    const orphanState = {
+      key: "orphan",
+      schema: z.object({}),
+      init: {},
+    };
+    let aliasError: unknown;
+    let descriptorError: unknown;
+    const probe = createAction({
+      state: null,
+      name: "probe",
+      run: (_input, ctx) => {
+        try {
+          ctx.updateStateAt?.("panes", patchState({ open: true }));
+        } catch (error) {
+          aliasError = error;
+        }
+        try {
+          ctx.updateStateAt?.(orphanState, replaceState({}));
+        } catch (error) {
+          descriptorError = error;
+        }
+      },
+    });
+    const instance: Instance = {
+      id: "r",
+      isSource: true,
+      node: createNode({ key: "ui", states: [panesState], commands: [probe] }),
+    };
+    const machine = createMachine({ instance, charter: charter() });
+
+    await executeCommand(machine, {
+      type: "action",
+      kind: "request",
+      action: "command",
+      name: "probe",
+      input: null,
+      callId: "probe-1",
+    });
+
+    expect(String(aliasError)).toMatch(/only resolvable during a generator run/);
+    expect(String(descriptorError)).toMatch(/does not resolve to any instance state/);
+  });
+});

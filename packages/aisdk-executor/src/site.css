@@ -1,0 +1,7 @@
+
+.msg-send-error .msg-role { color: var(--t-bad); }
+.msg-send-error .msg-body {
+  font-family: var(--mono);
+  font-size: 0.71875rem;
+  color: var(--muted);
+}
