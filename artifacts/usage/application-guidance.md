@@ -1,7 +1,7 @@
 # Application Usage Guidance
 
 These notes capture application-development guidance learned while building the
-demo app. They are not demo-specific rules. They are intended for future apps
+sandbox app. They are not demo-specific rules. They are intended for future apps
 that combine projector state, durable storage, streaming model output, and live
 agent transports.
 

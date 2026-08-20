@@ -1382,9 +1382,17 @@ type Action<
 
 The singular public API is sugar over the plural keyed runtime model. When
 `ctx.updateState(update)` emits a durable mutation, the mutation must include the
-resolved `stateKey`. Future plural helpers can accept structured `StateAddress`
-values, such as `ctx.getState(address)` or `ctx.updateState(address, update)`,
-without changing stored mutation semantics.
+resolved `stateKey`. The plural form is `ctx.updateStateAt(target, update)` —
+the write twin of the address-based `ctx.getState(address)`, available to every
+contributor-bound action (stateless ones included). `StateWriteTarget` is three
+spellings of one coordinate: a state descriptor (identity-resolved against the
+contributor's node per its scope, then by global uniqueness across the resolved
+tree — ambiguity errors and asks for an address), a structured `StateAddress`
+(client snapshots carry these), or an inference alias string (resolvable only
+during a generator run, through the same alias map as `getState`). Writes go
+through the same validate-and-enqueue path as the singular sugar, so stored
+mutation semantics are unchanged; a write that lands on the action's own bound
+address refreshes `ctx.state`.
 
 State mutation helpers are synchronous. `ctx.updateState(update)` immediately
 constructs and enqueues a frame with a `state.update` `InstanceMessage`,

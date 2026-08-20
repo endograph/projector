@@ -255,7 +255,7 @@ new LiveKitRealtimeExecutor({
 
 Default it to `ROOT_RUNTIME_INSTANCE_ID`.
 
-### 9. Update Demo App
+### 9. Update Sandbox App
 
 The durable demo instance should become a root tree.
 
@@ -389,11 +389,11 @@ refactors over compatibility.
 4. Update machine scheduling and remove synthetic runtime branches.
 5. Update projection/history compilation and inspection.
 6. Update client snapshot shape.
-7. Update LiveKit executor and demo agent.
+7. Update LiveKit executor and sandbox agent.
 8. Update demo UI and observability.
 9. Add duplicate id validation.
 10. Run core implementation tests, conformance tests, demo typecheck, and
-    demo-agent build.
+    sandbox-agent build.
 
 ## Expected Outcome
 

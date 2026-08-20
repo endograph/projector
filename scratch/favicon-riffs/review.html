@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>projector — favicon riffs</title>
+<style>
+  body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f5f7; color: #111; }
+  h1 { font-size: 18px; margin: 0; padding: 20px 24px 4px; }
+  .sub { padding: 0 24px 16px; font-size: 13px; opacity: 0.6; }
+  .section-label { padding: 14px 24px 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.5; }
+  .dark .section-label { color: #eee; }
+  .row { display: flex; align-items: center; gap: 28px; padding: 18px 24px; border-bottom: 1px solid #e2e4e8; }
+  .dark .row { border-bottom-color: #26292f; }
+  .dark { background: #16181d; color: #eee; }
+  .meta { width: 300px; }
+  .name { font-size: 13px; font-weight: 600; }
+  .note { font-size: 12px; opacity: 0.65; margin-top: 3px; line-height: 1.45; }
+  .sizes { display: flex; align-items: center; gap: 22px; }
+  .sizes img { display: block; }
+  .tab { display: flex; align-items: center; gap: 7px; background: #fff; border: 1px solid #d6d9de;
+         border-radius: 8px 8px 0 0; padding: 6px 14px 6px 10px; font-size: 12px; width: 120px; }
+  .dark .tab { background: #2b2e35; border-color: #3a3e46; color: #ddd; }
+</style>
+</head>
+<body>
+<h1>projector — favicon riffs</h1>
+<div class="sub">Each shown at 64 / 32 / 16&nbsp;px, plus a mock browser tab. Same set repeated on a dark page below.</div>
+<div id="light"></div>
+<div id="dark" class="dark"></div>
+
+<script>
+const riffs = [
+  {
+    name: "1 · beam-spread",
+    note: "White beam in from the left, rainbow fan dispersing right. Bold and legible at 16px.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <polygon points="26,32 56,8 56,17.6" fill="#FF4D6D"/>
+  <polygon points="26,32 56,17.6 56,27.2" fill="#FFC53D"/>
+  <polygon points="26,32 56,27.2 56,36.8" fill="#3DDC97"/>
+  <polygon points="26,32 56,36.8 56,46.4" fill="#4D9FFF"/>
+  <polygon points="26,32 56,46.4 56,56" fill="#A78BFA"/>
+  <rect x="6" y="29" width="22" height="6" rx="3" fill="#FFFFFF"/>
+</svg>`
+  },
+  {
+    name: "2 · prism",
+    note: "Beam refracted through an outlined prism. Most iconic at 32px+, muddies slightly at 16.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <polygon points="40,31 60,12 60,20.4" fill="#FF4D6D"/>
+  <polygon points="40,31 60,20.4 60,28.8" fill="#FFC53D"/>
+  <polygon points="40,31 60,28.8 60,37.2" fill="#3DDC97"/>
+  <polygon points="40,31 60,37.2 60,45.6" fill="#4D9FFF"/>
+  <polygon points="40,31 60,45.6 60,54" fill="#A78BFA"/>
+  <rect x="2" y="28.5" width="23" height="5" rx="2.5" fill="#FFFFFF"/>
+  <polygon points="32,12 15,48 49,48" fill="#1B2230" stroke="#E8ECF2" stroke-width="3" stroke-linejoin="round"/>
+</svg>`
+  },
+  {
+    name: "3 · orb-white-rays",
+    note: "Glowing orb, white rays projecting right. Clean monochrome option; a bit sun/spinner-like tiny.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <circle cx="22" cy="32" r="14" fill="#FFFFFF" opacity="0.16"/>
+  <circle cx="22" cy="32" r="9" fill="#FFFFFF"/>
+  <g stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round">
+    <line x1="29" y1="19.9" x2="34.5" y2="10.3"/>
+    <line x1="34.1" y1="25" x2="43.7" y2="19.5"/>
+    <line x1="36" y1="32" x2="49" y2="32"/>
+    <line x1="34.1" y1="39" x2="43.7" y2="44.5"/>
+    <line x1="29" y1="44.1" x2="34.5" y2="53.7"/>
+  </g>
+</svg>`
+  },
+  {
+    name: "4 · orb-rainbow-rays",
+    note: "Same orb, rainbow rays. More 'projector', still soft at 16px.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <circle cx="22" cy="32" r="14" fill="#FFFFFF" opacity="0.14"/>
+  <circle cx="22" cy="32" r="9" fill="#FFFFFF"/>
+  <g stroke-width="5" stroke-linecap="round">
+    <line x1="29" y1="19.9" x2="35.5" y2="8.6" stroke="#FF4D6D"/>
+    <line x1="34.1" y1="25" x2="45.4" y2="18.5" stroke="#FFC53D"/>
+    <line x1="36" y1="32" x2="51" y2="32" stroke="#3DDC97"/>
+    <line x1="34.1" y1="39" x2="45.4" y2="45.5" stroke="#4D9FFF"/>
+    <line x1="29" y1="44.1" x2="35.5" y2="55.4" stroke="#A78BFA"/>
+  </g>
+</svg>`
+  },
+  {
+    name: "5 · bulb-cone",
+    note: "Warm bulb with a translucent light cone. Most literally a projector; base cap fades at 16px.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.06"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <polygon points="31,26 58,10 58,54 31,38" fill="url(#fade)"/>
+  <rect x="7" y="26" width="8" height="12" rx="2.5" fill="#8B94A3"/>
+  <circle cx="23" cy="32" r="11" fill="#FFD766"/>
+</svg>`
+  },
+  {
+    name: "6 · dot-fan",
+    note: "Minimal: white dot, five bold rainbow rays. Strongest read at 16px.",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0E1116"/>
+  <g stroke-width="5.5" stroke-linecap="round">
+    <line x1="20.9" y1="26.2" x2="43.1" y2="7.6" stroke="#FF4D6D"/>
+    <line x1="22.5" y1="28.9" x2="49.7" y2="19" stroke="#FFC53D"/>
+    <line x1="23" y1="32" x2="52" y2="32" stroke="#3DDC97"/>
+    <line x1="22.5" y1="35.1" x2="49.7" y2="45" stroke="#4D9FFF"/>
+    <line x1="20.9" y1="37.8" x2="43.1" y2="56.4" stroke="#A78BFA"/>
+  </g>
+  <circle cx="14" cy="32" r="5.5" fill="#FFFFFF"/>
+</svg>`
+  }
+];
+
+function render(containerId) {
+  const el = document.getElementById(containerId);
+  el.insertAdjacentHTML("beforeend",
+    `<div class="section-label">${containerId} page</div>`);
+  for (const r of riffs) {
+    const src = "data:image/svg+xml," + encodeURIComponent(r.svg);
+    el.insertAdjacentHTML("beforeend", `
+      <div class="row">
+        <div class="meta">
+          <div class="name">${r.name}</div>
+          <div class="note">${r.note}</div>
+        </div>
+        <div class="sizes">
+          <img src="${src}" width="64" height="64">
+          <img src="${src}" width="32" height="32">
+          <img src="${src}" width="16" height="16">
+          <div class="tab"><img src="${src}" width="16" height="16"><span>projector</span></div>
+        </div>
+      </div>`);
+  }
+}
+render("light");
+render("dark");
+</script>
+</body>
+</html>

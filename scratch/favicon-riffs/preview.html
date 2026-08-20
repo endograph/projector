@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>favicon riffs</title>
+<style>
+  body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #f4f5f7; color: #111; }
+  .row { display: flex; align-items: center; gap: 28px; padding: 18px 24px; border-bottom: 1px solid #e2e4e8; }
+  .row.dark { background: #16181d; color: #eee; border-bottom-color: #26292f; }
+  .name { width: 170px; font-size: 13px; opacity: 0.75; }
+  .sizes { display: flex; align-items: center; gap: 20px; }
+  .sizes img { display: block; }
+  .tab { display: flex; align-items: center; gap: 7px; background: #fff; border: 1px solid #d6d9de;
+         border-radius: 8px 8px 0 0; padding: 6px 14px 6px 10px; font-size: 12px; width: 130px; }
+  .dark .tab { background: #2b2e35; border-color: #3a3e46; }
+</style>
+</head>
+<body>
+<div id="rows"></div>
+<script>
+  const files = ["1-beam-spread.svg","2-prism.svg","3-orb-white-rays.svg","4-orb-rainbow-rays.svg","5-bulb-cone.svg","6-dot-fan.svg"];
+  const rows = document.getElementById("rows");
+  for (const dark of [false, true]) {
+    for (const f of files) {
+      const row = document.createElement("div");
+      row.className = "row" + (dark ? " dark" : "");
+      row.innerHTML = `
+        <div class="name">${f}</div>
+        <div class="sizes">
+          <img src="${f}" width="64" height="64">
+          <img src="${f}" width="32" height="32">
+          <img src="${f}" width="16" height="16">
+          <div class="tab"><img src="${f}" width="16" height="16"><span>projector</span></div>
+        </div>`;
+      rows.appendChild(row);
+    }
+  }
+</script>
+</body>
+</html>

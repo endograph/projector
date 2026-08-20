@@ -2,7 +2,7 @@
 
 ## Summary
 
-Fix camera support in `apps/demo` and `apps/demo-agent` by restoring the LiveKit vision sampling path from the older implementation, adapting it to the current `@projectors/*` package layout, and adding a frontend preview tied to the actual local LiveKit camera track.
+Fix camera support in `apps/sandbox` and `apps/sandbox-agent` by restoring the LiveKit vision sampling path from the older implementation, adapting it to the current `@projectors/*` package layout, and adding a frontend preview tied to the actual local LiveKit camera track.
 
 This plan is scoped to making camera work for the LiveKit realtime demo. It does not require the broader transient-frame framework proposal.
 
@@ -10,20 +10,20 @@ This plan is scoped to making camera work for the LiveKit realtime demo. It does
 
 - The LiveKit OpenAI realtime image patch already exists at `patches/@livekit%2Fagents-plugin-openai@1.0.40.patch`.
 - The patch targets the GA realtime implementation used by `openai.realtime.RealtimeModel`.
-- `apps/demo-agent` currently has no vision sampler.
-- The old camera sampler lived at `apps/demo-agent/src/agent/vision.ts` in commit `81b25b4ea2cc61a2e27df09d4e161cd64e0098bb`.
-- `apps/demo/src/voice/LiveVoiceClient.tsx` currently publishes camera only when `cameraEnabled && voiceEnabled`.
+- `apps/sandbox-agent` currently has no vision sampler.
+- The old camera sampler lived at `apps/sandbox-agent/src/agent/vision.ts` in commit `81b25b4ea2cc61a2e27df09d4e161cd64e0098bb`.
+- `apps/sandbox/src/voice/LiveVoiceClient.tsx` currently publishes camera only when `cameraEnabled && voiceEnabled`.
 - The frontend currently has no visible local camera preview.
 
 ## Encoding Decision
 
 Use `sharp` for server-side frame encoding.
 
-`sharp` is already present in the install graph through LiveKit, and the old demo implementation used it successfully. The implementation should still declare `sharp` directly in `apps/demo-agent/package.json` because `apps/demo-agent` imports it directly; relying on a nested dependency would make the package boundary brittle.
+`sharp` is already present in the install graph through LiveKit, and the old demo implementation used it successfully. The implementation should still declare `sharp` directly in `apps/sandbox-agent/package.json` because `apps/sandbox-agent` imports it directly; relying on a nested dependency would make the package boundary brittle.
 
-## Demo Agent Changes
+## Sandbox Agent Changes
 
-Add `apps/demo-agent/src/vision.ts`, adapted from the old implementation.
+Add `apps/sandbox-agent/src/vision.ts`, adapted from the old implementation.
 
 The module should:
 
@@ -68,9 +68,9 @@ When a frame is sampled:
 
 Do not enqueue these camera frames into `machine.frames` in this first camera patch. That avoids persisting base64 images into Convex and avoids scheduling extra projector work.
 
-## Demo Agent Wiring
+## Sandbox Agent Wiring
 
-Update `apps/demo-agent/src/agent.ts`:
+Update `apps/sandbox-agent/src/agent.ts`:
 
 - Import `attachVisionSampler`.
 - Create the sampler after `session.start(...)`, when the realtime session is available.
@@ -80,18 +80,18 @@ Update `apps/demo-agent/src/agent.ts`:
   - `newState === "speaking"` -> `visionSampler.setMode("active")`
   - otherwise -> `visionSampler.setMode("idle")`
 
-Add direct runtime dependencies to `apps/demo-agent/package.json`:
+Add direct runtime dependencies to `apps/sandbox-agent/package.json`:
 
 - `@livekit/rtc-node`
 - `sharp`
 
-Even though `sharp` is already installed transitively, keep it as an explicit direct dependency of `@projectors/demo-agent`.
+Even though `sharp` is already installed transitively, keep it as an explicit direct dependency of `@projectors/sandbox-agent`.
 
 ## Prompt Changes
 
-Update `apps/demo-agent/src/projector-demo.ts` so the model knows how camera snapshots arrive.
+Update `apps/sandbox-agent/src/projector-sandbox.ts` so the model knows how camera snapshots arrive.
 
-Add camera guidance to the main demo agent instructions:
+Add camera guidance to the main sandbox agent instructions:
 
 ```text
 When camera mode is enabled, you may receive user messages prefixed with "[Camera frame]" and image content. These are live snapshots, not continuous video. Only mention visual details when relevant to the user's request, and only describe what is visible in the most recent snapshot.
@@ -101,7 +101,7 @@ Do not rely on the raw projected `agentControls` state alone for this instructio
 
 ## Frontend LiveKit Publishing
 
-Update `apps/demo/src/voice/LiveVoiceClient.tsx`:
+Update `apps/sandbox/src/voice/LiveVoiceClient.tsx`:
 
 - Publish microphone based only on `voiceEnabled`.
 - Publish camera based only on `cameraEnabled`.
@@ -131,13 +131,13 @@ Track the local camera publication:
 
 ## Frontend Preview
 
-Update `apps/demo/app/HomeClient.tsx`:
+Update `apps/sandbox/app/HomeClient.tsx`:
 
 - Add local state for the local camera track.
 - Pass `onLocalCameraTrackChange={setLocalCameraTrack}` to `LiveVoiceClient`.
 - Pass `localCameraTrack` into `TerminalPane`.
 
-Update `apps/demo/app/components/terminal/TerminalPane.tsx`:
+Update `apps/sandbox/app/components/terminal/TerminalPane.tsx`:
 
 - Accept `localCameraTrack?: LocalVideoTrack | null`.
 - Render a compact 16:9 preview when `cameraEnabled` or `localCameraTrack` is present.
@@ -166,8 +166,8 @@ Keep the preview in the terminal pane header or just below it, not in the messag
 Run:
 
 ```sh
-bun run --filter @projectors/demo-agent typecheck
-bun run --filter @projectors/demo typecheck
+bun run --filter @projectors/sandbox-agent typecheck
+bun run --filter @projectors/sandbox typecheck
 bun run --filter @projectors/livekit-realtime-executor typecheck
 ```
 
@@ -179,7 +179,7 @@ Manual verification:
 4. Confirm browser permission prompt appears if needed.
 5. Confirm a local camera preview appears.
 6. Confirm the browser publishes a local camera track.
-7. Confirm `apps/demo-agent` logs that camera sampling started.
+7. Confirm `apps/sandbox-agent` logs that camera sampling started.
 8. Enable voice and ask what the agent sees.
 9. Confirm the agent can answer from image content.
 10. Toggle camera off.

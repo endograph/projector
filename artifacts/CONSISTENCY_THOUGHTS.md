@@ -142,7 +142,7 @@ if (!result.accepted) {
 
 This is attractive for interactive apps because the local machine can keep
 moving while the database decides whether the frame is durable. It matches the
-current demo-agent style: frames are accepted locally, and persistence failure
+current sandbox-agent style: frames are accepted locally, and persistence failure
 causes the worker to rebuild from Convex state.
 
 The hard part is rollback. Projector currently has no surgical "remove this

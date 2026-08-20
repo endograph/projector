@@ -128,7 +128,16 @@ function resolveStateGroup<TDataContent>(
       throw new Error(`Existing state "${group.stateKey}" is invalid`);
     }
 
-    const resetValue = resolveInitialValue(group.entries.map((entry) => entry.descriptor));
+    // Heal before replacing: schema evolution that adds required fields is by
+    // far the common conflict, and spreading the existing value over init
+    // fills the new fields while keeping everything the visitor already has.
+    // Only when the healed value still fails does the wholesale init reset run.
+    const initValue = resolveInitialValue(group.entries.map((entry) => entry.descriptor));
+    const healedValue = healConflictingValue(initValue, existing.value);
+    const resetValue =
+      healedValue !== undefined && allSchemasValidate(group.entries, healedValue)
+        ? healedValue
+        : initValue;
     validateAllSchemas(group.entries, resetValue, group.stateKey);
     existing.value = resetValue;
     options.onReset?.({
@@ -257,6 +266,15 @@ function mergeDescriptors(
       : "replace",
     projection: latest.projection,
   };
+}
+
+function healConflictingValue(init: unknown, existing: unknown): unknown {
+  if (!isPlainRecord(init) || !isPlainRecord(existing)) return undefined;
+  return { ...init, ...existing };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function allSchemasValidate<TDataContent>(

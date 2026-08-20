@@ -24,7 +24,7 @@ import {
   isWorkActivationMessage,
   isWorkCompletionMessage,
 } from "./history.ts";
-import { isNode, runtimeTriggers } from "./create.ts";
+import { isNode, normalizeStateDescriptor, runtimeTriggers } from "./create.ts";
 import { decodeContributorId, encodeProjectionAddress } from "./projection-address.ts";
 import { callerAllows, collectAllNodeActions, resolveContributorActions } from "./scoped-actions.ts";
 import { collectScopeDuplicates } from "./scopes.ts";
@@ -62,7 +62,9 @@ import type {
   SerializedInstance,
   SerializedNodeRef,
   SpawnChild,
+  InferenceStateAddress,
   StateAddress,
+  StateWriteTarget,
   StateKey,
   StatePath,
   StateUpdate,
@@ -339,6 +341,9 @@ export async function syncMachineRuntime<TDataContent = never>(
   const getState = inference.retrievableStates.length > 0
     ? createRetrievableStateGetter(machine, inference.retrievableStates)
     : undefined;
+  const resolveStateAlias = inference.retrievableStates.length > 0
+    ? createRetrievableStateResolver(inference.retrievableStates)
+    : undefined;
   const frameDefaults = {
     generatorId,
   };
@@ -349,7 +354,7 @@ export async function syncMachineRuntime<TDataContent = never>(
     inference,
     visibleFrames: options.visibleFrames ?? [],
     createActionContext: (action) =>
-      createMachineActionContext(machine, action, frameDefaults, getState),
+      createMachineActionContext(machine, action, frameDefaults, getState, resolveStateAlias),
     // No generatorId default: sync-enqueued frames are not generation output
     // unless the producer says so. External user frames must stay ungenerated
     // or the self-trigger exclusion would suppress their activations.
@@ -644,6 +649,9 @@ export async function runActivation<TDataContent = never>(
   const getState = inference.retrievableStates.length > 0
     ? createRetrievableStateGetter(machine, inference.retrievableStates)
     : undefined;
+  const resolveStateAlias = inference.retrievableStates.length > 0
+    ? createRetrievableStateResolver(inference.retrievableStates)
+    : undefined;
   const output = outputConfigForRuntime(contributor.node.output, runtime);
   const request: ExecutorRunRequest<TDataContent> = {
     generatorId: activation.generatorId,
@@ -653,7 +661,7 @@ export async function runActivation<TDataContent = never>(
     output,
     ...(options.signal ? { signal: options.signal } : {}),
     createActionContext: (action) =>
-      createMachineActionContext(machine, action, frameDefaults, getState),
+      createMachineActionContext(machine, action, frameDefaults, getState, resolveStateAlias),
     enqueueFrame: (draft, report) =>
       machine.enqueueFrame(signFrame({
         ...draft,
@@ -898,6 +906,7 @@ function createMachineActionContext<TDataContent>(
   action: AnyAction,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
   getState?: ActionContext["getState"],
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
 ): ActionContext<unknown, TDataContent> {
   const binding = getActionBinding(action);
   const contributor = binding
@@ -906,7 +915,13 @@ function createMachineActionContext<TDataContent>(
   if (!contributor) {
     return createUnboundActionContext(getState);
   }
-  const context = createContributorActionContext(machine, contributor, action, frameDefaults);
+  const context = createContributorActionContext(
+    machine,
+    contributor,
+    action,
+    frameDefaults,
+    resolveStateAlias,
+  );
   if (getState) {
     context.getState = getState;
   }
@@ -917,6 +932,13 @@ function createRetrievableStateGetter<TDataContent>(
   machine: Machine<TDataContent>,
   retrievableStates: RetrievableState[],
 ): NonNullable<ActionContext["getState"]> {
+  const resolve = createRetrievableStateResolver(retrievableStates);
+  return (address) => readStateValue(machine.instance, resolve(address));
+}
+
+function createRetrievableStateResolver(
+  retrievableStates: RetrievableState[],
+): (address: InferenceStateAddress) => StateAddress {
   const retrievalTargets = new Map(
     retrievableStates.map((state) => [state.address, state.target] as const),
   );
@@ -925,7 +947,7 @@ function createRetrievableStateGetter<TDataContent>(
     if (!target) {
       throw new Error(`Unknown retrievable state address "${address}"`);
     }
-    return readStateValue(machine.instance, target);
+    return target;
   };
 }
 
@@ -934,6 +956,7 @@ function createContributorActionContext<TDataContent>(
   contributor: Contributor<TDataContent>,
   action: AnyAction,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
 ): ActionContext<unknown, TDataContent> {
   const stateAddress = stateAddressForContributor(contributor, action);
   const instance = createActionInstanceContext(machine, contributor, frameDefaults);
@@ -941,8 +964,52 @@ function createContributorActionContext<TDataContent>(
     action,
     resolveContributorNodeParams(contributor),
   );
+
+  const enqueueStateUpdate = (
+    address: StateAddress,
+    updateInput: StateUpdateInput<unknown>,
+  ) => {
+    const current = readStateValue(machine.instance, address);
+    const update = resolveStateUpdate(current, updateInput);
+    const next = applyStateUpdate(current, update);
+    validateStateValue(machine.instance, address, next);
+    machine.enqueueFrame({
+      ...frameDefaults,
+      messages: [
+        {
+          type: "instance",
+          kind: "state.update",
+          instanceId: address.instanceId,
+          stateKey: address.stateKey,
+          update,
+        } satisfies InstanceMessage,
+      ],
+    });
+  };
+
+  // Address-based writes are available to every contributor-bound action,
+  // stateless ones included — the singular bound context stays the sugar for
+  // an action's own declared state. A write that lands on the bound address
+  // refreshes ctx.state, same as the singular path.
+  let boundContext: ActionContext<unknown, TDataContent> | undefined;
+  const updateStateAt: NonNullable<ActionContext["updateStateAt"]> = (
+    target,
+    updateInput,
+  ) => {
+    const address = resolveStateWriteTarget(machine, contributor, target, resolveStateAlias);
+    enqueueStateUpdate(address, updateInput);
+    if (
+      boundContext &&
+      stateAddress &&
+      address.instanceId === stateAddress.instanceId &&
+      address.stateKey === stateAddress.stateKey
+    ) {
+      boundContext.state = readStateValue(machine.instance, stateAddress);
+    }
+  };
+
   if (!stateAddress) {
-    return { params, instance };
+    return { params, instance, updateStateAt };
   }
 
   const readState = () => readStateValue(machine.instance, stateAddress);
@@ -951,26 +1018,71 @@ function createContributorActionContext<TDataContent>(
     instance,
     state: readState(),
     updateState: (updateInput) => {
-      const current = readState();
-      const update = resolveStateUpdate(current, updateInput);
-      const next = applyStateUpdate(current, update);
-      validateStateValue(machine.instance, stateAddress, next);
-      machine.enqueueFrame({
-        ...frameDefaults,
-        messages: [
-          {
-            type: "instance",
-            kind: "state.update",
-            instanceId: stateAddress.instanceId,
-            stateKey: stateAddress.stateKey,
-            update,
-          } satisfies InstanceMessage,
-        ],
-      });
+      enqueueStateUpdate(stateAddress, updateInput);
       context.state = readState();
     },
+    updateStateAt,
   };
+  boundContext = context;
   return context;
+}
+
+/**
+ * Resolve a StateWriteTarget to the canonical StateAddress. Descriptors
+ * resolve by identity: first against the contributor's own node (honoring the
+ * descriptor's scope, like the bound-state path), then by global uniqueness
+ * across the resolved instance tree. Alias strings resolve only when a
+ * generator run supplied the compiled alias map.
+ */
+function resolveStateWriteTarget<TDataContent>(
+  machine: Machine<TDataContent>,
+  contributor: Contributor<TDataContent>,
+  target: StateWriteTarget,
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
+): StateAddress {
+  if (typeof target === "string") {
+    if (!resolveStateAlias) {
+      throw new Error(
+        `State alias "${target}" is only resolvable during a generator run; pass a StateAddress or a state descriptor`,
+      );
+    }
+    return resolveStateAlias(target);
+  }
+
+  if ("instanceId" in target && "stateKey" in target) {
+    return target;
+  }
+
+  // Normalization is memoized per source object, so a raw descriptor and its
+  // normalized copy share one stable identity to compare against.
+  const targetDescriptor = normalizeStateDescriptor(target);
+  const declared = contributor.node.states.find((descriptor) => descriptor === targetDescriptor);
+  if (declared) {
+    return {
+      instanceId:
+        declared.scope === "local"
+          ? contributor.concreteInstance.id
+          : hoistStateInstance(contributor).id,
+      stateKey: declared.key,
+    };
+  }
+
+  const matches = resolveStates(machine.instance).filter(
+    (candidate) => candidate.descriptor === targetDescriptor,
+  );
+  const only = matches.length === 1 ? matches[0] : undefined;
+  if (only) {
+    return only.address;
+  }
+  if (matches.length > 1) {
+    const addresses = matches
+      .map((match) => `${match.address.instanceId}:${match.address.stateKey}`)
+      .join(", ");
+    throw new Error(
+      `State descriptor "${target.key}" resolves to multiple instances (${addresses}); pass a StateAddress`,
+    );
+  }
+  throw new Error(`State descriptor "${target.key}" does not resolve to any instance state`);
 }
 
 function createActionInstanceContext<TDataContent>(

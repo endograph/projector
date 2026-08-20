@@ -1,0 +1,10 @@
+{
+  "name": "projector-landing",
+  "private": true,
+  "description": "Landing page mock for projector — sidecar's marketing template, relit.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/serve-site.mjs",
+    "serve": "node scripts/serve-site.mjs"
+  }
+}

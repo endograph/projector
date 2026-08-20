@@ -1,0 +1,1059 @@
+/* projector landing — same system as the sidecar site: Schibsted Grotesk,
+   mono eyebrow labels, hand-inked annotations, hard-shadow step cards.
+   What's different here:
+   - the page is lit from the right: white paper on the left, a muted spectrum
+     thrown across the right edge — the prism metaphor as background.
+   - the hero diagram draws projection (one source, a fan of beams, one view
+     per actor) where sidecar's tree drew nesting. */
+
+:root {
+  /* Cool gray, well down from white: the ray's body is pure white and can
+     only read as light against a page with room beneath it. The original
+     warm off-white left ~10 units of headroom, which is nothing. */
+  --bg: #dbdfe6;
+  --ink: #000000;
+  --muted: #545c67;
+  --faint: #838a95;
+  --rule: #c3c9d2;
+  --wash: #d2d7de;
+  --accent: #6d28d9; /* lens violet — the projection end of the spectrum */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Schibsted Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --shadow: #aeb5bf;
+  --wrap: 43.75rem;
+  /* The muted spectrum. One set of hues does triple duty: the background wash,
+     the three hero beams, and the terminal roles. */
+  --spec-r: #c65b4f;
+  --spec-o: #c9913d;
+  --spec-y: #b0a03c;
+  --spec-g: #5f9c68;
+  --spec-b: #4f7fbb;
+  --spec-v: #7b5fb5;
+  --spec-a: 0.55;    /* how hard the light hits the page */
+  /* The beam is two-tone on paper: a pure-white body edged by a darker
+     boundary (the glow polygon, which extends past the core on every side).
+     On black both collapse to white light. */
+  --ray-edge: #39414a;   /* cool too — a warm edge fought the grey page */
+  --ray-body: #ffffff;
+  /* terminal roles */
+  --t-actor: #6d28d9;
+  --t-state: #8a5a00;
+  --t-ok: #1f7a3d;
+  --t-bad: #b3261e;
+}
+
+/* Dark palette, declared twice because a media-scoped selector and a plain one
+   can't share a rule: once for an explicit choice, once for "system" (no
+   data-theme attribute). Keep the two blocks in sync. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ray-edge: #ffffff;   /* on black the beam is real light again */
+  --ray-body: #ffffff;
+  --bg: #000000;
+  --ink: #ffffff;
+  --muted: #999999;
+  --faint: #6e6e6e;
+  --rule: #232323;
+  --wash: #0d0d0d;
+  --accent: #a78bfa;
+  --shadow: #3a3a3a;
+  --spec-r: #e07a6c;
+  --spec-o: #e0aa55;
+  --spec-y: #cfc25a;
+  --spec-g: #7fc08a;
+  --spec-b: #77a3e0;
+  --spec-v: #a58ae0;
+  --spec-a: 0.21;
+  --t-actor: #c4b5fd;
+  --t-state: #e0aa55;
+  --t-ok: #3ddc84;
+  --t-bad: #ff6b5e;
+}
+:root[data-theme="dark"] .light .l-glow { opacity: 0.085; }
+:root[data-theme="dark"] .light .l-core { opacity: 0.09; }
+:root[data-theme="dark"] .light.horiz .l-glow { opacity: 0.13; }
+:root[data-theme="dark"] .light.horiz .l-core { opacity: 0.14; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --ray-edge: #ffffff;
+    --ray-body: #ffffff;
+    --bg: #000000;
+    --ink: #ffffff;
+    --muted: #999999;
+    --faint: #6e6e6e;
+    --rule: #232323;
+    --wash: #0d0d0d;
+    --accent: #a78bfa;
+    --shadow: #3a3a3a;
+    --spec-r: #e07a6c;
+    --spec-o: #e0aa55;
+    --spec-y: #cfc25a;
+    --spec-g: #7fc08a;
+    --spec-b: #77a3e0;
+    --spec-v: #a58ae0;
+    --spec-a: 0.17;
+    --t-actor: #c4b5fd;
+    --t-state: #e0aa55;
+    --t-ok: #3ddc84;
+    --t-bad: #ff6b5e;
+    --spec-a: 0.21;
+  }
+  /* On black the same white wedge is a faint torch beam, not a floodlight. */
+  :root:not([data-theme]) .light .l-glow { opacity: 0.085; }
+  :root:not([data-theme]) .light .l-core { opacity: 0.09; }
+  :root:not([data-theme]) .light.horiz .l-glow { opacity: 0.13; }
+  :root:not([data-theme]) .light.horiz .l-core { opacity: 0.14; }
+}
+
+@font-face {
+  font-family: "Schibsted Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./assets/schibsted-grotesk.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+@font-face {
+  font-family: "Caveat";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/caveat-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 125%; }
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The wash. A full-height spectrum pinned to the viewport's right side, faded
+   out after reaching roughly 75% of the way back through the centred content
+   column. Slightly rotated so the bands read as thrown light, not printed
+   stripes. The mask does the fading — the gradient itself stays fully
+   saturated so the hues don't muddy.
+
+   Two nested elements, not one pseudo-element: .wash carries the load-in
+   sweep and .wash i carries the shaping masks. Stacking all of it on one
+   element meant three mask layers composited together, which is where the
+   whole thing went invisible — one mask job per element is worth the extra
+   div here. */
+.wash {
+  position: fixed;
+  inset: 0;
+  z-index: -2;   /* behind the ray: focused light washes the spectrum out */
+  pointer-events: none;
+}
+.wash i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  opacity: var(--spec-a);
+  background: linear-gradient(171deg,
+    var(--spec-r) 4%,
+    var(--spec-o) 22%,
+    var(--spec-y) 40%,
+    var(--spec-g) 58%,
+    var(--spec-b) 76%,
+    var(--spec-v) 96%);
+  -webkit-mask: linear-gradient(103deg, transparent 32%, #000 97%);
+          mask: linear-gradient(103deg, transparent 32%, #000 97%);
+}
+
+/* The ray. A wedge of white light: wide at the middle of the left edge,
+   converging to a narrow band on whatever the page wants read next. Geometry
+   is driven per-frame from JS; everything painterly — the gradient that
+   brightens toward the focus, the blur that softens the edges — lives in the
+   SVG defs and here. It sits between the wash (-2) and the content, and is
+   pure decoration: aria-hidden, pointer-events none.
+
+   Absolute, not fixed, and sized to the whole document (inline height from
+   JS): the focus band is written in document coordinates, so during a scroll
+   it rides the compositor with the content — no rAF catch-up, no lag. Only
+   the source aperture, which really is viewport-anchored, chases scroll by a
+   frame, and that edge is 200px of blur — nothing to see. */
+.light {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+/* Light mode only: the body adds light instead of tinting toward it. Normal
+   blending interpolates page -> white, so at these alphas it can only wash
+   the grey out slightly; plus-lighter sums luminance the way light does, so
+   the brightest part of the beam saturates to real white.
+
+   Dark mode keeps normal blending. Adding white to black is arithmetically
+   the same thing, but the beam does not sit on bare black — it sits over the
+   wash and the page's own glow, and summing all of that blew it out. */
+.light-body { mix-blend-mode: plus-lighter; }
+:root[data-theme="dark"] .light-body { mix-blend-mode: normal; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .light-body { mix-blend-mode: normal; }
+}
+
+/* Light mode: the glow is the dark boundary (low alpha — it's ink on paper),
+   the core is the white body. */
+.light .l-glow { opacity: 0.12; }
+.light .l-core { opacity: 0.85; }
+
+/* ---------------------------------------------------------------------------
+   Variants — the prism family. A variant is an override block keyed on
+   [data-variant]; add one here, add its entry to VARIANTS in variants.js, and
+   it appears in the picker and on compare.html. Earlier explorations (a–e)
+   live in archive/variants-a-e.css, unlinked.
+
+   All three f variants share the spotlight optics (the tracker's `spot`
+   branch, which triggers on any variant starting with "f") and differ only in
+   how the wash disperses:
+
+     f1  wash unchanged, angularly masked into a wedge off the focus point
+     f2  wash begins *at* the target and radiates outward
+     f3  as f2, but the hues themselves fan out as rays from the target
+
+   Every one leaves --spec-a and the hues alone: masks only remove coverage,
+   so wherever the wash survives it is exactly as bright as it always was.
+   Retire the system by deleting these blocks, variants.js, its two script
+   tags, compare.html, and archive/.
+   --------------------------------------------------------------------------- */
+
+/* Shared: spotlight optics. The beam spreads its energy as it widens, so the
+   gradient dims toward the target rather than intensifying; and the body sits
+   over live text, so it runs far quieter than the beam variants did. */
+/* Light mode's profile: hot, because it is being added rather than blended. */
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 1; }
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.86; }
+:root[data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+:root[data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.7; }
+
+/* Dark mode's profile: the gentler original, since nothing here is summed. */
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 0.66; }
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.5; }
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+:root[data-theme="dark"][data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.34; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(1),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(1) { stop-opacity: 0.66; }
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(2),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(2) { stop-opacity: 0.5; }
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-edge stop:nth-child(3),
+  :root:not([data-theme])[data-variant^="f"] #ray-grad-body stop:nth-child(3) { stop-opacity: 0.34; }
+}
+/* ---------------------------------------------------------------------------
+   Spotlight opacities. Four independent numbers per theme — glow and core,
+   wide and narrow — and no attempt to derive one theme from the other.
+
+   They genuinely have nothing in common. On paper the glow is *ink*, drawing
+   a dark rim so the white body can be seen at all, so it runs an order of
+   magnitude below the core. On black both are light, the rim idea disappears,
+   and the two move together. A shared config kept dragging one theme wrong
+   every time the other was tuned.
+
+   Narrow layouts run lower than wide in both themes: the level band sits in
+   the gutter with nothing around it, so it needs less to read.
+
+   Dark is written twice — once for an explicit choice, once for the system
+   media query. Keep them in sync; when only the first existed, toggling to
+   dark and booting into dark looked different.
+   --------------------------------------------------------------------------- */
+
+/* light. On a page this close to white the additive core has only ~0.09 of
+   headroom before it clips, so it runs low — enough for a tight target to
+   still burn out, not so much that a broad pool becomes a flat white slab.
+   The dark rim carries proportionally more of the definition here, since its
+   contrast doesn't depend on that headroom at all. */
+:root[data-variant^="f"] .light .l-glow { opacity: 0.24; }
+:root[data-variant^="f"] .light .l-core { opacity: 0.22; }
+:root[data-variant^="f"] .light.horiz .l-glow { opacity: 0.1; }
+:root[data-variant^="f"] .light.horiz .l-core { opacity: 0.15; }
+
+/* dark — explicit. These are the numbers dark was *actually* rendering with
+   before the light-mode work: the f overrides only existed on this selector,
+   never in the system media query, so anyone in system dark was being served
+   the light values. Restoring those, rather than the ones this selector used
+   to carry, is what matches what was on screen. */
+:root[data-theme="dark"][data-variant^="f"] .light .l-glow { opacity: 0.085; }
+:root[data-theme="dark"][data-variant^="f"] .light .l-core { opacity: 0.42; }
+:root[data-theme="dark"][data-variant^="f"] .light.horiz .l-glow { opacity: 0.039; }
+:root[data-theme="dark"][data-variant^="f"] .light.horiz .l-core { opacity: 0.182; }
+
+/* dark — system. Same values; the two paths must agree. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme])[data-variant^="f"] .light .l-glow { opacity: 0.085; }
+  :root:not([data-theme])[data-variant^="f"] .light .l-core { opacity: 0.42; }
+  :root:not([data-theme])[data-variant^="f"] .light.horiz .l-glow { opacity: 0.039; }
+  :root:not([data-theme])[data-variant^="f"] .light.horiz .l-core { opacity: 0.182; }
+}
+
+/* Shared wash geometry, anchored on the focus point the tracker publishes.
+   --wedge is the angular extent (a soft rightward fan, 30deg shoulders);
+   --from-target ramps the wash up with distance from the lit element, so it
+   starts there instead of at a fixed point on the page. */
+:root[data-variant^="f"] {
+  --fx: 50vw;
+  --fy: 50vh;
+  --fh: 40px;   /* the target's half-height, published by the tracker */
+  --fw: 36px;   /* horizontally the origin is a point; vertically it isn't */
+  --wedge: conic-gradient(at var(--fx) var(--fy),
+    transparent 0deg, transparent 22deg, #000 52deg,
+    #000 128deg, transparent 158deg, transparent 360deg);
+  /* An ellipse, not a circle: the clear core is as tall as the target, so the
+     wash begins along the element's whole height rather than swelling out of
+     a point at its middle. Stops past 100% are multiples of that ellipse, so
+     the ramp stays proportional however tall the target is. */
+  --from-target: radial-gradient(var(--fw) var(--fh) at var(--fx) var(--fy),
+    transparent 0, transparent 100%, rgba(0, 0, 0, 0.5) 320%, #000 700%);
+  /* Softens the wedge's apex. A conic gradient converges to a mathematical
+     point, which is visible as a sharp arrowhead where the wash begins. This
+     clears an ellipse as tall as the target (--fh, published by the tracker)
+     and fades in outward, so the wash opens at the height of the thing the
+     ray is lighting rather than at a vertex. Horizontally tight, so it only
+     eats the apex and not the body of the wedge. */
+  --apex: radial-gradient(24px var(--fh) at var(--fx) var(--fy),
+    transparent 0, transparent 100%, rgba(0, 0, 0, 0.6) 150%, #000 250%);
+  /* Where the load-in wipe starts — the beam's tip, snapshotted by the
+     tracker. The wipe gradient itself lives on .wash; see the note there. */
+  --wash-from: 0px;
+}
+
+/* The wash waits for the beam, then wipes in left to right — colour arriving
+   only once there is light to disperse. It's a third mask layer rather than a
+   clip: a clip-path edge is infinitely hard, and at this scale that read as a
+   sheet of colour sliding across the page. Here the leading edge is a 320px
+   gradient, so the wash fades up as the front passes.
+
+   --wash-wipe is a registered property so it can actually animate (custom
+   properties are otherwise interpolated as strings). The tracker snapshots
+   --wash-from at the beam's tip when it fires the sweep, so the front starts
+   where the wash itself starts — beginning at x=0 spends half the animation
+   revealing page that has no wash on it, which is what felt like lag. */
+@property --wash-wipe {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+@keyframes wash-sweep {
+  from { --wash-wipe: 0px; }
+  to   { --wash-wipe: 135vw; }
+}
+/* The colour also rises in place, so the wash settles in rather than simply
+   arriving. It starts partly up and finishes early — running it from zero
+   over a longer arc than the sweep meant the fade was doing nearly all of
+   the visible work and the travelling front was lost inside it. Now it takes
+   the edge off the first moment and gets out of the way, leaving the sweep
+   as the motion you actually read. */
+@keyframes wash-fade {
+  from { opacity: 0.16; }
+  to   { opacity: 1; }
+}
+/* The sweep rides the wrapper — its own element, its own single mask, so it
+   never has to composite with the shaping masks below it. Opaque behind the
+   front, transparent ahead of it, with a 320px shoulder so the wash fades up
+   instead of sliding in.
+
+   The gradient is written out here rather than pulled from a --sweep variable
+   on :root: a custom property's var() references are substituted where the
+   property is *declared*, so --wash-wipe would have been frozen at :root's
+   value and animating it on .wash would have done nothing at all. It has to
+   be used on the same element that animates it.
+
+   Linear, like the beam: a wavefront travels at a constant speed. */
+.wash {
+  -webkit-mask-image: linear-gradient(90deg,
+    #000 0,
+    #000 calc(var(--wash-from) + var(--wash-wipe)),
+    rgba(0, 0, 0, 0.94) calc(var(--wash-from) + var(--wash-wipe) + 150px),
+    rgba(0, 0, 0, 0.78) calc(var(--wash-from) + var(--wash-wipe) + 300px),
+    rgba(0, 0, 0, 0.58) calc(var(--wash-from) + var(--wash-wipe) + 450px),
+    rgba(0, 0, 0, 0.35) calc(var(--wash-from) + var(--wash-wipe) + 600px),
+    rgba(0, 0, 0, 0.16) calc(var(--wash-from) + var(--wash-wipe) + 750px),
+    rgba(0, 0, 0, 0.05) calc(var(--wash-from) + var(--wash-wipe) + 880px),
+    transparent calc(var(--wash-from) + var(--wash-wipe) + 1000px));
+          mask-image: linear-gradient(90deg,
+    #000 0,
+    #000 calc(var(--wash-from) + var(--wash-wipe)),
+    rgba(0, 0, 0, 0.94) calc(var(--wash-from) + var(--wash-wipe) + 150px),
+    rgba(0, 0, 0, 0.78) calc(var(--wash-from) + var(--wash-wipe) + 300px),
+    rgba(0, 0, 0, 0.58) calc(var(--wash-from) + var(--wash-wipe) + 450px),
+    rgba(0, 0, 0, 0.35) calc(var(--wash-from) + var(--wash-wipe) + 600px),
+    rgba(0, 0, 0, 0.16) calc(var(--wash-from) + var(--wash-wipe) + 750px),
+    rgba(0, 0, 0, 0.05) calc(var(--wash-from) + var(--wash-wipe) + 880px),
+    transparent calc(var(--wash-from) + var(--wash-wipe) + 1000px));
+}
+/* Hidden until the beam calls for it. Sweep duration comes from the tracker
+   (distance / SPEED, the same px-per-ms the beam travels at); the fade runs
+   just past it, so colour is still gathering as the front finishes crossing
+   — the two motions share the reveal rather than one carrying it. */
+.wash { opacity: 0; }
+:root.wash-in .wash {
+  animation:
+    wash-sweep var(--wash-ms, 900ms) linear forwards,
+    wash-fade calc(var(--wash-ms, 900ms) * 0.9) cubic-bezier(0.3, 0.25, 0.4, 1) forwards;
+}
+/* Final resting state, set by the tracker's backstop — also the safety net if
+   the animations never run. */
+:root.wash-done .wash {
+  opacity: 1;
+  --wash-wipe: 135vw;
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wash { opacity: 1; --wash-wipe: 135vw; animation: none; }
+}
+
+/* f1 — the base 103deg diagonal fade, clipped to the wedge so it reads as
+   coming off the target. */
+:root[data-variant="f"] .wash i {
+  -webkit-mask-image: linear-gradient(103deg, transparent 32%, #000 97%), var(--wedge), var(--apex);
+          mask-image: linear-gradient(103deg, transparent 32%, #000 97%), var(--wedge), var(--apex);
+  mask-composite: intersect;
+}
+
+/* f2 — the diagonal fade is replaced by distance from the target: the wash
+   emerges at the lit element and builds as it travels outward, rather than
+   always starting around the middle of the page. */
+:root[data-variant="f2"] .wash i {
+  -webkit-mask-image: var(--from-target), var(--wedge);
+          mask-image: var(--from-target), var(--wedge);
+  -webkit-mask-composite: source-in;
+          mask-composite: intersect;
+}
+
+/* f3 — f2's mask, but the spectrum itself is now angular: a conic gradient
+   centred on the target turns the bands into rays fanning out from it, the
+   way a prism throws colour, instead of the near-horizontal stripes the
+   linear gradient draws. Same hues, same --spec-a. */
+:root[data-variant="f3"] .wash i {
+  background: conic-gradient(at var(--fx) var(--fy),
+    var(--spec-r) 30deg,
+    var(--spec-o) 54deg,
+    var(--spec-y) 76deg,
+    var(--spec-g) 98deg,
+    var(--spec-b) 122deg,
+    var(--spec-v) 150deg);
+  -webkit-mask-image: var(--from-target), var(--wedge);
+          mask-image: var(--from-target), var(--wedge);
+  -webkit-mask-composite: source-in;
+          mask-composite: intersect;
+}
+/* Horizontal (narrow-viewport) mode: the thin shaft loses far more of its
+   peak alpha to blur than the tall wedge does, so matching visual strength
+   takes larger numbers. See the filter defs note in index.html. */
+.light.horiz .l-glow { opacity: 0.18; }
+.light.horiz .l-core { opacity: 0.95; }
+
+a { color: var(--ink); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 0.1875rem; }
+
+main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
+
+.label {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 1.125rem;
+}
+
+/* nav */
+
+.nav-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 1.125rem 2.25rem;
+}
+.nav-inner::after,
+.foot-inner::before {
+  content: "";
+  position: absolute;
+  left: 2.25rem;
+  right: 2.25rem;
+}
+.nav-inner::after { bottom: 0; border-top: 1px solid var(--rule); }
+.foot-inner::before { top: 0; border-top: 1px solid var(--rule); }
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.nav-brand:hover { text-decoration: none; }
+.nav-links {
+  display: flex;
+  gap: 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+}
+.nav-links a { color: var(--muted); }
+.nav-links a:hover { color: var(--ink); text-decoration: none; }
+
+/* Every icon is stacked at the left of a fixed-size box, so nothing here can
+   reflow the nav: the drop simply translates off the theme icon on hover. */
+.theme {
+  position: relative;
+  align-self: center;
+  width: 2.3125rem;
+  height: 1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-left: -0.375rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.theme:hover { color: var(--ink); }
+.theme svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.theme .i-drop {
+  /* Smaller than the theme icons, so it needs its own vertical centring: the
+     drop is drawn from y=1.6 to y=13.4 of a 16 box, not edge to edge. */
+  width: 0.8125rem;
+  height: 0.8125rem;
+  top: 0.125rem;
+  stroke-width: 1.7;
+  transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.theme:hover .i-drop,
+.theme:focus-visible .i-drop { transform: translateX(1.375rem); }
+
+/* The theme icons only exist to be uncovered — hidden until the drop moves. */
+.theme .i-light,
+.theme .i-dark {
+  opacity: 0;
+  transition: opacity 0.18s ease 0.06s;
+}
+.theme[data-mode="light"]:hover .i-light,
+.theme[data-mode="dark"]:hover .i-dark,
+.theme[data-mode="light"]:focus-visible .i-light,
+.theme[data-mode="dark"]:focus-visible .i-dark { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .theme .i-drop, .theme svg { transition: none; }
+}
+
+/* hero */
+
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: min(calc(100svh - 3.625rem), 47.5rem);
+  text-align: center;
+  padding: 2.875rem 0 clamp(2.5rem, 9svh, 6rem);
+}
+
+/* The mark: lamp, lens, and three rays already splitting into the spectrum.
+   Line art on currentColor except the rays, which borrow the beam hues. */
+.hero-mark { display: block; margin: 0 auto 1.25rem; }
+.hero-mark svg {
+  display: block;
+  width: 4.75rem;
+  overflow: visible;
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.hero-mark circle { fill: var(--bg); }
+.hero-mark .ray { stroke-width: 2.6; }
+.hero-mark .r1 { stroke: var(--spec-r); }
+.hero-mark .r2 { stroke: var(--spec-g); }
+.hero-mark .r3 { stroke: var(--spec-v); }
+
+.hero h1 {
+  font-size: min(clamp(2rem, 6vw, 3.25rem), calc((100vw - 4.75rem) / 11.4));
+  white-space: nowrap;
+  font-weight: 450;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  margin: 0 0 1.25rem;
+  padding-bottom: 1.1em; /* clearance for the caret + handwritten note */
+}
+
+/* Proofreader's insertion, verbatim from the template: zero-width slot, caret
+   below the baseline, annotation hung under it. */
+.insert {
+  position: relative;
+  display: inline-block;
+  width: 0;
+}
+.caret {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 0.4em;
+  height: 0.25em;
+  margin-top: 0.08em;
+  margin-left: -0.19em;
+  overflow: visible;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url(#ink-rough);
+  transform: rotate(-7deg);
+}
+.caret .s1 { stroke-width: 4.8; }
+.caret .s2 { stroke-width: 3.5; opacity: 0.45; }
+.caret .s3 { stroke-width: 3.2; opacity: 0.4; }
+
+.note {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%) rotate(-3.5deg);
+  margin-top: 0.95em;
+  font-family: "Caveat", ui-rounded, cursive;
+  font-weight: 600;
+  font-size: 0.54em;
+  line-height: 1;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  color: var(--accent);
+  filter: url(#ink);
+}
+.note i {
+  display: inline-block;
+  font-style: normal;
+  transform: translateY(var(--y, 0)) rotate(var(--r, 0deg)) scale(var(--s, 1));
+}
+.note i:nth-of-type(1)  { --r: -5deg;  --y: 0.012em;  --s: 1.03; }
+.note i:nth-of-type(2)  { --r: 2deg;   --y: -0.02em;  --s: 0.97; }
+.note i:nth-of-type(3)  { --r: -1deg;  --y: 0.026em;  --s: 1.05; }
+.note i:nth-of-type(4)  { --r: 4deg;   --y: -0.01em;  --s: 0.99; }
+.note i:nth-of-type(5)  { --r: -3deg;  --y: 0.018em;  --s: 1.02; }
+.note i:nth-of-type(6)  { --r: 1deg;   --y: -0.026em; --s: 0.96; }
+.note i:nth-of-type(7)  { --r: 5deg;   --y: 0.008em;  --s: 1.04; }
+.note i:nth-of-type(8)  { --r: -2deg;  --y: -0.014em; --s: 1.01; }
+.note i:nth-of-type(9)  { --r: 3deg;   --y: 0.03em;   --s: 0.98; }
+.note i:nth-of-type(10) { --r: -4deg;  --y: -0.006em; --s: 1.05; }
+.note i:nth-of-type(11) { --r: 0deg;   --y: 0.022em;  --s: 0.97; }
+
+/* the fan — projector's tree */
+
+.fan {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.1em;
+  width: fit-content;
+  max-width: 100%;
+  margin: clamp(1rem, 3svh, 2.125rem) auto 0;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  line-height: 1.5;
+}
+.fan-src { text-align: right; }
+.fan-src b, .fan-out b { font-weight: 400; color: var(--ink); }
+.fan-src span, .fan-out span { display: block; color: var(--faint); }
+.fan-src span { white-space: nowrap; }
+
+.fan-beams {
+  flex: none;
+  width: 13.75rem;   /* 5:3, matching the 240x144 viewBox */
+  height: 8.25rem;
+  overflow: visible;
+}
+.fan-beams .lens {
+  fill: var(--bg);
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.fan-beams .beam {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.fan-beams .b1 { stroke: var(--spec-r); }
+.fan-beams .b2 { stroke: var(--spec-g); }
+.fan-beams .b3 { stroke: var(--spec-v); }
+.fan-beams .wedge { stroke: none; }
+.fan-beams .w1 { fill: var(--spec-r); }
+.fan-beams .w2 { fill: var(--spec-g); }
+.fan-beams .w3 { fill: var(--spec-v); }
+
+.fan-out {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 8.25rem;
+  padding: 0.35rem 0 0.3rem;
+}
+.fan-out p { margin: 0; }
+
+/* caption under the fan, with the template's one-at-a-time hand underlines */
+.fan-cap {
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  color: var(--faint);
+  margin: 1.25rem 0 0;
+}
+.fan-cap u {
+  position: relative;
+  white-space: nowrap;
+  text-decoration: none;
+  color: inherit;
+}
+.fan-cap u svg {
+  position: absolute;
+  left: 0;
+  bottom: -0.68em;
+  width: 100%;
+  height: 0.3125rem;
+  overflow: visible;
+}
+.fan-cap u path {
+  fill: none;
+  stroke: var(--t-state);
+  stroke-opacity: 0.38;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.fan-cap .u1 svg { transform: rotate(-1.3deg); }
+.fan-cap .u2 svg { transform: rotate(1.1deg); }
+.fan-cap .u3 svg { transform: rotate(-0.6deg); }
+.fan-cap .u4 svg { transform: rotate(1.5deg); }
+.fan-cap .u1 path { stroke-width: 1.9; }
+.fan-cap .u2 path { stroke-width: 1.55; }
+.fan-cap .u3 path { stroke-width: 1.8; }
+.fan-cap .u4 path { stroke-width: 1.6; }
+.fan-cap u .p2 { stroke-opacity: 0.26; }
+
+/* install steps */
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-top: auto;
+  padding-top: clamp(1.375rem, 4.5svh, 3rem);
+  text-align: left;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  max-width: 100%;
+  padding: 0.6875rem 0.875rem 0.6875rem 1.125rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  box-shadow: 0.1875rem 0.1875rem 0 var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.step:hover {
+  transform: translate(0.125rem, 0.125rem);
+  box-shadow: 0.0625rem 0.0625rem 0 var(--shadow);
+  text-decoration: none;
+}
+.step:active {
+  transform: translate(0.1875rem, 0.1875rem);
+  box-shadow: 0 0 0 var(--shadow);
+}
+.step:focus-visible { outline: 2px solid var(--accent); outline-offset: 0.1875rem; }
+@media (prefers-reduced-motion: reduce) {
+  .step { transition: none; }
+}
+
+.step-body { min-width: 0; }
+.step-label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.59375rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 1px;
+}
+.step-body code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.step-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--faint);
+}
+.step:hover .step-act { color: var(--ink); }
+.step-act svg {
+  width: 0.9375rem;
+  height: 0.9375rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.step-act .i-star { fill: currentColor; stroke-width: 0; }
+.step-stars {
+  align-self: stretch;
+  gap: 0.3125rem;
+  padding-left: 0.75rem;
+  border-left: 1.5px solid var(--rule);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  font-variant-numeric: tabular-nums;
+}
+.step:hover .step-stars { border-left-color: var(--ink); }
+.step-act .i-done { display: none; }
+.step[data-copied] .step-act { color: var(--accent); }
+.step[data-copied] .i-copy { display: none; }
+.step[data-copied] .i-done { display: block; }
+
+.req {
+  color: var(--faint);
+  font-size: 0.78125rem;
+  font-family: var(--mono);
+  text-align: left;
+  margin: auto 0 0;
+  padding-top: 0.875rem;
+}
+
+/* boxed code — terminal */
+
+.box {
+  border: 1px solid var(--rule);
+  margin-bottom: 4.5rem;
+  background: var(--bg);
+}
+.box-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6875rem 1.125rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--wash);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.box pre {
+  margin: 0;
+  padding: 1.375rem 1.125rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.85;
+}
+.box .c, .box .p { color: var(--faint); }
+.box .l, .box .q { color: var(--muted); }
+.box .m { color: var(--t-actor); }
+.box .b { color: var(--t-state); }
+.box .g { color: var(--t-ok); }
+.box .r { color: var(--t-bad); }
+
+/* numbered features */
+
+.features { margin-bottom: 4.5rem; }
+.features .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  border-top: 1px solid var(--rule);
+  border-left: 1px solid var(--rule);
+}
+.feature {
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.625rem 1.375rem 1.75rem;
+}
+.feature .num {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  margin-bottom: 0.75rem;
+}
+.feature h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.5625rem;
+}
+.feature p { margin: 0; color: var(--muted); font-size: 0.90625rem; line-height: 1.6; }
+
+/* why */
+
+.why { max-width: 38.75rem; margin: 0 auto 4.5rem; }
+.why p { color: var(--muted); font-size: 1.03125rem; }
+.why p:first-of-type { margin-top: 0; }
+.why em { color: var(--ink); font-style: italic; }
+
+/* docs */
+
+.docs { margin-bottom: 4.5rem; }
+.docs ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.docs li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0.875rem;
+  align-items: baseline;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.docs li a { font-size: 0.9375rem; }
+.docs li span { color: var(--faint); font-size: 0.84375rem; }
+
+/* footer */
+
+.foot-inner {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.375rem;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 1.625rem 2.25rem 2.875rem;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.foot-inner a { color: var(--faint); }
+.foot-inner a:hover { color: var(--ink); }
+.foot-inner .end { margin-left: auto; }
+
+@media (max-width: 775px) {
+  .nav-links a[href="#why"] { display: none; }
+  .hero { padding: 2rem 0 2.875rem; }
+  .foot-inner .end { margin-left: 0; }
+}
+/* The fan narrows before it wraps: drop the comments first, then shrink the
+   beams, so the diagram stays one line as long as it can. */
+@media (max-width: 620px) {
+  .fan-out span, .fan-src span { display: none; }
+  .fan-beams { width: 9rem; height: 5.4rem; }
+  .fan-out { height: 5.4rem; }
+}
+
+/* ---------------------------------------------------------------------------
+   Draw-in, in reading order: caret first, then the three beams leave the lens
+   one after another, then the caption's underlines land one at a time.
+   CSS-only, same pathLength="1" trick as the template.
+   --------------------------------------------------------------------------- */
+
+@keyframes ink-draw { to { stroke-dashoffset: 0; } }
+@keyframes wedge-in { to { fill-opacity: 0.1; } }
+
+.caret path,
+.fan-cap u path,
+.fan-beams .beam {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation-name: ink-draw;
+  animation-fill-mode: forwards;
+}
+.caret path { animation-duration: 0.12s; animation-timing-function: cubic-bezier(0.18, 0.85, 0.3, 1); }
+.caret .s1 { animation-delay: 0.20s; animation-timing-function: cubic-bezier(0.08, 0.5, 0.92, 0.5); }
+.caret .s2 { animation-delay: 0.37s; animation-duration: 0.08s; stroke-dashoffset: -1; }
+.caret .s3 { animation-delay: 0.50s; animation-duration: 0.06s; animation-timing-function: cubic-bezier(0.1, 0.9, 0.4, 1); }
+
+/* Light travels source → screen, so the beams draw left to right, fast — a
+   beam is not a pen stroke. The wedge glow catches up just behind each beam. */
+.fan-beams .beam {
+  stroke-opacity: 0.55;
+  animation-duration: 0.18s;
+  animation-timing-function: cubic-bezier(0.2, 0.6, 0.4, 1);
+}
+.fan-beams .b1 { animation-delay: 0.72s; }
+.fan-beams .b2 { animation-delay: 0.86s; }
+.fan-beams .b3 { animation-delay: 1.00s; }
+.fan-beams .wedge {
+  fill-opacity: 0;
+  animation-name: wedge-in;
+  animation-duration: 0.5s;
+  animation-fill-mode: forwards;
+  animation-timing-function: ease-out;
+}
+.fan-beams .w1 { animation-delay: 0.86s; }
+.fan-beams .w2 { animation-delay: 1.00s; }
+.fan-beams .w3 { animation-delay: 1.14s; }
+
+.fan-cap u path { animation-duration: 0.15s; animation-timing-function: ease-in-out; }
+.fan-cap u .p2 { stroke-dashoffset: -1; animation-duration: 0.11s; }
+.fan-cap .u1 .p1 { animation-delay: 1.55s; }
+.fan-cap .u1 .p2 { animation-delay: 1.75s; }
+.fan-cap .u2 .p1 { animation-delay: 1.92s; animation-duration: 0.14s; }
+.fan-cap .u2 .p2 { animation-delay: 2.14s; animation-duration: 0.10s; }
+.fan-cap .u3 .p1 { animation-delay: 2.31s; animation-duration: 0.16s; }
+.fan-cap .u3 .p2 { animation-delay: 2.53s; animation-duration: 0.12s; }
+.fan-cap .u4 .p1 { animation-delay: 2.71s; }
+.fan-cap .u4 .p2 { animation-delay: 2.95s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .caret path,
+  .fan-cap u path,
+  .fan-beams .beam,
+  .caret .s2,
+  .fan-cap u .p2 {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+  .fan-beams .wedge { animation: none; fill-opacity: 0.1; }
+}

@@ -321,6 +321,16 @@ export type ActionInstanceContext<TDataContent = never> = {
   ): void;
 };
 
+// Targets for address-based state writes. Three spellings of the same
+// coordinate: a descriptor (identity-resolved against the contributor's
+// scope, then by global uniqueness), a structured StateAddress (client
+// snapshots carry these), or an inference alias string (only resolvable
+// during a generator run, through the same alias map as getState).
+export type StateWriteTarget =
+  | InferenceStateAddress
+  | StateAddress
+  | StateDescriptor<any>;
+
 export type ActionContext<
   S = undefined,
   TDataContent = never,
@@ -328,6 +338,12 @@ export type ActionContext<
 > = {
   params: TParams;
   getState?: (address: InferenceStateAddress) => unknown;
+  // The write twin of getState: mutate any resolvable state, not just the
+  // action's bound descriptor. The singular `updateState` stays the typed
+  // sugar for the bound state; this is the plural, address-based form.
+  // Mutations go through the same validate-and-enqueue path, so every write
+  // is schema-checked and lands as a durable state.update message.
+  updateStateAt?: (target: StateWriteTarget, update: StateUpdateInput<unknown>) => void;
   instance: ActionInstanceContext<TDataContent>;
 } & ActionStateContext<S>;
 

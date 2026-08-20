@@ -131,7 +131,7 @@ Implementation rule:
 
 Transient frames must not be yielded by `runMachine(...)`.
 
-Apps that persist yielded frames, such as `apps/demo/convex/sessions.ts`, should not see transient frames unless they call `getTransientFrames()` explicitly.
+Apps that persist yielded frames, such as `apps/sandbox/convex/sessions.ts`, should not see transient frames unless they call `getTransientFrames()` explicitly.
 
 ### Folding
 

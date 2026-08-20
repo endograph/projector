@@ -330,11 +330,17 @@ function buildPrepareStep<TDataContent>(
   return ({ stepNumber, steps }) => {
     if (stepNumber === 0) return undefined;
     const inference = refreshInference();
+    // step.response.messages is CUMULATIVE (the SDK snapshots all response
+    // messages so far into every step), so the last step already carries the
+    // whole in-flight exchange. Flat-mapping across steps re-sends earlier
+    // messages once per step — and hard-fails OpenAI Responses reasoning
+    // models with "Duplicate item found with id rs_…".
+    const lastStep = steps[steps.length - 1];
     return {
       system: buildAiSdkSystemMessages(inference, config.model, config.promptCache),
       messages: [
         ...buildAiSdkMessages(inference, config.messageToModelMessage),
-        ...steps.flatMap((step) => step.response.messages),
+        ...(lastStep ? lastStep.response.messages : []),
       ],
     };
   };

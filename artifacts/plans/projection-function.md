@@ -11,7 +11,7 @@ The current framework types `projection` and `boundaryProjection` the same becau
 
 Once projection functions can mutate drafts directly, the API should make that distinction simpler instead of hiding it behind overloaded static fields.
 
-This plan only changes `@packages/projector`. It does not change `apps/demo` or `apps/demo-agent`.
+This plan only changes `@packages/projector`. It does not change `apps/sandbox` or `apps/sandbox-agent`.
 
 ## Goals
 
@@ -24,7 +24,7 @@ This plan only changes `@packages/projector`. It does not change `apps/demo` or 
 
 ## Non-Goals
 
-- Do not implement camera or sensor nodes in the demo app.
+- Do not implement camera or sensor nodes in the sandbox app.
 - Do not add transient frames.
 - Do not add node-owned private history.
 - Do not add rich image input support.
@@ -403,7 +403,7 @@ Update serialization expectations:
 
 ## Expected Outcome
 
-After this change, sensor-style nodes can project live external context into prompts without frames, without state persistence, and without special demo app plumbing in the framework.
+After this change, sensor-style nodes can project live external context into prompts without frames, without state persistence, and without special sandbox app plumbing in the framework.
 
 The framework model becomes clearer:
 
