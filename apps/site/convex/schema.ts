@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
+import { messageActorValidator } from "./messageActor";
 
 export default defineSchema({
   ...authTables,
@@ -8,6 +9,9 @@ export default defineSchema({
   sessions: defineTable({
     contextEpoch: v.number(),
     title: v.optional(v.string()),
+    // Authoritative artifact selection. A new artifact updates this pointer
+    // in the same transaction that inserts the immutable artifact row.
+    activeSurfaceVersion: v.optional(v.number()),
     syncState: v.optional(v.any()),
     // Reads are public. Writes belong to either the anonymous browser secret
     // or the GitHub identity that claims that secret after OAuth.
@@ -20,6 +24,18 @@ export default defineSchema({
     // crashed run only ever strands a timestamp the client ages out.
     workStartedAt: v.optional(v.number()),
   }),
+
+  // One durable membership edge per authenticated participant and session.
+  // Kept separate from sessions so collaborative rooms do not grow an
+  // unbounded participant array or contend on the session document.
+  sessionParticipants: defineTable({
+    userId: v.id("users"),
+    sessionId: v.id("sessions"),
+    firstParticipatedAt: v.number(),
+    lastParticipatedAt: v.number(),
+  })
+    .index("by_user_and_session", ["userId", "sessionId"])
+    .index("by_user_and_last_participated_at", ["userId", "lastParticipatedAt"]),
 
   frames: defineTable({
     referenceFrameId: v.optional(v.id("frames")),
@@ -74,6 +90,8 @@ export default defineSchema({
     frameId: v.optional(v.id("frames")),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
+    actor: v.optional(messageActorValidator),
+    clientMessageId: v.optional(v.string()),
     // Rich client rendering for this message: the id of a prebuilt explainer
     // widget. content stays the plain-text equivalent — it is what the LLM
     // sees as history and what renders if the widget id is unknown.
@@ -87,11 +105,7 @@ export default defineSchema({
     createdAt: v.number(),
     idempotencyKey: v.optional(v.string()),
     streamState: v.optional(v.string()),
-    streamSeq: v.optional(v.number()),
-  })
-    .index("by_frame", ["frameId"])
-    .index("by_idempotency_key", ["idempotencyKey"])
-    .index("by_frame_idempotency_key", ["frameId", "idempotencyKey"]),
+  }).index("by_frame", ["frameId"]),
 
   messageIndex: defineTable({
     sessionId: v.id("sessions"),
@@ -101,4 +115,13 @@ export default defineSchema({
     .index("by_session", ["sessionId"])
     .index("by_session_message", ["sessionId", "messageId"])
     .index("by_session_idempotency_key", ["sessionId", "idempotencyKey"]),
+
+  // Ephemeral, append-only chunks for live assistant output. The messages row
+  // is the stable UI identity and eventual durable value; these deltas exist
+  // only while that row is streaming and are removed when its frame settles.
+  messageStreamDeltas: defineTable({
+    messageId: v.id("messages"),
+    streamSeq: v.number(),
+    text: v.string(),
+  }).index("by_message_and_stream_seq", ["messageId", "streamSeq"]),
 });

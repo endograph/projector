@@ -14,7 +14,7 @@ export function getGuestSecret(): string {
 
 export async function sendAnonymousMessage(
   actionsUrl: string,
-  args: { sessionId: string; text: string; guestSecret: string },
+  args: { sessionId: string; text: string; clientMessageId: string; guestSecret: string },
 ): Promise<void> {
   const response = await fetch(`${actionsUrl.replace(/\/$/, "")}/api/anonymous/message`, {
     method: "POST",
@@ -22,7 +22,11 @@ export async function sendAnonymousMessage(
       "Content-Type": "application/json",
       "X-Projector-Guest": args.guestSecret,
     },
-    body: JSON.stringify({ sessionId: args.sessionId, text: args.text }),
+    body: JSON.stringify({
+      sessionId: args.sessionId,
+      text: args.text,
+      clientMessageId: args.clientMessageId,
+    }),
   });
   if (response.ok) return;
 

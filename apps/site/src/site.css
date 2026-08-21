@@ -24,7 +24,7 @@
   /* The nav's height is declared, not measured: the hero centres the composer
      at the viewport midpoint by subtracting this from 50svh, so the nav must
      actually be this tall (see .nav-inner). */
-  --nav-height: 4.25rem;
+  --nav-height: 3.25rem;
   --app-safe-bottom: env(safe-area-inset-bottom, 0px);
   /* The muted spectrum. One set of hues does triple duty: the background wash,
      the three hero beams, and the terminal roles. */
@@ -381,10 +381,14 @@ body {
 @media (max-width: 775px) {
   :root[data-variant^="f"] .light .l-glow { opacity: 0.45; }
   :root[data-variant^="f"] .light .l-core { opacity: 0.5; }
+  /* Both the focused spectrum and its post-scroll diffuse state derive from
+     this value, so they gain intensity together on compact dark screens. */
+  :root[data-theme="dark"] { --spec-a: 0.25; }
   :root[data-theme="dark"][data-variant^="f"] .light .l-glow { opacity: 0.26; }
   :root[data-theme="dark"][data-variant^="f"] .light .l-core { opacity: 1; }
 }
 @media (max-width: 775px) and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { --spec-a: 0.25; }
   :root:not([data-theme])[data-variant^="f"] .light .l-glow { opacity: 0.26; }
   :root:not([data-theme])[data-variant^="f"] .light .l-core { opacity: 1; }
 }
@@ -835,11 +839,12 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 }
 
 .step {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.625rem;
   max-width: none;
-  padding: 0.375rem 0.625rem;
+  padding: 0.25rem 0.625rem;
   border: 1px solid var(--faint);
   border-radius: 0.375rem;
   background: transparent;
@@ -848,16 +853,26 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
+  transition:
+    gap 0.55s cubic-bezier(0.35, 0, 0.15, 1),
+    padding 0.55s cubic-bezier(0.35, 0, 0.15, 1),
+    border-color 0.34s ease,
+    transform 0.12s,
+    box-shadow 0.34s ease;
+}
+.step:hover::before {
+  content: "";
+  position: absolute;
+  inset: -0.25rem;
 }
 .step:hover {
   border-color: var(--ink);
-  transform: translate(0.125rem, 0.125rem);
+  transform: translate(0.0625rem, 0.0625rem);
   box-shadow: 0.0625rem 0.0625rem 0 var(--shadow);
   text-decoration: none;
 }
 .step:active {
-  transform: translate(0.1875rem, 0.1875rem);
+  transform: translate(0.125rem, 0.125rem);
   box-shadow: 0 0 0 var(--shadow);
 }
 .step:focus-visible {
@@ -872,6 +887,8 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 .step-body { min-width: 0; }
 .step-label {
   display: block;
+  overflow: hidden;
+  max-height: 0.75rem;
   font-family: var(--mono);
   font-size: 0.5rem;
   font-weight: 500;
@@ -880,6 +897,10 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 0;
+  opacity: 1;
+  transition:
+    max-height 0.4s cubic-bezier(0.35, 0, 0.15, 1),
+    opacity 0.24s ease;
 }
 .step-body code {
   display: block;
@@ -1204,13 +1225,21 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 .talk-input {
   flex: 1;
   min-width: 0;
+  max-height: 8rem;
   border: 0;
   background: none;
   color: var(--ink);
-  font: 500 0.9375rem/1.4 var(--sans);
+  /* An explicit 1.3rem resolves to 26px at the app's 20px root size. The
+     previous unitless line-height resolved to 26.25px, which textarea layout
+     rounded into a stray one-pixel scroll range on a single line. */
+  font: 500 0.9375rem/1.3rem var(--sans);
   padding: 0.5rem 0;
   outline: none;
+  overflow-y: auto;
+  resize: none;
+  scrollbar-width: none;
 }
+.talk-input::-webkit-scrollbar { display: none; }
 .talk-input::placeholder { color: var(--faint); }
 .talk-mic, .talk-clear, .talk-go {
   display: grid;
@@ -1238,21 +1267,30 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 .talk-mic {
   flex: none;
   color: var(--faint);
-  cursor: default;
 }
-.talk-mic[disabled] { opacity: 0.55; }
+.talk-mic:hover { color: var(--ink); }
 .talk-go {
   background: var(--ink);
   color: var(--bg);
   transition: transform 0.12s;
 }
 .talk-go:hover { transform: translateX(0.125rem); }
-.talk-clear:focus-visible, .talk-go:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
+.talk-mic:focus-visible, .talk-clear:focus-visible, .talk-go:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
 
-/* Past conversations: a quiet mono link under the composer (boot.ts unhides
-   it when localStorage holds sessions) and the picker dialog it opens. */
+/* Authenticated, Convex-backed conversation history. Keep the mount in the
+   talk stack as a zero-height positioning anchor: when the async history read
+   reveals the button, it overlays below the composer without recentering it. */
+#past-conversations {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 0;
+}
 .talk-past {
-  margin-top: 0.875rem;
+  position: absolute;
+  top: 0.875rem;
+  left: 50%;
+  margin: 0;
   border: 0;
   border-radius: 0.25rem;
   background: none;
@@ -1264,6 +1302,8 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   color: var(--faint);
   cursor: pointer;
   padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+  transform: translateX(-50%);
 }
 .talk-past:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
 .talk-past:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.125rem; }
@@ -1290,6 +1330,10 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   flex-direction: column;
   max-height: min(60vh, 20rem);
   overflow-y: auto;
+  /* Put the overlay track near the dialog edge while keeping that space on
+     the content side of the track, where it protects row text and controls. */
+  margin-right: -0.75rem;
+  padding-right: 0.75rem;
 }
 .past-row {
   display: flex;
@@ -1331,6 +1375,7 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   cursor: pointer;
 }
 .past-remove:hover { color: var(--ink); }
+.past-remove:disabled { cursor: wait; }
 .past-remove[data-confirm] {
   width: 4.5rem;
   color: var(--ink);
@@ -1366,18 +1411,23 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
    --------------------------------------------------------------------------- */
 
 @media (max-width: 775px) {
-  :root { --nav-height: 3.5rem; }
+  :root { --nav-height: 3.25rem; }
   .nav-links a { display: none; }
-  .nav-inner { gap: 0.75rem; padding-inline: 1.5rem; }
+  .nav-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 0.75rem;
+    padding-inline: 1.5rem;
+  }
   .nav-inner::after,
   .foot-inner::before { left: 1.5rem; right: 1.5rem; }
   main { padding-inline: 1.5rem; }
   .foot-inner { padding-inline: 1.5rem; }
-  /* Nobody installs from a phone; the install step goes. GitHub keeps its
-     seat but collapses to the mark alone, packed right against the theme
-     toggle instead of centred. */
+  /* Nobody installs from a phone; GitHub collapses to the mark alone and
+     centers in the flexible space between the brand and theme picker. */
   .step[data-copy] { display: none; }
-  .start { margin-left: auto; }
+  .start { justify-self: center; margin-left: 0; }
+  .nav-links { justify-self: end; }
   /* A bare glyph, not a card: the step chrome comes off with the text. */
   .step-github {
     justify-content: center;
@@ -1386,7 +1436,7 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
     padding: 0;
     border: 0;
     box-shadow: none;
-    color: var(--muted);
+    color: var(--ink);
   }
   .step-github:hover,
   .step-github:active {
@@ -1434,7 +1484,11 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   }
   /* One column, two cards tall. Panels with more cards page through them on
      a timer (boot.ts), so nothing ever overflows the band. */
-  .explainer { grid-template-columns: 1fr; gap: 0.375rem; }
+  .explainer {
+    grid-template-columns: 1fr;
+    gap: 0.375rem;
+    width: min(100%, max(70%, 16rem));
+  }
   .explainer button { min-height: 0; }
   .explainer button[data-cycle-hidden] { display: none; }
   .foot-inner .end { margin-left: 0; }
@@ -1474,6 +1528,11 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 :root[data-app] .page,
 :root[data-app] .wash,
 :root[data-app] .light { display: none; }
+/* On the return trip, exclude the compositing-heavy light layers from the
+   view-transition snapshot. The tracker removes this after it has reset its
+   original first-load animation to a zero-length beam. */
+:root.light-reset .wash,
+:root.light-reset .light { display: none; }
 :root[data-app],
 :root[data-app] body {
   overflow: hidden;
@@ -1493,12 +1552,53 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 ::view-transition-old(brand),
 ::view-transition-new(brand) { animation-duration: 0.34s; }
 .nav-brand { view-transition-name: brand; }
-.nav-inner > .start,
-.app-nav > .start { view-transition-name: nav-actions; }
+.step[data-copy] { view-transition-name: nav-install-shell; }
+.step[data-copy] .step-label { view-transition-name: nav-install-label; }
+.step[data-copy] .step-body code { view-transition-name: nav-install-text; }
+.step[data-copy] .step-act { view-transition-name: nav-install-action; }
+.step-github { view-transition-name: nav-github-shell; }
+.step-github .step-label { view-transition-name: nav-github-label; }
+.step-github .step-body code { view-transition-name: nav-github-text; }
+.step-github .step-act { view-transition-name: nav-github-action; }
 .nav-inner > .nav-links,
 .app-nav > .nav-links { view-transition-name: nav-utilities; }
-::view-transition-old(nav-actions),
-::view-transition-new(nav-actions),
+::view-transition-group(nav-install-shell),
+::view-transition-group(nav-install-label),
+::view-transition-group(nav-install-text),
+::view-transition-group(nav-install-action),
+::view-transition-group(nav-github-shell),
+::view-transition-group(nav-github-label),
+::view-transition-group(nav-github-text),
+::view-transition-group(nav-github-action) {
+  animation-duration: 0.55s;
+  animation-timing-function: cubic-bezier(0.35, 0, 0.15, 1);
+}
+::view-transition-group(nav-utilities) {
+  animation-duration: 0.34s;
+  animation-timing-function: cubic-bezier(0.35, 0, 0.15, 1);
+}
+:root.launching::view-transition-old(nav-install-shell),
+:root.launching::view-transition-old(nav-github-shell) {
+  animation: nav-shell-out 0.34s ease-out both;
+}
+:root.launching::view-transition-new(nav-install-shell),
+:root.launching::view-transition-new(nav-github-shell),
+:root.light-reset::view-transition-old(nav-install-shell),
+:root.light-reset::view-transition-old(nav-github-shell) {
+  opacity: 1;
+  animation: none;
+}
+:root.light-reset::view-transition-new(nav-install-shell),
+:root.light-reset::view-transition-new(nav-github-shell) {
+  animation: nav-shell-in 0.55s ease-out both;
+}
+@keyframes nav-shell-out {
+  to { opacity: 0; }
+}
+@keyframes nav-shell-in {
+  0%, 58% { opacity: 0; }
+  100% { opacity: 1; }
+}
 ::view-transition-old(nav-utilities),
 ::view-transition-new(nav-utilities) {
   height: 100%;
@@ -1523,17 +1623,42 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   color: var(--ink);
   font-family: var(--sans);
 }
-/* Same chrome as the marketing nav: brand left, the two CTA steps dead
-   centre, Why/Docs/theme right. The steps/nav-links/theme rules are shared
-   with the landing — only the frame differs (grid, so the centre is the
-   viewport's centre regardless of how wide each side is). */
+/* Same chrome as the marketing nav: brand left, actions centered in the
+   actual space between the left and right clusters, utilities right. */
 .app-nav {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 1rem;
-  padding: 0.875rem clamp(1rem, 4vw, 2rem);
+  height: var(--nav-height);
+  padding: 0 clamp(1rem, 4vw, 2rem);
   border-bottom: 1px solid var(--rule);
+}
+.app-nav-actions-slot { justify-self: center; }
+.app-nav-active-session .step {
+  justify-content: center;
+  padding: 0.25rem 0.5rem;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+.app-nav-active-session .step-body code,
+.app-nav-active-session .step-act { color: var(--muted); }
+.app-nav-active-session .step-label {
+  max-height: 0;
+  opacity: 0;
+}
+.app-nav-active-session .step:hover,
+.app-nav-active-session .step:hover .step-body code,
+.app-nav-active-session .step:hover .step-act,
+.app-nav-active-session .step:focus-visible,
+.app-nav-active-session .step:focus-visible .step-body code,
+.app-nav-active-session .step:focus-visible .step-act { color: var(--ink); }
+.app-nav-active-session .step:hover,
+.app-nav-active-session .step:active {
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
 }
 .app-nav-left {
   display: flex;
@@ -1541,7 +1666,41 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   gap: 1rem;
   min-width: 0;
 }
+.app-nav-context {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+}
 .app-nav-links { justify-self: end; }
+.dev-panel-trigger {
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border: 0;
+  border-radius: 0.25rem;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+}
+.dev-panel-trigger:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+.dev-panel-trigger:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
+.dev-panel-trigger svg {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+.dev-panel-trigger path:nth-child(1) { stroke: var(--spec-b); }
+.dev-panel-trigger path:nth-child(2) { stroke: var(--spec-o); }
+.dev-panel-trigger path:nth-child(3) { stroke: var(--spec-g); }
 .app-nav-session {
   font-family: var(--mono);
   font-size: 0.71875rem;
@@ -1556,17 +1715,244 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
    the gutters widen to the landing's so the theme drop clears the edge. */
 @media (max-width: 775px) {
   .app-nav {
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.75rem;
-    padding-top: max(0.875rem, env(safe-area-inset-top));
+    height: calc(var(--nav-height) + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
     padding-right: max(1.5rem, env(safe-area-inset-right));
     padding-left: max(1.5rem, env(safe-area-inset-left));
   }
+  .app-nav-active-session .step-github { color: var(--ink); }
 }
-@media (max-width: 900px) {
-  /* A slight bottom bias gives the rule-mounted chips room without making
-     the nav's contents look vertically low. */
-  .app-nav { padding-bottom: 1rem; }
+
+/* Admin-only developer modal. Its tree follows the sandbox inspector's
+   information hierarchy while speaking the site's paper-and-ink language. */
+.dev-panel {
+  width: min(72rem, calc(100vw - 2rem));
+  height: min(46rem, calc(100dvh - 2rem));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.75rem;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0.375rem 0.375rem 0 var(--shadow);
+  font-family: var(--mono);
+}
+.dev-panel::backdrop { background: rgb(0 0 0 / 0.48); }
+.dev-panel-shell { display: flex; flex-direction: column; height: 100%; }
+.dev-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid var(--rule);
+}
+.dev-panel-head h2 {
+  margin: 0.125rem 0 0;
+  font: 600 0.9375rem/1.2 var(--sans);
+}
+.dev-panel-eyebrow {
+  color: var(--faint);
+  font-size: 0.625rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.dev-panel-head > button {
+  border: 1px solid var(--rule);
+  border-radius: 0.25rem;
+  background: none;
+  padding: 0.3rem 0.55rem;
+  color: var(--muted);
+  font: 500 0.6875rem/1 var(--mono);
+  cursor: pointer;
+}
+.dev-panel-head > button:hover { border-color: var(--ink); color: var(--ink); }
+.dev-panel-head > button:focus-visible,
+.dev-panel-tabs > button:focus-visible,
+.dev-tree-node-toggle:focus-visible,
+.dev-tree-disclosure > button:focus-visible,
+.dev-prompt-runtime-toggle:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+.dev-panel-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.dev-panel-tabs > button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 0.4rem 0.5rem 0.5rem;
+  color: var(--faint);
+  font: 500 0.65625rem/1 var(--mono);
+  cursor: pointer;
+}
+.dev-panel-tabs > button:hover { color: var(--ink); }
+.dev-panel-tabs > button[aria-current="page"] {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+}
+.dev-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.75rem;
+  font-size: 0.6875rem;
+}
+.dev-tree-node + .dev-tree-node { margin-top: 0.25rem; }
+.dev-tree-node-toggle,
+.dev-tree-disclosure > button {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0.25rem;
+  background: none;
+  padding-block: 0.35rem;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dev-tree-node-toggle:hover,
+.dev-tree-disclosure > button:hover { background: var(--wash); }
+.dev-tree-sign { flex: 0 0 0.75rem; color: var(--faint); text-align: center; }
+.dev-tree-kind,
+.dev-tree-id,
+.dev-tree-preview { color: var(--faint); }
+.dev-tree-name { overflow: hidden; color: var(--spec-b); text-overflow: ellipsis; white-space: nowrap; }
+.dev-tree-runtime { color: var(--t-state); }
+.dev-tree-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-tree-count { flex-shrink: 0; margin-left: auto; color: var(--faint); }
+.dev-tree-node-body {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+  padding: 0.625rem;
+  border-left: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--wash) 42%, transparent);
+}
+.dev-tree-section { display: grid; gap: 0.25rem; }
+.dev-tree-section h3 {
+  margin: 0;
+  color: var(--faint);
+  font: 500 0.59375rem/1.3 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dev-tree-disclosure { overflow: hidden; border-radius: 0.25rem; }
+.dev-tree-disclosure[data-expanded] { border: 1px solid var(--rule); background: var(--bg); }
+.dev-tree-disclosure-title { min-width: 0; flex: 1; }
+.dev-tree-preview {
+  overflow: hidden;
+  max-width: 45%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dev-tree-disclosure-body { padding: 0.5rem; border-top: 1px solid var(--rule); }
+.dev-tree-item-title { display: flex; min-width: 0; align-items: center; gap: 0.5rem; }
+.dev-tree-item-title > span { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.dev-tree-kv { display: grid; gap: 0.25rem; margin: 0; }
+.dev-tree-kv > div { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.5rem; }
+.dev-tree-kv dt { color: var(--faint); }
+.dev-tree-kv dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.dev-tree-json {
+  max-height: 16rem;
+  margin: 0;
+  overflow: auto;
+  color: var(--muted);
+  font: 0.65625rem/1.55 var(--mono);
+  white-space: pre-wrap;
+}
+.dev-tree-description { margin: 0 0 0.5rem; color: var(--muted); line-height: 1.5; }
+.dev-tree-empty,
+.dev-tree-muted { margin: 0; color: var(--faint); font-style: italic; }
+.dev-prompt-view { display: grid; gap: 0.5rem; }
+.dev-prompt-note {
+  margin: 0 0 0.25rem;
+  color: var(--faint);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dev-prompt-runtime {
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
+  background: var(--bg);
+}
+.dev-prompt-runtime-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 0.55rem;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dev-prompt-runtime-toggle:hover { background: var(--wash); }
+.dev-prompt-provider { color: var(--t-tool); }
+.dev-prompt-runtime-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--wash) 30%, transparent);
+}
+.dev-prompt-section { display: grid; gap: 0.35rem; min-width: 0; }
+.dev-prompt-section > h3 {
+  margin: 0;
+  color: var(--faint);
+  font: 500 0.59375rem/1.3 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dev-prompt-text {
+  max-height: 24rem;
+  margin: 0;
+  overflow: auto;
+  color: var(--muted);
+  font: 0.65625rem/1.55 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dev-prompt-messages { display: grid; gap: 0.4rem; }
+.dev-prompt-message {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  gap: 0.625rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--rule);
+}
+.dev-prompt-message:first-child { padding-top: 0; border-top: 0; }
+.dev-prompt-message > span { color: var(--spec-b); }
+
+@media (max-width: 700px) {
+  .dev-panel {
+    width: calc(100vw - 1rem);
+    height: calc(100dvh - 1rem);
+  }
+  .dev-panel-body { padding: 0.5rem; }
+  .dev-tree-node-toggle { flex-wrap: wrap; }
+  .dev-tree-count { width: 100%; margin-left: 1.2rem; }
+  .dev-tree-preview { max-width: 34%; }
+  .dev-prompt-runtime-toggle { flex-wrap: wrap; }
+  .dev-prompt-message { grid-template-columns: 1fr; gap: 0.25rem; }
 }
 
 .app-body {
@@ -1616,52 +2002,86 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 }
 .app-scroll,
 .app-pane-body,
-.app-inspector-body {
+.app-inspector-body,
+.past-list {
   scrollbar-gutter: auto;
 }
 @supports not selector(::-webkit-scrollbar) {
   .app-scroll,
   .app-pane-body,
-  .app-inspector-body {
+  .app-inspector-body,
+  .past-list {
     scrollbar-color: color-mix(in srgb, var(--ink) 24%, transparent) transparent;
     scrollbar-width: thin;
   }
 }
 .app-scroll::-webkit-scrollbar,
 .app-pane-body::-webkit-scrollbar,
-.app-inspector-body::-webkit-scrollbar {
+.app-inspector-body::-webkit-scrollbar,
+.past-list::-webkit-scrollbar {
   width: 0.25rem;
   height: 0.25rem;
   background: transparent;
 }
 .app-scroll::-webkit-scrollbar-track,
 .app-pane-body::-webkit-scrollbar-track,
-.app-inspector-body::-webkit-scrollbar-track {
+.app-inspector-body::-webkit-scrollbar-track,
+.past-list::-webkit-scrollbar-track {
   background: transparent;
 }
 .app-scroll::-webkit-scrollbar-thumb,
 .app-pane-body::-webkit-scrollbar-thumb,
-.app-inspector-body::-webkit-scrollbar-thumb {
+.app-inspector-body::-webkit-scrollbar-thumb,
+.past-list::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: color-mix(in srgb, var(--ink) 24%, transparent);
 }
 .app-scroll:hover::-webkit-scrollbar-thumb,
 .app-pane-body:hover::-webkit-scrollbar-thumb,
-.app-inspector-body:hover::-webkit-scrollbar-thumb {
+.app-inspector-body:hover::-webkit-scrollbar-thumb,
+.past-list:hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--ink) 42%, transparent);
 }
 .app-thread {
   max-width: 44rem;
   margin: 0 auto;
-  /* The tall bottom padding is the paging runway: the newest turn must be
-     able to scroll all the way to the top of the viewport even when nothing
-     follows it, so there is always ~a screen of blank paper below. */
-  padding: 2rem clamp(1rem, 4vw, 2rem) max(2rem, calc(var(--app-viewport-height, 100dvh) - 12rem));
+  /* JS sizes the final spacer from the newest turn's rendered height. */
+  padding: 2rem clamp(1rem, 4vw, 2rem) 0;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1rem;
 }
-.msg { display: flex; flex-direction: column; gap: 0.375rem; }
+.app-thread-spacer {
+  flex: 0 0 auto;
+  height: 7rem;
+  pointer-events: none;
+}
+
+/* Offered instead of yanking the viewport when someone else starts a turn
+   while the reader is scrolled back in history. */
+.jump-latest {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 0.5rem;
+  padding: 0.375rem 0.875rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0.125rem 0.125rem 0 var(--shadow);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  animation: jump-latest-in 0.18s ease-out;
+}
+.jump-latest:hover {
+  background: var(--wash);
+}
+.msg { display: flex; flex-direction: column; gap: 0.25rem; }
 .msg-role {
   font-family: var(--mono);
   font-size: 0.6875rem;
@@ -1670,7 +2090,14 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   color: var(--faint);
 }
 .msg-user .msg-role { color: var(--accent); }
+.msg-role-github {
+  align-self: flex-start;
+  text-transform: none;
+  text-decoration: none;
+}
+.msg-role-github:hover { text-decoration: underline; }
 .msg-body {
+  margin: 0;
   font-size: 0.9375rem;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -1679,10 +2106,20 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
 .msg-user .msg-body { font-weight: 500; }
 .msg-pending .msg-body::after {
   content: "▋";
-  color: var(--accent);
-  animation: msg-blink 1s steps(2) infinite;
+  color: var(--spec-v);
+  animation:
+    msg-blink 1s steps(2) infinite,
+    msg-spectrum 7.2s linear infinite;
 }
 @keyframes msg-blink { 50% { opacity: 0; } }
+@keyframes msg-spectrum {
+  0%, 100% { color: var(--spec-r); }
+  16.667% { color: var(--spec-o); }
+  33.333% { color: var(--spec-y); }
+  50% { color: var(--spec-g); }
+  66.667% { color: var(--spec-b); }
+  83.333% { color: var(--spec-v); }
+}
 
 /* Rich explainer widgets: an assistant turn rendered as a diagram card. Same
    paper vocabulary as the rest of the app — hairline border, mono labels —
@@ -2057,19 +2494,43 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   .pane-chat-return:hover { color: var(--ink); border-color: var(--ink); }
 }
 
-/* A new agent message remains visible while a narrow pane covers the chat.
-   The bubble is intentionally compact: tapping it closes the layer and lets
-   the full conversation carry the message from there. */
-.pane-agent-notice {
+/* Surface command errors and narrow-pane agent messages share one stack, so
+   neither can displace the other. Agent notices navigate back to the full
+   conversation; errors remain local, independently dismissible feedback. */
+.pane-notice-stack {
   position: absolute;
   z-index: 8;
   right: auto;
-  bottom: max(1rem, var(--app-safe-bottom));
+  bottom: calc(var(--app-composer-height, 4.75rem) + 0.75rem);
   left: 1rem;
-  display: none;
+  width: min(calc(100% - 2rem), 24rem);
+  pointer-events: none;
+}
+@media (max-width: 900px) {
+  .pane-notice-stack {
+    bottom: max(1rem, var(--app-safe-bottom));
+    width: min(calc(100% - 2rem), 32rem);
+  }
+}
+.pane-notice-slot {
+  overflow: hidden;
+  will-change: height;
+  transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pane-notice-slot:not([data-open]) { pointer-events: none; }
+.pane-notice-slot-content {
+  padding: 0.5rem 0.25rem 0.25rem 0;
+}
+.pane-notice-slot-content-stacked {
+  padding-right: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+.pane-notice {
+  position: relative;
+  display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  width: min(calc(100% - 2rem), 32rem);
+  width: 100%;
   margin: 0;
   padding: 0.75rem 0.875rem;
   border: 1.5px solid var(--ink);
@@ -2082,8 +2543,19 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   color: var(--ink);
   font: inherit;
   text-align: left;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(0.625rem);
+  transition:
+    opacity 0.18s ease-out,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pane-notice-slot[data-open] .pane-notice {
+  opacity: 1;
+  transform: translateY(0);
+}
+.pane-agent-notice {
   cursor: pointer;
-  animation: pane-agent-notice-in 0.18s ease-out;
 }
 .pane-agent-notice[data-pending] {
   align-items: center;
@@ -2091,20 +2563,20 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   min-height: 2.625rem;
   padding: 0.6875rem;
 }
-.pane-agent-notice-cursor {
+.pane-notice-cursor {
   display: block;
   width: 0.4375rem;
   height: 1rem;
   background: var(--ink);
-  animation: pane-agent-notice-blink 0.9s steps(2, end) infinite;
+  animation: pane-notice-blink 0.9s steps(2, end) infinite;
 }
-.pane-agent-notice-role {
+.pane-notice-role {
   color: var(--ink);
   font: 600 0.625rem/1.2 var(--mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.pane-agent-notice-copy {
+.pane-notice-copy {
   display: -webkit-box;
   overflow: hidden;
   font-size: 0.8125rem;
@@ -2113,21 +2585,65 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
+.pane-state-notice {
+  padding-right: 2.5rem;
+  border-color: var(--spec-r);
+  background: color-mix(in srgb, var(--spec-r) 9%, var(--bg));
+}
+.pane-state-notice .pane-notice-role { color: var(--spec-r); }
+.pane-state-notice-stack {
+  box-shadow:
+    0.25rem 0.25rem 0 var(--bg),
+    0.3125rem 0.3125rem 0 var(--spec-r),
+    0.4375rem 0.4375rem 0 var(--shadow);
+}
+.pane-notice-count {
+  display: inline-grid;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  margin-left: 0.375rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--spec-r);
+  color: var(--bg);
+  font-size: 0.5625rem;
+  letter-spacing: 0;
+  vertical-align: middle;
+}
+.pane-state-notice > button {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.375rem;
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border: 0;
+  border-radius: 0.25rem;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font: 1rem/1 var(--sans);
+  cursor: pointer;
+}
+.pane-state-notice > button:hover { background: var(--wash); color: var(--ink); }
+.pane-state-notice > button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
 .pane-agent-notice:hover { border-color: var(--ink); }
 .pane-agent-notice:focus-visible { outline: 2px solid var(--ink); outline-offset: 0.1875rem; }
-@media (max-width: 900px) {
-  .pane-agent-notice { display: flex; }
-}
-@keyframes pane-agent-notice-in {
+@keyframes jump-latest-in {
   from { opacity: 0; transform: translateY(0.75rem); }
 }
-@keyframes pane-agent-notice-blink { 50% { opacity: 0; } }
+@keyframes pane-notice-blink { 50% { opacity: 0; } }
 @keyframes layer-in-left { from { transform: translateX(-2rem); opacity: 0; } }
 @keyframes layer-in-right { from { transform: translateX(2rem); opacity: 0; } }
 @keyframes layer-out-left { to { transform: translateX(-2rem); opacity: 0; } }
 @keyframes layer-out-right { to { transform: translateX(2rem); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .app-pane, .app-inspector, .pane-agent-notice, .pane-agent-notice-cursor { animation: none; }
+  .app-pane, .app-inspector, .jump-latest, .pane-notice-cursor { animation: none; }
+  .pane-notice-slot, .pane-notice { transition: none; }
   .app-body[data-layer-closing="app"] .app-pane,
   .app-body[data-layer-closing="inspector"] .app-inspector { opacity: 0; }
 }
@@ -2336,6 +2852,161 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
   font-size: 0.625rem;
   color: var(--faint);
   margin-left: 0.5rem;
+}
+.labs-history {
+  margin-left: auto;
+}
+.labs-trigger {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+.labs-trigger:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.labs-trigger:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 0.125rem;
+}
+.labs-dot {
+  display: inline-block;
+  width: 0.375rem;
+  height: 0.375rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+  border-radius: 50%;
+  background: conic-gradient(
+    from -25deg,
+    var(--spec-r),
+    var(--spec-o),
+    var(--spec-y),
+    var(--spec-g),
+    var(--spec-b),
+    var(--spec-v),
+    var(--spec-r)
+  );
+  box-shadow:
+    -0.125rem -0.0625rem 0.375rem color-mix(in srgb, var(--spec-r) 42%, transparent),
+    0 -0.125rem 0.3125rem color-mix(in srgb, var(--spec-y) 34%, transparent),
+    0.125rem 0 0.375rem color-mix(in srgb, var(--spec-g) 40%, transparent),
+    0.0625rem 0.125rem 0.375rem color-mix(in srgb, var(--spec-b) 42%, transparent),
+    -0.125rem 0.0625rem 0.375rem color-mix(in srgb, var(--spec-v) 38%, transparent);
+  filter: saturate(1.3);
+}
+.labs-dot-failed {
+  margin-left: auto;
+  opacity: 0.35;
+}
+.labs-modal {
+  width: min(28rem, calc(100vw - 2rem));
+  max-width: none;
+  max-height: min(36rem, calc(100dvh - 2rem));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1.5px solid var(--ink);
+  border-radius: 0.75rem;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0.375rem 0.375rem 0 var(--shadow);
+  font: 400 0.6875rem/1.45 var(--sans);
+}
+.labs-modal::backdrop { background: rgb(0 0 0 / 0.48); }
+.labs-modal-shell {
+  display: flex;
+  flex-direction: column;
+  max-height: min(36rem, calc(100dvh - 2rem));
+}
+.labs-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid var(--rule);
+}
+.labs-history-eyebrow {
+  display: block;
+  color: var(--spec-b);
+  font: 600 0.5625rem/1.4 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.labs-modal-head h2 {
+  margin-top: 0.125rem;
+  margin-bottom: 0;
+  color: var(--ink);
+  font: 600 0.75rem/1.4 var(--mono);
+  text-transform: uppercase;
+}
+.labs-modal-head > button {
+  border: 1px solid var(--rule);
+  border-radius: 0.25rem;
+  background: none;
+  padding: 0.3rem 0.55rem;
+  color: var(--muted);
+  font: 500 0.6875rem/1 var(--mono);
+  cursor: pointer;
+}
+.labs-modal-head > button:hover { border-color: var(--ink); color: var(--ink); }
+.labs-modal-head > button:focus-visible,
+.labs-history-list button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+.labs-modal-body {
+  overflow: auto;
+  padding: 1rem;
+}
+.labs-modal-body > p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+.labs-history-list { border-top: 1px solid var(--rule); }
+.labs-history-list button {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.5rem 0.25rem;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.labs-history-list button:not(:disabled):hover {
+  background: color-mix(in srgb, var(--spec-b) 8%, transparent);
+}
+.labs-history-list button:disabled { cursor: default; }
+.labs-history-list button > span:first-child {
+  color: var(--spec-b);
+  font-family: var(--mono);
+}
+.labs-history-list button > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.labs-history-list small {
+  color: var(--spec-g);
+  font: 600 0.5625rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.labs-history-empty {
+  display: block;
+  padding: 0.75rem 0.25rem;
+  color: var(--faint);
+}
+.labs-modal-body > .labs-history-error {
+  margin-bottom: 0;
+  color: var(--t-bad);
 }
 .surface-host { min-height: 100%; }
 .surface-failure {

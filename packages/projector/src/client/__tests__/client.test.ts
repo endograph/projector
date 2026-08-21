@@ -243,6 +243,52 @@ describe("optimistic effigy", () => {
     });
   });
 
+  it("updateAt predicts with the machine's own state-update fold", async () => {
+    type Instances = Array<{
+      states: Array<{ address: StateAddress; value: { items: string[]; meta: { open: boolean } } }>;
+      commands: Array<{ name: "updateState" }>;
+      members: [];
+      children: [];
+      contributor: unknown;
+    }>;
+
+    const address = { instanceId: "child-1", stateKey: "todos" };
+    const effigy = createMachineEffigy<Instances>(() => {});
+    effigy.setInstances([
+      {
+        states: [{ address, value: { items: ["a"], meta: { open: false } } }],
+        commands: [{ name: "updateState" }],
+        members: [],
+        children: [],
+        contributor: {},
+      },
+    ] as Instances);
+    const optimistic = createOptimisticEffigy(effigy);
+
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) =>
+          ctx.updateAt(address, { op: "append", values: ["b"], path: ["items"] }),
+      })
+      .run({} as never);
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) => ctx.updateAt(address, { op: "patch", value: { open: true }, path: ["meta"] }),
+      })
+      .run({} as never);
+    // An update the fold rejects (append to a non-array) must leave truth alone.
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) => ctx.updateAt(address, { op: "append", values: [1], path: ["meta"] }),
+      })
+      .run({} as never);
+
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      items: ["a", "b"],
+      meta: { open: true },
+    });
+  });
+
   it("evicts an acked optimistic overlay and trusts fresh server state", async () => {
     const sent: Array<{ callId: string }> = [];
     const effigy = createMachineEffigy<CountInstances>((message) => {

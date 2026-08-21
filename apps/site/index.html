@@ -9,12 +9,14 @@
 <link rel="stylesheet" href="/src/site.css">
 <meta name="color-scheme" content="light dark">
 <script>
-  // Applied before first paint so the theme never flashes. No stored choice
-  // means follow the system.
+  // Applied before first paint so the theme never flashes. Honor an explicit
+  // choice; otherwise start in dark mode.
   try {
     var t = localStorage.getItem("theme");
-    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-  } catch (e) {}
+    document.documentElement.dataset.theme = t === "light" || t === "dark" ? t : "dark";
+  } catch (e) {
+    document.documentElement.dataset.theme = "dark";
+  }
   document.documentElement.dataset.variant = "f";
   // Deep link straight into a conversation: hide the marketing page before
   // first paint and let boot.ts load the app eagerly. The marketing DOM stays
@@ -118,9 +120,9 @@
           <span class="step-body"><span class="step-label">Install</span><code>npm i @projectors/core</code></span>
           <span class="step-act"><span class="vh">Copy</span><svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></span>
         </button>
-        <a class="step step-github" href="https://github.com/markov-machines/markov-machines" aria-label="Star markov-machines on GitHub">
+        <a class="step step-github" href="https://github.com/markov-machines/markov-machines" target="_blank" rel="noopener noreferrer" aria-label="Star markov-machines on GitHub">
           <svg class="i-gh" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.9-.39.98 0 1.97.13 2.9.39 2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.56A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
-          <span class="step-body"><span class="step-label">GitHub</span><code>Star</code></span>
+          <span class="step-body"><span class="step-label">Stars</span><code>github</code></span>
           <span class="step-act step-stars"><svg class="i-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.9 6 6.5.9-4.7 4.6 1.1 6.5L12 17.9 6.2 21l1.1-6.5L2.6 9.9 9.1 9z"/></svg><span class="count">1</span><span class="vh">stars</span></span>
         </a>
       </div>
@@ -155,20 +157,15 @@
       <button class="talk-clear" type="button" aria-label="Clear input">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
       </button>
-      <button class="talk-mic" type="button" disabled title="voice — coming soon" aria-label="Voice input, coming soon">
+      <button class="talk-mic" type="button" title="voice — coming soon" aria-label="Voice input, coming soon">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
       </button>
       <button class="talk-go" type="submit" aria-label="Send">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
       </button>
     </div>
-    <!-- Shown by boot.ts when localStorage holds past sessions. -->
-    <button class="talk-past" type="button" hidden>past conversations</button>
+    <span id="past-conversations"></span>
   </form>
-  <dialog class="past-dialog" aria-label="Past conversations">
-    <p class="past-head">past conversations</p>
-    <div class="past-list"></div>
-  </dialog>
   <!-- aria-live starts off: the resting cards below cycle on a timer, and a
        polite region would narrate every rotation. boot.ts flips it to polite
        the first time a change is visitor-driven (a hot word). -->
@@ -314,6 +311,15 @@
     const SELECTION = {};
     const CENTER = {};
     const contentTargetSelector = ".features .feature, .why > p:not(.label), .box, .docs li, .talk-card";
+    const modalTargetSelector = "dialog[open], [role='dialog'][aria-modal='true']";
+    const directTargetFor = (target) => {
+      if (!(target instanceof Element)) return null;
+      // A modal is one reading surface. Controls inside it should not make the
+      // ray hop around within the panel; illuminate the full modal instead.
+      return target.closest(modalTargetSelector) ||
+        target.closest(contentTargetSelector) ||
+        target.closest("a, button");
+    };
     let hoverEl = null;
     let lastDirect = null;
     let releasedByFade = null;
@@ -341,7 +347,7 @@
     }, { passive: true });
     document.addEventListener("pointermove", (e) => {
       if (e.pointerType && e.pointerType !== "mouse") return;
-      hoverEl = e.target.closest(contentTargetSelector) || e.target.closest("a, button");
+      hoverEl = directTargetFor(e.target);
       releasedByFade = null;
       schedule();
     }, { passive: true });
@@ -353,11 +359,11 @@
     });
     document.addEventListener("focusin", (e) => {
       if (!(e.target instanceof Element)) return;
-      // The composer input claims the ray for its card; other interactive
-      // targets claim themselves.
-      const claim = e.target.matches(".talk-input")
+      // A modal claims the ray as one surface. Outside a modal, the composer
+      // input claims its card and other interactive targets claim themselves.
+      const claim = e.target.closest(modalTargetSelector) || (e.target.matches(".talk-input")
         ? e.target.closest(".talk-card")
-        : e.target.matches("a, button") ? e.target : null;
+        : e.target.matches("a, button") ? e.target : null);
       if (claim) {
         hoverEl = null;
         releasedByFade = null;
@@ -366,6 +372,20 @@
         schedule();
       }
     });
+    // Native dialogs restore focus to their launcher as they close. Let that
+    // synchronous focus cycle finish, then return the ray to the composer
+    // instead of leaving it pinned to the button that opened the modal.
+    document.addEventListener("close", (e) => {
+      if (!(e.target instanceof HTMLDialogElement)) return;
+      requestAnimationFrame(() => {
+        if (e.target.open) return;
+        hoverEl = null;
+        releasedByFade = null;
+        lastDirect = composer;
+        sticky = composer;
+        schedule();
+      });
+    }, true);
     document.addEventListener("input", (e) => {
       if (!(e.target instanceof Element) || !e.target.matches(".talk-input")) return;
       const card = e.target.closest(".talk-card");
@@ -382,6 +402,7 @@
     const INTRO_DELAY = 200;
     const WASH_AT = 0.65;
     let introStart = null, introMs = 900, washed = false;
+    let washDoneTimer = 0;
     let washX = null, washY = null, washH = null, washDocY = null;
     let locked = null;
     let settling = true;
@@ -390,7 +411,10 @@
       rafId = 0;
       // The conversation is up: the marketing page is hidden, so the beam has
       // nothing to light. App-state observation wakes us for the return trip.
-      if (document.documentElement.dataset.app) {
+      if (
+        document.documentElement.dataset.app ||
+        document.documentElement.classList.contains("light-reset")
+      ) {
         return;
       }
       if (effectsHidden) {
@@ -489,7 +513,7 @@
             root.style.setProperty("--wash-from", Math.round(cur.x) + "px");
             root.style.setProperty("--wash-ms", ms + "ms");
             root.classList.add("wash-in");
-            setTimeout(() => root.classList.add("wash-done"), ms + 400);
+            washDoneTimer = setTimeout(() => root.classList.add("wash-done"), ms + 400);
           }
           if (p >= 1) { introStart = null; settling = false; }
         } else if (settling && !still.matches) {
@@ -594,6 +618,47 @@
       attributes: true,
       attributeFilter: ["data-app", "data-theme"],
     });
+    document.documentElement.addEventListener("projector:replay-light", () => {
+      const root = document.documentElement;
+      clearTimeout(washDoneTimer);
+      washDoneTimer = 0;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+
+      root.classList.remove("wash-in", "wash-done");
+      root.style.removeProperty("--wash-from");
+      root.style.removeProperty("--wash-ms");
+      cur.x = -1;
+      cur.x2 = 0;
+      cur.y = scrollY + innerHeight * 0.5;
+      cur.h = 12;
+      introStart = null;
+      introMs = 900;
+      washed = false;
+      washX = null;
+      washY = null;
+      washH = null;
+      washDocY = null;
+      locked = null;
+      settling = true;
+      drawn = null;
+      hoverEl = null;
+      lastDirect = null;
+      releasedByFade = null;
+      sticky = composer;
+      effectsHidden = scrollY > 50;
+      root.classList.toggle("ray-hidden", effectsHidden);
+      glow.setAttribute("points", "0,0 0,0 0,0");
+      core.setAttribute("points", "0,0 0,0 0,0");
+
+      // Geometry and class removal happen in one animation frame, so no old
+      // full-length polygon can flash between the transition and the replay.
+      rafId = requestAnimationFrame((t) => {
+        rafId = 0;
+        root.classList.remove("light-reset");
+        frame(t);
+      });
+    });
     schedule();
   }
 
@@ -601,8 +666,7 @@
   // currently in effect; the choice persists.
   {
     const btn = document.querySelector(".theme");
-    const sysDark = matchMedia("(prefers-color-scheme: dark)");
-    const effective = () => document.documentElement.dataset.theme || (sysDark.matches ? "dark" : "light");
+    const effective = () => document.documentElement.dataset.theme || "dark";
     const paint = () => {
       btn.dataset.mode = effective();
       btn.setAttribute("aria-label", "Theme: " + effective());
@@ -613,7 +677,6 @@
       try { localStorage.setItem("theme", next); } catch {}
       paint();
     });
-    sysDark.addEventListener("change", paint);
     paint();
   }
 

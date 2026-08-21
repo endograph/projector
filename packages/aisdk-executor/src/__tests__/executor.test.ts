@@ -382,7 +382,12 @@ describe("AiSdkExecutor", () => {
     const frames: FrameDraft[] = [];
     const streamUpdates: any[] = [];
     const generate = vi.fn(async () => result({ text: "unused" }));
-    const stream = vi.fn(() => streamResult(["Hel", "lo"]));
+    const stream = vi.fn(() => fullStreamResult([
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", text: "Hel" },
+      { type: "text-delta", id: "t1", text: "lo" },
+      { type: "text-end", id: "t1" },
+    ]));
     const executor = new AiSdkExecutor({
       model: fakeModel(),
       generateText: generate as never,
@@ -410,8 +415,12 @@ describe("AiSdkExecutor", () => {
       "streaming",
     ]);
     expect(streamUpdates.map((update) => update.streamSeq)).toEqual([0, 1, 2]);
-    expect(output.frames).toEqual([
+    // text-end enqueues the completed segment as its own frame during the run.
+    expect(output.frames).toBeUndefined();
+    expect(frames).toEqual([
       {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
         messages: [
           {
             type: "assistant",
@@ -424,7 +433,43 @@ describe("AiSdkExecutor", () => {
         ],
       },
     ]);
-    expect(frames).toEqual([]);
+  });
+
+  it("preserves a native preamble as a distinct frame before tool work", async () => {
+    const frames: FrameDraft[] = [];
+    const streamUpdates: any[] = [];
+    const stream = vi.fn(() => fullStreamResult([
+      { type: "text-start", id: "preamble" },
+      { type: "text-delta", id: "preamble", text: "I’ll inspect the current state." },
+      { type: "text-end", id: "preamble" },
+      { type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: {} },
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", text: "Here’s what I found." },
+      { type: "text-end", id: "answer" },
+    ]));
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      streamText: stream as never,
+      stream: true,
+      onStreamUpdate: (update) => streamUpdates.push(update),
+    });
+
+    const output = await executor.run(request({ enqueueFrame: enqueueTo(frames) }));
+    await flushPromises();
+
+    expect(frames).toHaveLength(2);
+    expect(frames[0]?.messages[0]).toMatchObject({
+      type: "assistant",
+      text: "I’ll inspect the current state.",
+      streamState: "complete",
+    });
+    expect(frames[1]?.messages[0]).toMatchObject({
+      type: "assistant",
+      text: "Here’s what I found.",
+      streamState: "complete",
+    });
+    expect(output.frames).toBeUndefined();
+    expect(new Set(streamUpdates.map((update) => update.messageId)).size).toBe(2);
   });
 
   it("does not enqueue a frame when generated text is empty", async () => {
@@ -1034,16 +1079,19 @@ function result(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function streamResult(chunks: string[]) {
+function fullStreamResult(parts: Array<Record<string, unknown>>) {
   return {
-    text: Promise.resolve(chunks.join("")),
+    text: Promise.resolve(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.text)
+        .join(""),
+    ),
     steps: Promise.resolve([{ stepType: "initial" }]),
     usage: Promise.resolve({ inputTokens: 1, outputTokens: 2, totalTokens: 3 }),
     finishReason: Promise.resolve("stop"),
-    textStream: (async function* () {
-      for (const chunk of chunks) {
-        yield chunk;
-      }
+    fullStream: (async function* () {
+      for (const part of parts) yield part;
     })(),
   };
 }

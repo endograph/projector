@@ -67,11 +67,74 @@ export async function getLatestSurfaceArtifact(
     .first();
 }
 
-export const latestSurfaceSource = internalQuery({
+export async function getSurfaceArtifact(
+  ctx: DbCtx,
+  sessionId: Id<"sessions">,
+  version: number,
+): Promise<Doc<"artifacts"> | null> {
+  return await ctx.db
+    .query("artifacts")
+    .withIndex("by_session_kind_version", (q) =>
+      q.eq("sessionId", sessionId).eq("kind", "surface").eq("version", version),
+    )
+    .unique();
+}
+
+export function readAppSurfaceSelection(serialized: unknown): {
+  latestVersion: number;
+  activeVersion: number | null;
+} | null {
+  const instance = serialized as {
+    states?: Record<string, { value?: unknown }>;
+    children?: unknown[];
+  } | null;
+  if (!instance || typeof instance !== "object") return null;
+
+  const value = instance.states?.appSurface?.value as
+    | { version?: unknown; activeVersion?: unknown }
+    | undefined;
+  if (typeof value?.version === "number") {
+    return {
+      latestVersion: value.version,
+      activeVersion:
+        typeof value.activeVersion === "number" ? value.activeVersion : value.version || null,
+    };
+  }
+
+  for (const child of instance.children ?? []) {
+    const found = readAppSurfaceSelection(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+export async function getActiveSurfaceArtifact(
+  ctx: DbCtx,
+  sessionId: Id<"sessions">,
+): Promise<Doc<"artifacts"> | null> {
+  const session = await ctx.db.get(sessionId);
+  if (session?.activeSurfaceVersion !== undefined) {
+    return await getSurfaceArtifact(ctx, sessionId, session.activeSurfaceVersion);
+  }
+
+  const latestInstance = await ctx.db
+    .query("projectorInstanceLog")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .order("desc")
+    .first();
+  const selection = latestInstance
+    ? readAppSurfaceSelection(restoreConvexJson(latestInstance.instance))
+    : null;
+  return selection?.activeVersion
+    ? await getSurfaceArtifact(ctx, sessionId, selection.activeVersion)
+    : await getLatestSurfaceArtifact(ctx, sessionId);
+}
+
+export const activeSurfaceSource = internalQuery({
   args: { sessionId: v.id("sessions") },
   returns: v.union(v.null(), surfaceValidator),
   handler: async (ctx, { sessionId }) => {
-    const artifact = await getLatestSurfaceArtifact(ctx, sessionId);
+    const artifact = await getActiveSurfaceArtifact(ctx, sessionId);
     return artifact
       ? { version: artifact.version, title: artifact.title, source: artifact.source }
       : null;
@@ -193,6 +256,7 @@ export async function recordSurfaceArtifacts(
 
   const latest = await getLatestSurfaceArtifact(ctx, sessionId);
   let fallbackVersion = latest?.version ?? 0;
+  let activeVersion: number | undefined;
   for (const write of writes) {
     const version = write.version ?? ++fallbackVersion;
     const existing = await ctx.db
@@ -212,6 +276,10 @@ export async function recordSurfaceArtifacts(
       charterVersion: siteCharter.version,
       createdAt: Date.now(),
     });
+    activeVersion = version;
+  }
+  if (activeVersion !== undefined) {
+    await ctx.db.patch(sessionId, { activeSurfaceVersion: activeVersion });
   }
 }
 

@@ -128,10 +128,18 @@ export type Audience = "self" | "broadcast" | AudienceTarget | AudienceTarget[];
 
 export type MessageDelivery = "immediate" | "queued";
 
+/** Stable application-authored identity for a human or agent actor. */
+export type ActorIdentity = {
+  id: string;
+  label: string;
+  kind?: string;
+};
+
 export type UserMessage<TDataContent = never> = {
   type: "user";
   text?: string;
   content?: ContentPart<TDataContent>[];
+  actor?: ActorIdentity;
   audience?: Audience;
   delivery?: MessageDelivery;
 };
@@ -140,6 +148,7 @@ export type AssistantMessage<TDataContent = never> = {
   type: "assistant";
   text?: string;
   content?: ContentPart<TDataContent>[];
+  actor?: ActorIdentity;
   audience?: Audience;
   delivery?: MessageDelivery;
 };

@@ -7,7 +7,81 @@ import type {
   StateAddress,
   StateContainer,
   StateKey,
+  StatePath,
+  StateUpdate,
 } from "./types.ts";
+
+/**
+ * The one state-update fold. The machine applies it when a state.update
+ * message lands in the log; clients apply the SAME function for optimistic
+ * overlays, so a prediction and its eventual durable fold can never differ
+ * for a valid update.
+ */
+export function applyStateUpdate(value: unknown, update: StateUpdate): unknown {
+  if (update.op === "replace") {
+    return update.value;
+  }
+
+  if (update.op === "patch") {
+    return updateAtPath(value, update.path ?? [], (target) =>
+      patchObject(target, update.value as Record<string, unknown>),
+    );
+  }
+
+  if (update.op === "append") {
+    return updateAtPath(value, update.path ?? [], (target) => {
+      if (!Array.isArray(target)) {
+        throw new Error("Cannot append to non-array state value");
+      }
+      return [...target, ...update.values];
+    });
+  }
+
+  const unreachable: never = update;
+  return unreachable;
+}
+
+function patchObject(value: unknown, patch: Record<string, unknown>): unknown {
+  return {
+    ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
+    ...patch,
+  };
+}
+
+function updateAtPath(
+  value: unknown,
+  path: StatePath,
+  updater: (target: unknown) => unknown,
+): unknown {
+  if (path.length === 0) {
+    return updater(value);
+  }
+
+  const [segment, ...rest] = path;
+  if (Array.isArray(value)) {
+    if (typeof segment !== "number") {
+      throw new Error("Array state paths must use numeric segments");
+    }
+    if (segment < 0 || segment >= value.length) {
+      throw new Error(`Array state path segment ${segment} is out of bounds`);
+    }
+    const next = [...value];
+    next[segment] = updateAtPath(next[segment], rest, updater);
+    return next;
+  }
+
+  if (!value || typeof value !== "object") {
+    throw new Error("Cannot update nested path on non-object state value");
+  }
+
+  if (typeof segment !== "string") {
+    throw new Error("Object state paths must use string segments");
+  }
+  return {
+    ...(value as Record<string, unknown>),
+    [segment]: updateAtPath((value as Record<string, unknown>)[segment], rest, updater),
+  };
+}
 
 export type ResolvedState<TDataContent = any> = {
   address: StateAddress;

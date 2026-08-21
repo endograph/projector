@@ -8,7 +8,9 @@
 import { v } from "convex/values";
 import { mutation } from "./_generated/server";
 import { appendMachineFrameInternal } from "./sessions";
-import { authorizeSessionWrite } from "./access";
+import { authorizeSessionWrite, consumeAnonymousTurn } from "./access";
+import { addMessageInternal } from "./messages";
+import { requireClientMessageId } from "./messageActor";
 
 const TOPICS: Record<string, { ask: string; reply: string }> = {
   subagents: {
@@ -28,15 +30,18 @@ export const open = mutation({
     // The question as the visitor's card showed it; falls back to the
     // topic's canonical ask so the log always has a coherent user turn.
     ask: v.optional(v.string()),
+    clientMessageId: v.string(),
     guestSecret: v.optional(v.string()),
   },
   returns: v.null(),
-  handler: async (ctx, { sessionId, topic, ask, guestSecret }) => {
+  handler: async (ctx, { sessionId, topic, ask, clientMessageId, guestSecret }) => {
     const entry = TOPICS[topic];
     if (!entry) throw new Error(`Unknown topic "${topic}"`);
     const session = await ctx.db.get(sessionId);
     if (!session) throw new Error("Session not found");
-    await authorizeSessionWrite(ctx, session, guestSecret);
+    const actor = await authorizeSessionWrite(ctx, session, guestSecret);
+    if (actor.kind === "anonymous") await consumeAnonymousTurn(ctx, session);
+    const normalizedClientMessageId = requireClientMessageId(clientMessageId);
 
     const userText = ask?.trim() || entry.ask;
     const frameId = await appendMachineFrameInternal(ctx, {
@@ -45,7 +50,12 @@ export const open = mutation({
       frame: {
         metadata: { type: "topic", topic },
         messages: [
-          { type: "user", text: userText },
+          {
+            type: "user",
+            text: userText,
+            actor,
+            clientMessageId: normalizedClientMessageId,
+          },
           // Assistant messages default to audience "self", which is scoped to
           // the frame's generator — and an app-authored frame has none, so the
           // reply would be invisible to the model. This one was said to the
@@ -55,30 +65,23 @@ export const open = mutation({
       },
     });
 
-    // createdAt is the sort key and _id is a random tiebreak, so the two rows
-    // must not share a timestamp or the reply can sort above the question.
-    let at = Date.now();
-    const insert = async (
-      role: "user" | "assistant",
-      content: string,
-      widget?: string,
-    ) => {
-      const messageId = await ctx.db.insert("messages", {
-        role,
-        content,
-        frameId,
-        ...(widget !== undefined ? { widget } : {}),
-        createdAt: at++,
-        idempotencyKey: `topic:${frameId}:${role}`,
-      });
-      await ctx.db.insert("messageIndex", {
-        sessionId,
-        messageId,
-        idempotencyKey: `topic:${frameId}:${role}`,
-      });
-    };
-    await insert("user", userText);
-    await insert("assistant", entry.reply, topic);
+    await addMessageInternal(ctx, {
+      sessionId,
+      role: "user",
+      content: userText,
+      actor,
+      clientMessageId: normalizedClientMessageId,
+      frameId,
+      idempotencyKey: `topic:${frameId}:user`,
+    });
+    await addMessageInternal(ctx, {
+      sessionId,
+      role: "assistant",
+      content: entry.reply,
+      widget: topic,
+      frameId,
+      idempotencyKey: `topic:${frameId}:assistant`,
+    });
 
     return null;
   },

@@ -16,7 +16,7 @@ import { implicitDefaultLayout, layoutRegionForSlot } from "../layouts.ts";
 import { encodeProjectionAddress } from "../projection-address.ts";
 import { callerAllows, resolveContributorActions, type ResolvedNodeAction } from "../scoped-actions.ts";
 import { slotPlacement } from "../slots.ts";
-import { groupStatesByContributor, resolveStates, type ResolvedState } from "../state.ts";
+import { applyStateUpdate, groupStatesByContributor, resolveStates, type ResolvedState } from "../state.ts";
 import type {
   Action,
   ActionRequestMessage,
@@ -28,6 +28,7 @@ import type {
   NormalizedRuntime,
   ProjectionAddress,
   StateAddress,
+  StateUpdate,
   TextPart,
   Exposure,
 } from "../types.ts";
@@ -35,7 +36,7 @@ import type {
 export type JSONSchema = unknown;
 
 export type ClientMachineMessage = ActionRequestMessage & { action: "command" };
-export type { ActionRequestMessage, ExecuteActionResult };
+export type { ActionRequestMessage, ExecuteActionResult, StateAddress, StateUpdate };
 
 export type MachineClientSnapshot<TInstance = unknown> = {
   instance: TInstance;
@@ -234,6 +235,13 @@ export type OptimisticContext<TInstances = unknown> = {
   patch(patch: Record<string, unknown>): void;
   patchAt(address: StateAddress, patch: Record<string, unknown>): void;
   replaceAt(address: StateAddress, value: unknown): void;
+  /**
+   * Applies a machine StateUpdate ({op, value, path…}) through the same fold
+   * the machine uses server-side — the exact prediction of what the durable
+   * log will do with this update. Invalid updates (bad path, append to
+   * non-array) leave the overlay untouched; the server is the arbiter.
+   */
+  updateAt(address: StateAddress, update: StateUpdate): void;
   getInstances(): TInstances | undefined;
 };
 
@@ -747,6 +755,17 @@ function createOptimisticContext<TInstances>(
         return;
       }
       state.value = value;
+    },
+    updateAt: (address, update) => {
+      const state = findStateView(instances, address);
+      if (!state) {
+        return;
+      }
+      try {
+        state.value = applyStateUpdate(state.value, update);
+      } catch {
+        // The fold rejected the update; the server will too. Show truth.
+      }
     },
     getInstances: () => instances,
   };

@@ -37,7 +37,9 @@ import {
 } from "../src/agent/charter";
 import { addMessageInternal } from "./messages";
 import {
+  getSurfaceArtifact,
   getLatestSurfaceArtifact,
+  readAppSurfaceSelection,
   readLegacySurface,
   recordSurfaceArtifacts,
 } from "./artifacts";
@@ -48,6 +50,8 @@ import {
   isValidGuestSecret,
   reserveAnonymousTurn as reserveAnonymousTurnForSession,
 } from "./access";
+import { messageActorValidator } from "./messageActor";
+import type { MessageActor } from "./messageActor";
 import { escapeConvexJson, restoreConvexJson, stripClientSchemas } from "./convexJson";
 import {
   getFrameIndexForSession,
@@ -61,6 +65,15 @@ type DbCtx = MutationCtx | QueryCtx;
 type SessionDoc = Doc<"sessions">;
 
 const MAX_INSTANCE_LOGS = 2000;
+
+const commandExecutionStatusValidator = v.union(
+  v.object({ success: v.literal(true) }),
+  v.object({ success: v.literal(false), error: v.string() }),
+);
+
+type CommandExecutionStatus =
+  | { success: true }
+  | { success: false; error: string };
 
 export const create = mutation({
   args: { guestSecret: v.optional(v.string()) },
@@ -156,7 +169,11 @@ export const get = query({
     // The surface's TSX lives in the artifacts table, not machine state; the
     // legacy read keeps pre-artifacts sessions rendering from the source their
     // snapshots still carry.
-    const artifact = await getLatestSurfaceArtifact(ctx, sessionId);
+    const selection = readAppSurfaceSelection(latestInstance);
+    const activeVersion = session.activeSurfaceVersion ?? selection?.activeVersion;
+    const artifact = activeVersion
+      ? await getSurfaceArtifact(ctx, sessionId, activeVersion)
+      : await getLatestSurfaceArtifact(ctx, sessionId);
     const surface = artifact
       ? { version: artifact.version, title: artifact.title, source: artifact.source }
       : readLegacySurface(latestInstance);
@@ -280,73 +297,100 @@ export const sendCommand = mutation({
     message: v.any(),
     guestSecret: v.optional(v.string()),
   },
-  returns: v.null(),
+  returns: commandExecutionStatusValidator,
   handler: async (ctx, { sessionId, message, guestSecret }) => {
     const session = await getSessionOrThrow(ctx, sessionId);
-    const access = await authorizeSessionWrite(ctx, session, guestSecret);
-    const latestFrame = await getLatestSessionFrameDoc(ctx, sessionId);
-    if (!latestFrame) throw new Error("Session has no frames");
-    const serialized = await getLatestSerializedSource(ctx, sessionId);
-    if (!serialized) throw new Error("Session has no instance snapshot");
-
-    const machine = createMachine({
-      id: sessionId,
-      instance: hydrateSiteInstance(serialized, sessionId),
-      charter: siteCharter,
-      frames: await getMachineContextFrames(ctx, session),
+    const actor = await authorizeSessionWrite(ctx, session, guestSecret);
+    return await executeAuthorizedSessionCommand(ctx, {
+      sessionId,
+      message: restoreConvexJson(message) as ClientMachineMessage,
+      actor,
     });
-    await executeCommand(machine, restoreConvexJson(message) as ClientMachineMessage);
+  },
+});
 
-    const produced: Frame[] = [];
-    for await (const frame of runMachine(machine, { scheduleWork: false })) {
-      produced.push(frame);
-    }
-    if (access === "guest" && containsWorkActivation(produced)) {
-      throw new Error(ACCESS_ERROR.authRequired);
-    }
-    if (produced.length > 0) {
-      const frameIds = await appendMachineFrameSequenceInternal(ctx, {
-        sessionId,
-        session,
-        referenceFrameId: latestFrame._id,
-        frames: produced,
-      });
-      // Command-produced assistant messages (e.g. a postCard run as a client
-      // command) enter the transcript here, mirroring the agent action's
-      // persistence path.
-      for (const [index, frame] of produced.entries()) {
-        const frameId = frameIds[index];
-        if (!frameId) continue;
-        for (const [messageIndex, message] of frame.messages.entries()) {
-          if (message.type !== "assistant") continue;
-          if ((message as { audience?: unknown }).audience === "self") continue;
-          const text = typeof message.text === "string" ? message.text : "";
-          if (!text.trim()) continue;
-          const card = readCardData(message);
-          await addMessageInternal(ctx, {
-            sessionId,
-            role: "assistant",
-            content: text,
-            frameId,
-            ...(card ? { card: { title: card.title, source: card.source } } : {}),
-            idempotencyKey: `assistant:${frame.id}:${messageIndex}`,
-          });
-        }
+export async function executeAuthorizedSessionCommand(
+  ctx: MutationCtx,
+  {
+    sessionId,
+    message,
+    actor,
+  }: {
+    sessionId: Id<"sessions">;
+    message: ClientMachineMessage;
+    actor: MessageActor;
+  },
+): Promise<CommandExecutionStatus> {
+  const session = await getSessionOrThrow(ctx, sessionId);
+  const latestFrame = await getLatestSessionFrameDoc(ctx, sessionId);
+  if (!latestFrame) throw new Error("Session has no frames");
+  const serialized = await getLatestSerializedSource(ctx, sessionId);
+  if (!serialized) throw new Error("Session has no instance snapshot");
+
+  const machine = createMachine({
+    id: sessionId,
+    instance: hydrateSiteInstance(serialized, sessionId),
+    charter: siteCharter,
+    frames: await getMachineContextFrames(ctx, session),
+  });
+  const result = await executeCommand(machine, message);
+
+  const produced: Frame[] = [];
+  for await (const frame of runMachine(machine, { scheduleWork: false })) {
+    for (const producedMessage of frame.messages) {
+      if (producedMessage.type === "user" && !producedMessage.actor) {
+        producedMessage.actor = actor;
       }
-
-      if (containsWorkActivation(produced)) {
-        // Same transaction as the scheduling: the moment the poke commits,
-        // every subscribed client's thinking indicator starts — no waiting
-        // for the model to say its first token.
-        await ctx.db.patch(sessionId, { workStartedAt: Date.now() });
-        await ctx.scheduler.runAfter(0, internal.agent.continueAfterCommand, {
+    }
+    produced.push(frame);
+  }
+  if (actor.kind === "anonymous" && containsWorkActivation(produced)) {
+    throw new Error(ACCESS_ERROR.authRequired);
+  }
+  if (produced.length > 0) {
+    const frameIds = await appendMachineFrameSequenceInternal(ctx, {
+      sessionId,
+      session,
+      referenceFrameId: latestFrame._id,
+      frames: produced,
+    });
+    // Command-produced assistant messages (e.g. a postCard run as a client
+    // command) enter the transcript here, mirroring the agent action's
+    // persistence path.
+    for (const [index, frame] of produced.entries()) {
+      const frameId = frameIds[index];
+      if (!frameId) continue;
+      for (const [messageIndex, message] of frame.messages.entries()) {
+        if (message.type !== "assistant") continue;
+        if ((message as { audience?: unknown }).audience === "self") continue;
+        const text = typeof message.text === "string" ? message.text : "";
+        if (!text.trim()) continue;
+        const card = readCardData(message);
+        await addMessageInternal(ctx, {
           sessionId,
+          role: "assistant",
+          content: text,
+          frameId,
+          ...(card ? { card: { title: card.title, source: card.source } } : {}),
+          idempotencyKey: `assistant:${frame.id}:${messageIndex}`,
         });
       }
     }
-    return null;
-  },
-});
+
+    if (containsWorkActivation(produced)) {
+      // Same transaction as the scheduling: the moment the poke commits,
+      // every subscribed client's thinking indicator starts — no waiting
+      // for the model to say its first token.
+      await ctx.db.patch(sessionId, { workStartedAt: Date.now() });
+      await ctx.scheduler.runAfter(0, internal.agent.continueAfterCommand, {
+        sessionId,
+      });
+    }
+  }
+  return result.success
+    ? { success: true }
+    : { success: false, error: result.error };
+}
 
 export const reserveAnonymousTurn = internalMutation({
   args: {
@@ -367,12 +411,12 @@ export const authorizeAuthenticatedTurn = internalMutation({
     sessionId: v.id("sessions"),
     guestSecret: v.optional(v.string()),
   },
-  returns: v.null(),
+  returns: messageActorValidator,
   handler: async (ctx, { sessionId, guestSecret }) => {
     const session = await getSessionOrThrow(ctx, sessionId);
-    const access = await authorizeSessionWrite(ctx, session, guestSecret);
-    if (access !== "authenticated") throw new Error(ACCESS_ERROR.authRequired);
-    return null;
+    const actor = await authorizeSessionWrite(ctx, session, guestSecret);
+    if (actor.kind !== "github") throw new Error(ACCESS_ERROR.authRequired);
+    return actor;
   },
 });
 

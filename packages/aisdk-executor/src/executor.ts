@@ -127,80 +127,134 @@ export class AiSdkExecutor<
     runState: RunState,
   ): Promise<ExecutorRunResult<TDataContent>> {
     const startedAt = Date.now();
-    const messageId = crypto.randomUUID();
-    let seq = 0;
-    let text = "";
+    type TextSegment = {
+      partId: string;
+      messageId: string;
+      text: string;
+      seq: number;
+      enqueued: boolean;
+    };
+    const segments: TextSegment[] = [];
+    const activeSegments = new Map<string, TextSegment>();
 
-    emitStreamUpdate(this.config, {
-      request,
-      messageId,
-      text,
-      streamState: "streaming",
-      streamSeq: seq,
-    });
+    const startSegment = (partId: string): TextSegment => {
+      const segment: TextSegment = {
+        partId,
+        messageId: crypto.randomUUID(),
+        text: "",
+        seq: 0,
+        enqueued: false,
+      };
+      segments.push(segment);
+      activeSegments.set(partId, segment);
+      emitStreamUpdate(this.config, {
+        request,
+        messageId: segment.messageId,
+        text: "",
+        streamState: "streaming",
+        streamSeq: 0,
+      });
+      return segment;
+    };
+
+    const appendSegment = (partId: string, delta: string): void => {
+      if (!delta) return;
+      const segment = activeSegments.get(partId) ?? startSegment(partId);
+      segment.text += delta;
+      segment.seq += 1;
+      emitStreamUpdate(this.config, {
+        request,
+        messageId: segment.messageId,
+        text: segment.text,
+        delta,
+        streamState: "streaming",
+        streamSeq: segment.seq,
+      });
+    };
+
+    const closeSegment = (partId: string): void => {
+      const segment = activeSegments.get(partId);
+      if (!segment) return;
+      // A closed part id must not resurrect this segment: text arriving under
+      // the same id later belongs to a fresh segment (and a fresh message).
+      activeSegments.delete(partId);
+      if (segment.enqueued || !segment.text.trim()) return;
+      // Full-stream text boundaries are durable assistant-message boundaries.
+      // Enqueue at text-end, before a following tool call can finish, so frame
+      // replay has exactly the order the user observed during streaming.
+      segment.enqueued = true;
+      request.enqueueFrame({
+        generatorId: request.generatorId,
+        activationId: request.activationId,
+        messages: [
+          outputMessageFromText<TDataContent>(segment.text, request.output, {
+            messageId: segment.messageId,
+            streamState: "complete",
+            streamSeq: segment.seq + 1,
+          }),
+        ],
+      });
+    };
+
+    const remainingFrames = (interrupted = false) => {
+      return segments
+        .filter((segment) => !segment.enqueued && segment.text.trim())
+        .map((segment) => ({
+          ...(interrupted ? { metadata: { interrupted: true } } : {}),
+          messages: [
+            outputMessageFromText<TDataContent>(segment.text, request.output, {
+              messageId: segment.messageId,
+              streamState: interrupted ? "cancelled" : "complete",
+              streamSeq: segment.seq + 1,
+            }),
+          ],
+        }));
+    };
 
     // A barge-in abort must not surface the partial text as a completed
     // assistant turn, but the partial is still valid work: it goes into the
     // frame log marked interrupted so the next turn's history sees what was
     // said, while hosts skip message persistence for cancelled activations.
     const cancelledResult = (): ExecutorRunResult<TDataContent> => {
-      seq += 1;
-      emitStreamUpdate(this.config, {
-        request,
-        messageId,
-        text,
-        streamState: "cancelled",
-        streamSeq: seq,
-      });
+      for (const segment of segments.filter((item) => !item.enqueued)) {
+        segment.seq += 1;
+        emitStreamUpdate(this.config, {
+          request,
+          messageId: segment.messageId,
+          text: segment.text,
+          streamState: "cancelled",
+          streamSeq: segment.seq,
+        });
+      }
+      const frames = remainingFrames(true);
       return {
         completionReason: "cancelled",
-        ...(text.trim()
-          ? {
-              frames: [
-                {
-                  metadata: { interrupted: true },
-                  messages: [
-                    outputMessageFromText<TDataContent>(text, request.output, {
-                      messageId,
-                      streamState: "cancelled",
-                      streamSeq: seq,
-                    }),
-                  ],
-                },
-              ],
-            }
-          : {}),
+        ...(frames.length ? { frames } : {}),
       };
     };
 
     const result = stream(input);
     try {
-      for await (const delta of result.textStream) {
-        if (!delta) continue;
-        text += delta;
-        seq += 1;
-        emitStreamUpdate(this.config, {
-          request,
-          messageId,
-          text,
-          delta,
-          streamState: "streaming",
-          streamSeq: seq,
-        });
+      for await (const part of result.fullStream) {
+        if (part.type === "text-start") startSegment(part.id);
+        if (part.type === "text-delta") appendSegment(part.id, part.text);
+        if (part.type === "text-end") closeSegment(part.id);
       }
     } catch (error) {
       if (isAbortError(error) || request.signal?.aborted) {
         return cancelledResult();
       }
-      seq += 1;
-      emitStreamUpdate(this.config, {
-        request,
-        messageId,
-        text,
-        streamState: "error",
-        streamSeq: seq,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      for (const segment of segments.filter((item) => !item.enqueued)) {
+        segment.seq += 1;
+        emitStreamUpdate(this.config, {
+          request,
+          messageId: segment.messageId,
+          text: segment.text,
+          streamState: "error",
+          streamSeq: segment.seq,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       throw error;
     }
 
@@ -210,28 +264,21 @@ export class AiSdkExecutor<
       return cancelledResult();
     }
 
-    const finalText = text || await result.text;
-    const finalSeq = seq + 1;
+    if (segments.length === 0) {
+      const finalText = await result.text;
+      if (finalText) {
+        const segment = startSegment("text");
+        appendSegment(segment.partId, finalText);
+        closeSegment(segment.partId);
+      }
+    }
     const finishReason = await result.finishReason;
     const usage = await Promise.resolve(result.usage).catch(() => undefined);
+    const frames = remainingFrames();
 
     return {
       completionReason: completionReasonForFinish(runState, finishReason, this.config),
-      ...(finalText.trim()
-        ? {
-            frames: [
-              {
-                messages: [
-                  outputMessageFromText<TDataContent>(finalText, request.output, {
-                    messageId,
-                    streamState: "complete",
-                    streamSeq: finalSeq,
-                  }),
-                ],
-              },
-            ],
-          }
-        : {}),
+      ...(frames.length ? { frames } : {}),
       execution: executionReport(this.config, startedAt, usage),
     };
   }

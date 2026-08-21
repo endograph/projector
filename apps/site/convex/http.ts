@@ -1,6 +1,7 @@
 import { httpRouter } from "convex/server";
 import { auth } from "./auth";
 import { isValidGuestSecret } from "./access";
+import { normalizeClientMessageId } from "./messageActor";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
@@ -71,6 +72,7 @@ export default http;
 type AnonymousMessageBody = {
   sessionId: Id<"sessions">;
   text: string;
+  clientMessageId: string;
 };
 
 async function readMessageBody(request: Request): Promise<AnonymousMessageBody | null> {
@@ -82,10 +84,19 @@ async function readMessageBody(request: Request): Promise<AnonymousMessageBody |
   }
   if (!body || typeof body !== "object") return null;
   const value = body as Record<string, unknown>;
-  if (typeof value.sessionId !== "string" || typeof value.text !== "string") return null;
+  if (
+    typeof value.sessionId !== "string" ||
+    typeof value.text !== "string" ||
+    typeof value.clientMessageId !== "string"
+  ) return null;
   const text = value.text.trim();
-  if (!text) return null;
-  return { sessionId: value.sessionId as AnonymousMessageBody["sessionId"], text };
+  const clientMessageId = normalizeClientMessageId(value.clientMessageId);
+  if (!text || !clientMessageId) return null;
+  return {
+    sessionId: value.sessionId as AnonymousMessageBody["sessionId"],
+    text,
+    clientMessageId,
+  };
 }
 
 function corsHeaders(request: Request): Headers | null {

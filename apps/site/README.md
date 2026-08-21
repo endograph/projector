@@ -28,3 +28,6 @@ bun run dev
 
 GitHub sign-in and the anonymous inference boundary require one-time deployment
 configuration. See [AUTH.md](./AUTH.md).
+
+How live assistant output is streamed, persisted, and read by multiple viewers
+is documented in [AGENT_STREAMING.md](./AGENT_STREAMING.md).

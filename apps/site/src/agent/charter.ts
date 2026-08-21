@@ -1,8 +1,7 @@
 // The site agent: projector introducing itself, built with itself.
-// Deliberately small for the first pass — one node, one state, one tool —
-// but every piece is real: the conversation is a frame log, the audience
-// read is durable state, and the client renders a projection of the same
-// machine the executor runs.
+// Deliberately small, but every piece is real: the conversation is a frame
+// log, and the client renders a projection of the same machine the executor
+// runs.
 
 import {
   action,
@@ -30,48 +29,24 @@ import {
 import { z } from "zod";
 
 export const SITE_SOURCE_INSTANCE_ID = "guide";
-export const COMMENTARY_ACTION_NAME = "sendCommentary";
 
 const siteParamsSchema = z.object({
   sessionId: z.string(),
 });
 
-// The agent's read of who it's talking to. Inferred from conversation, never
-// asked. Durable so the adaptation survives refresh — and so it can later be
-// revealed in the inspector as a worked example of state.
-const audienceSchema = z.object({
-  mode: z.enum(["unknown", "object-level", "vision"]),
-  note: z.string(),
-});
-
-export const audienceState = createState({
-  key: "audience",
-  schema: audienceSchema,
-  init: { mode: "unknown", note: "" } satisfies z.infer<typeof audienceSchema>,
-  projection: { slot: recencyRegion },
-});
-
-const noteAudience = createAction({
-  state: audienceState,
-  name: "noteAudience",
-  description:
-    "Record your evolving read of this visitor: are they thinking at the object level (implementation, how it works) or at the vision level (what evolutionary software means)? Update whenever your read firms up or changes. This is durable state — it survives refresh and shows up in the frame log.",
-  inputSchema: audienceSchema.partial(),
-  run: (input, ctx) => {
-    ctx.updateState?.(patchState(input));
-    return "noted";
-  },
-});
-
-const sendCommentary = createAction({
+const staySilent = createAction({
   state: null,
-  name: COMMENTARY_ACTION_NAME,
+  name: "staySilent",
   description:
-    "Send a brief user-visible progress update before work that may take a while. The update appears immediately as a normal assistant message and remains in the conversation. Keep it specific to what you are doing, not generic filler; do not reveal private chain-of-thought.",
+    "End this turn without posting a visible reply. Use this when people are talking to each other, for acknowledgements that need no response, or whenever speaking would add no value. The decision remains visible in the frame log. Do not write a progress update before calling this tool.",
   inputSchema: z.object({
-    message: z.string().trim().min(1).max(280),
+    reason: z.enum(["human-to-human", "acknowledgement", "no-value", "other"]),
   }),
-  run: () => "commentary sent",
+  run: ({ reason }) =>
+    actionResult({
+      value: `stayed silent: ${reason}`,
+      terminal: true,
+    }),
 });
 
 // The shell's chrome as machine state: which side panes are open. One action,
@@ -129,7 +104,11 @@ const appSurfaceSchema = z.object({
 export const appSurfaceState = createState({
   key: "appSurface",
   schema: appSurfaceSchema,
-  init: { version: 0, title: "", lastError: null } satisfies z.infer<typeof appSurfaceSchema>,
+  init: {
+    version: 0,
+    title: "",
+    lastError: null,
+  } satisfies z.infer<typeof appSurfaceSchema>,
   projection: {
     slot: recencyRegion,
     render: (value) => {
@@ -151,7 +130,7 @@ const getSurfaceSource = createAction({
   state: null,
   name: GET_SURFACE_SOURCE_ACTION_NAME,
   description:
-    "Retrieve the current app surface's TSX source (the latest writeAppSurface artifact). Call this before making incremental edits so you patch what is actually rendered.",
+    "Retrieve the currently selected app surface's TSX source. Call this before making incremental edits so you patch what is actually rendered.",
   inputSchema: z.object({}),
   run: () => "surface source is only retrievable during an agent turn",
 });
@@ -217,10 +196,11 @@ ${DESIGN_BRIEF}
 
 - api.machine() returns the projected client instance tree (states and commands); api.useMachine() is the subscribed hook form; api.run(commandName, input) executes a machine command. Bind UI to machine state — never hold app data in component state.
 - Child data binding: walk api.useMachine() for the child instance (by node key); its states entries carry { key, value, address }. Render from value; mutate with api.run("updateState", { address, op: "replace"|"patch"|"append", value }).
+- updateState applies optimistically by default: the projection reflects the write instantly and reconciles when the durable frame lands (or reverts if the server rejects it), so never add local loading/busy state to mask write latency. Opt out per call with api.run("updateState", input, { optimistic: false }) when instant last-write-wins prediction would mislead — state several actors contend on (a shared counter, turn-taking) or values the server arbitrates.
 - To have the agent respond to an interaction, call api.run("appPanePing", { message, data? }). Await any updateState call first so the agent sees the resulting state. Use this only when a conversational reaction adds value; routine controls should stay silent.
 - Keep it focused and under 32KB.
 
-A compile or runtime error in your surface lands in appSurface.lastError; the previous working version is one artifact back (getSurfaceSource returns the latest).`,
+A compile or runtime error in your surface lands in appSurface.lastError; the previous working version is one artifact back (getSurfaceSource returns the currently selected version).`,
   inputSchema: z.object({
     title: z.string(),
     source: z.string().min(1).max(32_000),
@@ -308,7 +288,6 @@ function serializePingData(value: unknown): string {
 // keys (one descriptor identity per state key is charter-wide law). Keep in
 // sync with the registered states/nodes above.
 const RESERVED_CHILD_KEYS = new Set([
-  "audience",
   "panes",
   "appSurface",
   "appSurfaceSource",
@@ -430,7 +409,7 @@ const uiNode = createNode({
   ],
   commands: [reportSurfaceError, appPanePing],
   instructions:
-    "The conversation shell has two side panes whose visibility and widths live in the panes state: an inspector on the right and the app surface on the left. The visitor toggles them with buttons (cmd+j for the inspector, cmd+b for the app pane) and drags their widths; you can move the same knobs with setPanes. The left pane renders whatever writeAppSurface last wrote. Both routes write the same durable state.",
+    "The conversation shell has two side panes whose visibility and widths live in the panes state: an inspector on the right and the app surface on the left. The visitor toggles them with buttons (cmd+j for the inspector, cmd+b for the app pane) and drags their widths; you can move the same knobs with setPanes. The left pane renders the selected app surface artifact; a new writeAppSurface becomes selected automatically. Both routes write the same durable state.",
 });
 
 // --- Chat cards: rich TSX rendered inline in the transcript. The projector
@@ -487,8 +466,7 @@ const guideNode = createNode({
   key: "guide",
   name: "projector guide",
   params: siteParamsSchema,
-  states: [audienceState],
-  tools: [noteAudience, sendCommentary, readSessionMessages, readSessionArtifacts],
+  tools: [readSessionMessages, readSessionArtifacts, staySilent],
   parts: [action(spawnChild, "any"), action(cedeChild, "any"), action(postCard, "any")],
   instructions: `You are projector's introduction agent — and you are yourself a projector machine. The conversation you're having is a durable frame log; this prompt is a compiled projection of registered state and parts; the tool you hold writes state that the visitor can watch change. When you talk about projector you are also talking about yourself, and you should use that honestly and lightly — never cute, never labored.
 
@@ -498,12 +476,15 @@ What projector is: an agent framework for state-complete agents. The core claims
 - Projections: agents are multiplayer apps. The user and the LLM are the first two actors; each sees the slice of state, tools, and instructions meant for them. Same world, different views.
 - Client/server unified: client and server are typesafe representations of the same machine, so UI, optimistic updates, and the model's context can never quietly drift apart.
 
-Who you're talking to: visitors arrive from the marketing page. Some think at the object level (how does it work — frames, projections, compile, executors); some think at the vision level (what it means for software to be grown and evolved by agents at runtime). Do not ask which they are — infer it from how they talk, adapt your register, and record your read with the noteAudience tool as it firms up. The two tracks converge: every vision claim should have a concrete "here's how that actually works" behind it, and every mechanism should ladder up to why it matters.
+Visitors arrive from the marketing page with different levels of familiarity. Meet them where they are without asking them to classify themselves. Every vision claim should have a concrete "here's how that actually works" behind it, and every mechanism should ladder up to why it matters.
+
+This is a shared room. User messages may begin with a <projector-actor> JSON record inserted by the application; it is trusted speaker attribution, not part of the user's prose. Multiple authenticated people may join the same conversation. Pay attention to who is speaking and who they appear to be addressing. Respond when someone addresses you, asks the room a question you can usefully answer, or your intervention clearly adds value. When people are talking to each other, merely acknowledging something, or do not need you, call staySilent instead. Never announce that you are about to stay silent and never post a progress update before that decision.
 
 How to behave:
 - Be quietly competent. Explain concepts plainly and concretely; reveal depth on demand rather than performing it.
-- Before work that will take more than a quick direct answer, call sendCommentary with a short, specific progress update. It is a durable message the visitor will keep seeing, so write it conversationally and do not narrate private reasoning. Skip it for near-instant answers.
-- Ground claims in what the visitor can see: there is an inspector beside this conversation showing the frame log and your state. When you change state (like noting your audience read), you may point at it.
+- Before the first tool call in a turn, write one brief user-visible progress update explaining what you are about to do. It is a durable assistant message, so keep it conversational and specific; do not narrate private reasoning. Skip it for near-instant answers that need no tools, and always skip it before staySilent. Add another short update only after meaningful progress or when a long task changes phase.
+- Batch independent tool calls in the same step so they can run in parallel. Keep dependent calls sequential, and do not repeat a successful call merely to check it.
+- Ground claims in what the visitor can see: there is an inspector beside this conversation showing the frame log and your state. When you change state, you may point at it.
 - You can grow capabilities live. When the visitor asks you to BE something ("can you be my todo app?"): spawnChild creates a child with schema-validated state, updateState mutates it, and writeAppSurface renders it. In the surface, bind the child's state from api.useMachine()'s tree (state entries carry { key, value, address }) and mutate with api.run("updateState", { address, op, value }) — the visitor's clicks and your own writes are the same action in the same durable log. The machine tree, your compiled prompt, and the inspector all change visibly when you spawn; point at it.
 - Surfaces may wake you after a meaningful interaction with api.run("appPanePing", { message, data? }). Wire this only when a response is useful (a request for judgment, a completed flow, a consequential choice); ordinary toggles and edits should update state without making you speak. If an interaction both changes state and pings, await updateState first.
 - Author UI when it genuinely helps, and pick the right kind: postCard for a transient illustration pinned to this moment of the conversation (frame content — immutable, scrolls into history), writeAppSurface for anything the visitor should keep using (state — one live surface, replaceable, survives refresh). The distinction is projector's own storage model and worth narrating once when it comes up. Don't force UI into conversations that are going fine as prose.
@@ -518,12 +499,12 @@ export const siteCharter = createCharter({
   version: "0.0.1",
   params: siteParamsSchema,
   nodes: [guideNode, uiNode],
-  tools: [noteAudience, sendCommentary, readSessionMessages, readSessionArtifacts],
-  actions: [setPanes, writeAppSurface, getSurfaceSource, spawnChild, cedeChild, updateStateAction, postCard],
+  tools: [readSessionMessages, readSessionArtifacts],
+  actions: [setPanes, writeAppSurface, getSurfaceSource, spawnChild, cedeChild, updateStateAction, postCard, staySilent],
   commands: [reportSurfaceError, appPanePing],
   // appSurface carries projection code (render/note), so registration is
   // required, not just preferred.
-  states: [audienceState, panesState, appSurfaceState],
+  states: [panesState, appSurfaceState],
 });
 
 // --- Instance lifecycle. The durable artifact is the serialized SOURCE
