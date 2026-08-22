@@ -1090,8 +1090,12 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
       m.activationId !== previous.activationId;
     const turnStart = speakerStart || activationStart;
     if (turnStart) {
+      // The streaming row initially has no durable frame/activation id; that
+      // metadata arrives when the stream settles. Its message row id is stable
+      // across both phases, so use it to keep completion from looking like a
+      // second author switch and re-paging the transcript.
       const boundaryId = m.role === "assistant"
-        ? m.activationId ?? String(m.key)
+        ? String(m.key)
         : m.clientMessageId ?? String(m.key);
       latestTurnKey = `${speakerId}:${boundaryId}`;
       latestTurnIsMine = m.role === "user" && m.isMine === true;
@@ -1174,6 +1178,7 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
     if (sessionChanged) syncedOnce.current = false;
 
     let frame = 0;
+    let scrollFrame = 0;
     const resize = () => {
       frame = 0;
       const starts = thread.querySelectorAll<HTMLElement>("[data-turn-start]");
@@ -1218,16 +1223,25 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
       const shouldPage =
         !syncedOnce.current || sessionChanged || wasAtBottom || latestTurnIsMine;
       if (shouldPage) {
-        const top =
-          target.getBoundingClientRect().top -
-          container.getBoundingClientRect().top +
-          container.scrollTop -
-          TURN_TOP_INSET;
         const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-        container.scrollTo({
-          top: Math.max(0, top),
-          behavior: syncedOnce.current && !still ? "smooth" : "instant",
-        });
+        const animate = previous.initialized && !sessionChanged && !still;
+        const pageToTurn = () => {
+          scrollFrame = 0;
+          const top =
+            target.getBoundingClientRect().top -
+            container.getBoundingClientRect().top +
+            container.scrollTop -
+            TURN_TOP_INSET;
+          container.scrollTo({
+            top: Math.max(0, top),
+            behavior: animate ? "smooth" : "instant",
+          });
+        };
+        // A layout-effect scroll can be coalesced into the same paint that
+        // introduced the row, presenting as a jump. Give smooth paging one
+        // painted start position so the browser can interpolate visibly.
+        if (animate) scrollFrame = requestAnimationFrame(pageToTurn);
+        else pageToTurn();
         syncedOnce.current = true;
         setShowJumpToLatest(false);
       } else {
@@ -1247,6 +1261,7 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
     thread.querySelectorAll<HTMLElement>(".msg").forEach((message) => observer.observe(message));
     return () => {
       if (frame) cancelAnimationFrame(frame);
+      if (scrollFrame) cancelAnimationFrame(scrollFrame);
       observer.disconnect();
       noticeHost?.style.removeProperty("--app-composer-height");
     };
@@ -1881,7 +1896,14 @@ function Message({ messageId, role, content, streamingLive, actor, isMine, widge
     api.messages.streamText,
     streamingLive && messageId ? { messageId: messageId as Id<"messages"> } : "skip",
   );
-  const body = (streamingLive ? liveText : undefined) ?? content;
+  // At settlement, streamText can observe the terminal row before the parent
+  // transcript query observes its finalized content. Retain the last live
+  // value across that short query handoff so the row never collapses to its
+  // formerly-empty durable content and disturbs the scroll position.
+  const lastLiveTextRef = useRef(content);
+  if (typeof liveText === "string") lastLiveTextRef.current = liveText;
+  if (!streamingLive) lastLiveTextRef.current = content;
+  const body = streamingLive ? liveText ?? lastLiveTextRef.current : content;
   // Rich renderings replace the prose (the prose is the LLM-facing
   // equivalent): an agent-authored card first, then prebuilt explainer
   // widgets. Unknown widget ids fall back to the prose.
