@@ -19,8 +19,11 @@ import type { Id } from "./_generated/dataModel";
 import { ACCESS_ERROR, authorizeSessionWrite } from "./access";
 import { anonymousActor } from "./actors";
 import { messageActorValidator, requireClientMessageId, type MessageActor } from "./messageActor";
-import { addMessageInternal } from "./messages";
+import { addMessageInternal, markSessionStreamsFailed } from "./messages";
 import { escapeConvexJson } from "./convexJson";
+import { getLatestSessionFrameDoc, restoreFrame } from "./frameHistory";
+import { appendMachineFrameInternal } from "./sessions";
+import type { Frame } from "@projectors/core";
 import {
   LEASE_TTL_MS,
   MAX_CONSECUTIVE_RUNNER_FAILURES,
@@ -336,6 +339,54 @@ export const retryAfterFailure = internalMutation({
       const delay = RUNNER_RETRY_BASE_DELAY_MS * 2 ** (consecutiveFailures - 1);
       await ctx.scheduler.runAfter(delay, internal.agent.runSession, { sessionId });
     } else {
+      const session = await ctx.db.get(sessionId);
+      if (!session) throw new Error("Session not found");
+      const activation = await latestOutstandingActivation(ctx, session);
+      const terminalFrameId = activation
+        ? await appendMachineFrameInternal(ctx, {
+            sessionId,
+            session,
+            frame: {
+              inert: true,
+              ...(activation.generatorId ? { generatorId: activation.generatorId } : {}),
+              activationId: activation.activationId,
+              metadata: {
+                runnerFailure: true,
+                consecutiveFailures,
+              },
+              messages: [
+                {
+                  type: "work",
+                  kind: "completion",
+                  activationId: activation.activationId,
+                  ...(activation.generatorId ? { generatorId: activation.generatorId } : {}),
+                  reason: "error",
+                },
+              ],
+            },
+          })
+        : undefined;
+      await markSessionStreamsFailed(ctx, sessionId);
+      const pendingItems = await ctx.db
+        .query("agentInbox")
+        .withIndex("by_session_status", (q) =>
+          q.eq("sessionId", sessionId).eq("status", "pending"),
+        )
+        .take(MAX_PENDING_ITEMS);
+      await settleInboxItems(
+        ctx,
+        sessionId,
+        pendingItems.map((item) => ({ itemId: item._id, error })),
+      );
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "assistant",
+        content:
+          "That turn hit an error before Projector could finish. Anything it completed is still available; try sending again.",
+        ...(terminalFrameId ? { frameId: terminalFrameId } : {}),
+        idempotencyKey: `runner-error:${activation?.activationId ?? generation}`,
+        streamState: "error",
+      });
       console.error("Runner retry budget exhausted", {
         sessionId,
         generation,
@@ -346,6 +397,26 @@ export const retryAfterFailure = internalMutation({
     return { retryScheduled, consecutiveFailures };
   },
 });
+
+async function latestOutstandingActivation(
+  ctx: MutationCtx,
+  session: { _id: Id<"sessions"> },
+): Promise<{ activationId: string; generatorId?: string } | undefined> {
+  const latestFrameDoc = await getLatestSessionFrameDoc(ctx, session._id);
+  if (!latestFrameDoc?.activationId) return undefined;
+  const latestFrame = restoreFrame(latestFrameDoc) as Frame;
+  const alreadyCompleted = latestFrame.messages.some(
+    (message) =>
+      message.type === "work" &&
+      message.kind === "completion" &&
+      message.activationId === latestFrameDoc.activationId,
+  );
+  if (alreadyCompleted) return undefined;
+  return {
+    activationId: latestFrameDoc.activationId,
+    ...(latestFrameDoc.generatorId ? { generatorId: latestFrameDoc.generatorId } : {}),
+  };
+}
 
 // Deadline handoff: the runner is near the action ceiling; pass the session to
 // a fresh action (which claims the next generation) instead of dying mid-work.
