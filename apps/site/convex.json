@@ -1,5 +1,5 @@
 {
   "node": {
-    "externalPackages": []
+    "externalPackages": ["just-bash"]
   }
 }

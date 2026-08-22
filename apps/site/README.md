@@ -10,8 +10,11 @@ Create `apps/site/.env.local` from `.env.local.example`, then start Convex:
 
 ```sh
 cd apps/site
-npx convex dev
+bun run convex
 ```
+
+This regenerates the read-only repository snapshot used by the demo agent
+before starting Convex.
 
 Set the model key in the Convex deployment environment, not in Vite:
 
@@ -28,3 +31,6 @@ bun run dev
 
 GitHub sign-in and the anonymous inference boundary require one-time deployment
 configuration. See [AUTH.md](./AUTH.md).
+
+How live assistant output is streamed, persisted, and read by multiple viewers
+is documented in [AGENT_STREAMING.md](./AGENT_STREAMING.md).

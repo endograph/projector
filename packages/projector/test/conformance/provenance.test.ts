@@ -159,10 +159,12 @@ describe("conformance: provenance", () => {
       runner: { workerId: "worker-7" },
     });
 
-    const executorFrame = frames.find((frame) => frame.provenance?.execution?.latencyMs === 12);
+    const executorFrame = frames.find((frame) =>
+      frame.messages.some((message) => message.type === "assistant"),
+    );
     expect(executorFrame?.provenance).toMatchObject({
       producer: { executor: { name: "test-executor", version: "0.1" } },
-      execution: { latencyMs: 12, usage: { outputTokens: 3 } },
+      execution: { latencyMs: 40, usage: { outputTokens: 3 } },
       runner: { workerId: "worker-7" },
     });
 
@@ -171,7 +173,7 @@ describe("conformance: provenance", () => {
     );
     expect(valueFrame?.provenance).toMatchObject({
       producer: { executor: { name: "test-executor", version: "0.1" } },
-      execution: { latencyMs: 40 },
+      execution: { latencyMs: 40, usage: { outputTokens: 3 } },
     });
 
     const completionFrame = frames.find((frame) =>

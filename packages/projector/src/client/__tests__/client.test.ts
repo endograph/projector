@@ -46,16 +46,23 @@ describe("client command typing and action requests", () => {
       callId: "call-1",
     });
 
-    const generated = createCommandActionRequest<typeof setLiveMode>("setLiveMode", {
-      enabled: false,
-    });
+    const generated = createCommandActionRequest<typeof setLiveMode>(
+      "setLiveMode",
+      {
+        enabled: false,
+      },
+    );
     expect(generated.callId).toEqual(expect.any(String));
 
     if (false) {
       // @ts-expect-error command name must come from the command definition
-      createCommandActionRequest<typeof setLiveMode>("other", { enabled: true });
-      // @ts-expect-error command input must come from the command input schema
-      createCommandActionRequest<typeof setLiveMode>("setLiveMode", { enabled: "yes" });
+      createCommandActionRequest<typeof setLiveMode>("other", {
+        enabled: true,
+      });
+      createCommandActionRequest<typeof setLiveMode>("setLiveMode", {
+        // @ts-expect-error command input must come from the command input schema
+        enabled: "yes",
+      });
     }
   });
 });
@@ -78,12 +85,28 @@ describe("machine effigy", () => {
     effigy.setInstances({ value: 2 });
 
     await expect(
-      effigy.send({ type: "action", kind: "request", action: "command", name: "save", input: {}, callId: "c" }),
+      effigy.send({
+        type: "action",
+        kind: "request",
+        action: "command",
+        name: "save",
+        input: {},
+        callId: "c",
+      }),
     ).resolves.toBe("sent");
     expect(effigy.getInstances()).toEqual({ value: 2 });
     expect(effigy.getRecentCommandResidue()).toEqual(["a"]);
     expect(notifications).toBe(2);
-    expect(sent).toEqual([{ type: "action", kind: "request", action: "command", name: "save", input: {}, callId: "c" }]);
+    expect(sent).toEqual([
+      {
+        type: "action",
+        kind: "request",
+        action: "command",
+        name: "save",
+        input: {},
+        callId: "c",
+      },
+    ]);
   });
 });
 
@@ -109,6 +132,7 @@ describe("client instance realization", () => {
     const child = createNode({ key: "child" });
     const agent = createNode({
       key: "agent",
+      purpose: "Coordinate the live-mode controls.",
       states: [agentState],
       tools: [lookup],
       commands: [setLiveMode],
@@ -116,7 +140,9 @@ describe("client instance realization", () => {
     });
 
     type AgentClientInstance = ClientInstanceOf<typeof agent>;
-    expectTypeOf<ClientCommandName<AgentClientInstance>>().toEqualTypeOf<"setLiveMode">();
+    expectTypeOf<
+      ClientCommandName<AgentClientInstance>
+    >().toEqualTypeOf<"setLiveMode">();
 
     const client = realizeClientInstances({
       id: "agent-1",
@@ -126,12 +152,16 @@ describe("client instance realization", () => {
     });
 
     expect(client.contributor.id).toBe("instance:agent-1");
+    expect(client.purpose).toBe("Coordinate the live-mode controls.");
     expect(client.states[0]).toMatchObject({
       key: "agentState",
       address: { instanceId: "agent-1", stateKey: "agentState" },
       value: { liveMode: false },
     });
-    expect(client.commands[0]?.target).toEqual({ type: "instance", instanceId: "agent-1" });
+    expect(client.commands[0]?.target).toEqual({
+      type: "instance",
+      instanceId: "agent-1",
+    });
     expect(client.tools[0]).toMatchObject({
       name: "lookup",
       description: "Lookup things",
@@ -151,8 +181,10 @@ describe("client instance realization", () => {
       memberPath: ["critic"],
     });
     expect(
-      findClientCommand([client], "setLiveMode", { type: "instance", instanceId: "agent-1" })
-        ?.target,
+      findClientCommand([client], "setLiveMode", {
+        type: "instance",
+        instanceId: "agent-1",
+      })?.target,
     ).toEqual({ type: "instance", instanceId: "agent-1" });
   });
 });
@@ -180,7 +212,10 @@ describe("optimistic effigy", () => {
 
   it("applies optimistic overlays, rebases on authoritative instances, and retires by residue", async () => {
     type Instances = Array<{
-      states: Array<{ address: StateAddress; value: { liveMode: boolean; count: number } }>;
+      states: Array<{
+        address: StateAddress;
+        value: { liveMode: boolean; count: number };
+      }>;
       commands: Array<{ name: "setLiveMode"; __input?: { enabled: boolean } }>;
       members: [];
       children: [];
@@ -243,6 +278,123 @@ describe("optimistic effigy", () => {
     });
   });
 
+  it("updateAt predicts with the machine's own state-update fold", async () => {
+    type Instances = Array<{
+      states: Array<{
+        address: StateAddress;
+        value: { items: string[]; meta: { open: boolean } };
+      }>;
+      commands: Array<{ name: "updateState" }>;
+      members: [];
+      children: [];
+      contributor: unknown;
+    }>;
+
+    const address = { instanceId: "child-1", stateKey: "todos" };
+    const effigy = createMachineEffigy<Instances>(() => {});
+    effigy.setInstances([
+      {
+        states: [{ address, value: { items: ["a"], meta: { open: false } } }],
+        commands: [{ name: "updateState" }],
+        members: [],
+        children: [],
+        contributor: {},
+      },
+    ] as Instances);
+    const optimistic = createOptimisticEffigy(effigy);
+
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) =>
+          ctx.updateAt(address, {
+            op: "append",
+            values: ["b"],
+            path: ["items"],
+          }),
+      })
+      .run({} as never);
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) =>
+          ctx.updateAt(address, {
+            op: "patch",
+            value: { open: true },
+            path: ["meta"],
+          }),
+      })
+      .run({} as never);
+    // An update the fold rejects (append to a non-array) must leave truth alone.
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) =>
+          ctx.updateAt(address, { op: "append", values: [1], path: ["meta"] }),
+      })
+      .run({} as never);
+
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      items: ["a", "b"],
+      meta: { open: true },
+    });
+  });
+
+  it("does not publish a schema-invalid overlay but still sends the command", async () => {
+    type Instances = Array<{
+      states: Array<{
+        address: StateAddress;
+        value: { counts: number[] };
+        schema: unknown;
+      }>;
+      commands: Array<{ name: "updateState" }>;
+      members: [];
+      children: [];
+      contributor: unknown;
+    }>;
+
+    const address = { instanceId: "counter-1", stateKey: "counts" };
+    const sent: unknown[] = [];
+    const effigy = createMachineEffigy<Instances>((message) => {
+      sent.push(message);
+    });
+    effigy.setInstances([
+      {
+        states: [
+          {
+            address,
+            value: { counts: [8, 0, 0] },
+            schema: {
+              type: "object",
+              properties: {
+                counts: { type: "array", items: { type: "number" } },
+              },
+              required: ["counts"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        commands: [{ name: "updateState" }],
+        members: [],
+        children: [],
+        contributor: {},
+      },
+    ]);
+    const optimistic = createOptimisticEffigy(effigy);
+
+    await optimistic
+      .getCommand("updateState", {
+        optimistic: (ctx) =>
+          ctx.updateAt(address, {
+            op: "replace",
+            value: { counts: "this is deliberately invalid" },
+          }),
+      })
+      .run({} as never);
+
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      counts: [8, 0, 0],
+    });
+    expect(sent).toHaveLength(1);
+  });
+
   it("evicts an acked optimistic overlay and trusts fresh server state", async () => {
     const sent: Array<{ callId: string }> = [];
     const effigy = createMachineEffigy<CountInstances>((message) => {
@@ -258,12 +410,16 @@ describe("optimistic effigy", () => {
     });
 
     await command.run({ count: 1 });
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 1 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 1,
+    });
 
     optimistic.setRecentCommandResidue([sent[0]!.callId]);
     optimistic.setInstances(countInstance(10));
 
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 10 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 10,
+    });
   });
 
   it("keeps later pending overlays when an earlier command is confirmed with a fresh instance", async () => {
@@ -282,12 +438,16 @@ describe("optimistic effigy", () => {
 
     await command.run({ count: 1 });
     await command.run({ count: 2 });
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 2 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 2,
+    });
 
     optimistic.setRecentCommandResidue([sent[0]!.callId]);
     optimistic.setInstances(countInstance(1));
 
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 2 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 2,
+    });
   });
 
   it("notifies subscribers when residue retires a pending overlay", async () => {
@@ -314,7 +474,9 @@ describe("optimistic effigy", () => {
     optimistic.setRecentCommandResidue([sent[0]!.callId]);
     const residueNotifications = notifications;
     expect(residueNotifications).toBeGreaterThan(0);
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 0 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 0,
+    });
     unsubscribe();
   });
 
@@ -363,10 +525,14 @@ describe("optimistic effigy", () => {
     });
 
     await command.run({ count: 3 });
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 3 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 3,
+    });
 
     optimistic.clearPending();
-    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({ count: 0 });
+    expect(optimistic.getInstances()?.[0]?.states[0]?.value).toEqual({
+      count: 0,
+    });
   });
 });
 

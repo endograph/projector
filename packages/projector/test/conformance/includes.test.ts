@@ -433,7 +433,9 @@ describe("conformance: includes (instance-based composition)", () => {
           (message.children as Array<{ node: unknown }>).some((child) => child.node === "worker"),
       ),
     );
-    const spawnMessage = spawnFrame?.messages[0] as InstanceMessage & { kind: "spawn" };
+    const spawnMessage = spawnFrame?.messages.find(
+      (message) => message.type === "instance" && message.kind === "spawn",
+    ) as InstanceMessage & { kind: "spawn" };
     expect(spawnMessage.parentInstanceId).toBe("r");
     expect(spawnFrame?.generatorId).toBe("instance:spec");
     expect(

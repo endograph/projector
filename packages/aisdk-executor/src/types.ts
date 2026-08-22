@@ -9,9 +9,7 @@ import type {
 export type AiSdkGenerateText = typeof generateText;
 export type AiSdkStreamText = typeof streamText;
 
-export type AiSdkRunActionInput<
-  TDataContent = never,
-> = {
+export type AiSdkRunActionInput<TDataContent = never> = {
   action: AnyAction;
   input: unknown;
   context: ActionContext<unknown, TDataContent>;
@@ -19,9 +17,7 @@ export type AiSdkRunActionInput<
   aiSdkContext?: unknown;
 };
 
-export type AiSdkStreamUpdate<
-  TDataContent = never,
-> = {
+export type AiSdkStreamUpdate<TDataContent = never> = {
   request: ExecutorRunRequest<TDataContent>;
   messageId: string;
   text: string;
@@ -45,9 +41,7 @@ export type AiSdkStreamUpdate<
  * prompt promises tool search, so an executor that cannot honor it must not
  * run.
  */
-export type AiSdkDeferredToolsLowering<
-  TDataContent = never,
-> = (input: {
+export type AiSdkDeferredToolsLowering<TDataContent = never> = (input: {
   deferred: AnyAction[];
   buildTool: (action: AnyAction) => ToolSet[string];
   request: ExecutorRunRequest<TDataContent>;
@@ -70,7 +64,6 @@ export type AiSdkPromptCacheConfig = false | { ttl?: "5m" | "1h" };
  */
 export type AiSdkExecutorNodeConfig = {
   maxOutputTokens?: number;
-  maxSteps?: number;
   temperature?: number;
 };
 
@@ -80,23 +73,34 @@ declare module "@projectors/core" {
   }
 }
 
-export type AiSdkExecutorConfig<
-  TDataContent = never,
-> = {
+export type AiSdkExecutorConfig<TDataContent = never> = {
   model: LanguageModel;
   promptCache?: AiSdkPromptCacheConfig;
   generateText?: AiSdkGenerateText;
   streamText?: AiSdkStreamText;
   debug?: boolean;
   stream?: boolean | ((request: ExecutorRunRequest<TDataContent>) => boolean);
-  onStreamUpdate?: (update: AiSdkStreamUpdate<TDataContent>) => unknown | Promise<unknown>;
-  messageToModelMessage?: (message: ActorMessage<TDataContent>) => import("ai").ModelMessage | undefined;
+  onStreamUpdate?: (
+    update: AiSdkStreamUpdate<TDataContent>,
+  ) => unknown | Promise<unknown>;
+  messageToModelMessage?: (
+    message: ActorMessage<TDataContent>,
+  ) => import("ai").ModelMessage | undefined;
 
   deferredTools?: AiSdkDeferredToolsLowering<TDataContent>;
+  /** Native/provider tools implementing projected Actions declared executorOwned. */
+  executorActions?: ToolSet;
 
   maxOutputTokens?: number;
   /** Number of retries the AI SDK performs on retryable errors (default 2). */
   maxRetries?: number;
+  /** Tool-enabled provider steps allowed before the executor asks for one final answer. */
+  maxSteps?: number;
+  /**
+   * After this many milliseconds, the next continuation step becomes the
+   * final no-tools answer. An in-flight provider step is never interrupted.
+   */
+  turnDeadlineMs?: number;
   temperature?: number;
   topP?: number;
   topK?: number;
@@ -105,9 +109,10 @@ export type AiSdkExecutorConfig<
   seed?: number;
   providerOptions?: Record<string, unknown>;
 
-  maxSteps?: number;
   toolChoice?: unknown;
   toolStrict?: boolean;
 
-  runAction?: (input: AiSdkRunActionInput<TDataContent>) => unknown | Promise<unknown>;
+  runAction?: (
+    input: AiSdkRunActionInput<TDataContent>,
+  ) => unknown | Promise<unknown>;
 };

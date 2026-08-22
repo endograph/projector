@@ -35,9 +35,7 @@ export type DataContentPart<TDataContent = never> = {
 } & PartPlacement;
 
 export type ContentPart<TDataContent = never> =
-  | TextContentPart
-  | ImageContentPart
-  | DataContentPart<TDataContent>;
+  TextContentPart | ImageContentPart | DataContentPart<TDataContent>;
 
 export type ProjectionStatePart = {
   type: "state";
@@ -55,8 +53,7 @@ export type ProjectionStatePart = {
 };
 
 export type ProjectionPart<TDataContent = never> =
-  | ContentPart<TDataContent>
-  | ProjectionStatePart;
+  ContentPart<TDataContent> | ProjectionStatePart;
 
 export type ProjectionIR<TDataContent = never> = {
   preamble: ProjectionPart<TDataContent>[];
@@ -128,10 +125,18 @@ export type Audience = "self" | "broadcast" | AudienceTarget | AudienceTarget[];
 
 export type MessageDelivery = "immediate" | "queued";
 
+/** Stable application-authored identity for a human or agent actor. */
+export type ActorIdentity = {
+  id: string;
+  label: string;
+  kind?: string;
+};
+
 export type UserMessage<TDataContent = never> = {
   type: "user";
   text?: string;
   content?: ContentPart<TDataContent>[];
+  actor?: ActorIdentity;
   audience?: Audience;
   delivery?: MessageDelivery;
 };
@@ -140,13 +145,13 @@ export type AssistantMessage<TDataContent = never> = {
   type: "assistant";
   text?: string;
   content?: ContentPart<TDataContent>[];
+  actor?: ActorIdentity;
   audience?: Audience;
   delivery?: MessageDelivery;
 };
 
 export type ActorMessage<TDataContent = never> =
-  | UserMessage<TDataContent>
-  | AssistantMessage<TDataContent>;
+  UserMessage<TDataContent> | AssistantMessage<TDataContent>;
 
 export type AnyActorMessage = ActorMessage<any>;
 
@@ -198,13 +203,10 @@ export type Runtime =
       type?: "generator";
     } & TriggeredRuntimeOptions);
 
-export type NormalizedRuntime =
-  | ComponentRuntime
-  | GeneratorRuntime;
+export type NormalizedRuntime = ComponentRuntime | GeneratorRuntime;
 
 export type DryRuntime =
-  | { type?: "component" }
-  | ({ type: "generator" } & TriggeredRuntimeOptions);
+  { type?: "component" } | ({ type: "generator" } & TriggeredRuntimeOptions);
 
 /**
  * How the generator encounters a projected thing. `native`: fully present on
@@ -253,11 +255,12 @@ export type StateContainer<S = unknown> = {
   value: S;
 };
 
-type IsAny<T> = 0 extends (1 & T) ? true : false;
+type IsAny<T> = 0 extends 1 & T ? true : false;
 
-export type StatePatch<S> = IsAny<S> extends true
-  ? Record<string, unknown>
-  : [unknown] extends [S]
+export type StatePatch<S> =
+  IsAny<S> extends true
+    ? Record<string, unknown>
+    : [unknown] extends [S]
       ? Record<string, unknown>
       : S extends object
         ? Partial<S>
@@ -282,23 +285,23 @@ export type StateUpdate<S = unknown> =
     };
 
 export type StateUpdateInput<S = unknown> =
-  | StateUpdate<S>
-  | ((state: S) => StateUpdate<S>);
+  StateUpdate<S> | ((state: S) => StateUpdate<S>);
 
-type ActionStateContext<S> = IsAny<S> extends true
-  ? {
-      state?: S;
-      updateState?(update: StateUpdateInput<S>): void;
-    }
-  : [S] extends [undefined]
-  ? {
-      state?: undefined;
-      updateState?: undefined;
-    }
-  : {
-      state?: S;
-      updateState?(update: StateUpdateInput<S>): void;
-    };
+type ActionStateContext<S> =
+  IsAny<S> extends true
+    ? {
+        state?: S;
+        updateState?(update: StateUpdateInput<S>): void;
+      }
+    : [S] extends [undefined]
+      ? {
+          state?: undefined;
+          updateState?: undefined;
+        }
+      : {
+          state?: S;
+          updateState?(update: StateUpdateInput<S>): void;
+        };
 
 export type ActionInstanceContext<TDataContent = never> = {
   generatorId: GeneratorId;
@@ -324,12 +327,10 @@ export type ActionInstanceContext<TDataContent = never> = {
 // Targets for address-based state writes. Three spellings of the same
 // coordinate: a descriptor (identity-resolved against the contributor's
 // scope, then by global uniqueness), a structured StateAddress (client
-// snapshots carry these), or an inference alias string (only resolvable
-// during a generator run, through the same alias map as getState).
+// snapshots carry these), or a string. Strings use a projected inference
+// alias when available and otherwise resolve as a globally unique state key.
 export type StateWriteTarget =
-  | InferenceStateAddress
-  | StateAddress
-  | StateDescriptor<any>;
+  InferenceStateAddress | StateAddress | StateDescriptor<any>;
 
 export type ActionContext<
   S = undefined,
@@ -343,7 +344,10 @@ export type ActionContext<
   // sugar for the bound state; this is the plural, address-based form.
   // Mutations go through the same validate-and-enqueue path, so every write
   // is schema-checked and lands as a durable state.update message.
-  updateStateAt?: (target: StateWriteTarget, update: StateUpdateInput<unknown>) => void;
+  updateStateAt?: (
+    target: StateWriteTarget,
+    update: StateUpdateInput<unknown>,
+  ) => void;
   instance: ActionInstanceContext<TDataContent>;
 } & ActionStateContext<S>;
 
@@ -360,7 +364,12 @@ export type Action<
   name: TName;
   description?: string;
   inputSchema?: z.ZodType<I>;
-  run?: (input: I, ctx: ActionContext<S, TDataContent, z.output<TParams>>) => O | Promise<O>;
+  /** The executor must supply this action's native tool representation and execution. */
+  executorOwned?: boolean;
+  run?: (
+    input: I,
+    ctx: ActionContext<S, TDataContent, z.output<TParams>>,
+  ) => O | Promise<O>;
 };
 
 export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
@@ -369,6 +378,7 @@ export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
   name: string;
   description?: string;
   inputSchema?: z.ZodType<any>;
+  executorOwned?: boolean;
   run?: (input: any, ctx: any) => any | Promise<any>;
 };
 
@@ -474,10 +484,7 @@ export type ComputedPartEnv = {
  * through data, never through closures.
  */
 export type ComputedReturnPart<TDataContent = never> =
-  | ContentPart<TDataContent>
-  | TextPart
-  | ActionPart
-  | IncludePart<TDataContent>;
+  ContentPart<TDataContent> | TextPart | ActionPart | IncludePart<TDataContent>;
 
 /**
  * Sugar provenance for a part computed produced by select/when: the
@@ -516,7 +523,9 @@ export type ComputedPartDef<
   registry?: ReadonlyArray<TAction | Node<TDataContent>>;
   /** Present only on sugar-produced computeds (select/when). */
   metadata?: PartSelectMetadata<TDataContent>;
-  compute: (env: ComputedPartEnv) => string | ComputedReturnPart<TDataContent>[];
+  compute: (
+    env: ComputedPartEnv,
+  ) => string | ComputedReturnPart<TDataContent>[];
 };
 
 export type AnyComputedPartDef = ComputedPartDef<any>;
@@ -527,21 +536,22 @@ export type TextPart = {
   text: string;
 };
 
-export type ActionPart<TAction extends ActionConfigEntry = ActionConfigEntry> = {
-  kind: "action";
-  caller: ActionCaller;
-  /** Default native. Deferred tools lower to provider tool search (see Exposure). */
-  exposure?: Exposure;
-  action: TAction;
-  /**
-   * Companion prose owned by this action contribution: ordinary slot-addressed
-   * text parts emitted whenever the action is contributed, so a select that
-   * swaps the tool swaps its guidance atomically. Emitted regardless of
-   * caller — an external command's guidance is typically model-facing (it
-   * tells the generator what external surfaces can do).
-   */
-  guidance?: TextPart[];
-};
+export type ActionPart<TAction extends ActionConfigEntry = ActionConfigEntry> =
+  {
+    kind: "action";
+    caller: ActionCaller;
+    /** Default native. Deferred tools lower to provider tool search (see Exposure). */
+    exposure?: Exposure;
+    action: TAction;
+    /**
+     * Companion prose owned by this action contribution: ordinary slot-addressed
+     * text parts emitted whenever the action is contributed, so a select that
+     * swaps the tool swaps its guidance atomically. Emitted regardless of
+     * caller — an external command's guidance is typically model-facing (it
+     * tells the generator what external surfaces can do).
+     */
+    guidance?: TextPart[];
+  };
 
 export type ComputedPartRef<
   TDataContent = never,
@@ -574,8 +584,7 @@ export type Part<TDataContent = never> =
   | IncludePart<TDataContent>;
 
 export type PartEntry<TDataContent = never> =
-  | Part<TDataContent>
-  | ComputedPartDef<TDataContent>;
+  Part<TDataContent> | ComputedPartDef<TDataContent>;
 
 /**
  * Sugar provenance for a member computed produced by selectMember/whenMember:
@@ -592,10 +601,7 @@ export type MemberSelectMetadata<TDataContent = never> = {
 /** What a member compute closure may return: registered nodes (by identity or
  * charter key ref); null contributes nothing. */
 export type ComputedMemberReturn<TDataContent = never> =
-  | Node<TDataContent>
-  | Ref
-  | Array<Node<TDataContent> | Ref>
-  | null;
+  Node<TDataContent> | Ref | Array<Node<TDataContent> | Ref> | null;
 
 /**
  * A named computed member entry: the open-variation form of member derivation.
@@ -622,8 +628,7 @@ export type ComputedMemberDef<
 export type AnyComputedMemberDef = ComputedMemberDef<any>;
 
 export type MemberEntry<TDataContent = never> =
-  | Node<TDataContent>
-  | ComputedMemberDef<TDataContent>;
+  Node<TDataContent> | ComputedMemberDef<TDataContent>;
 
 export type CompileDiagnostic = {
   severity: "warning" | "error";
@@ -653,6 +658,8 @@ export type NodeConfig<TDataContent = never> = {
   key?: string;
   sourceNodeKey?: string;
   name?: string;
+  /** Durable semantic metadata for humans and inspectors. Never projected. */
+  purpose?: string;
   params?: AnyParamsSchema;
   /** Sugar: an anonymous text part in the preamble region's default slot. */
   instructions?: string;
@@ -676,6 +683,8 @@ export type Node<
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  /** Durable semantic metadata for humans and inspectors. Never projected. */
+  purpose?: string;
   params: TParams;
   parts: Part<TDataContent>[];
   states: NormalizedStateDescriptor[];
@@ -694,7 +703,8 @@ export type Instance<TDataContent = never> = {
   children?: Instance<TDataContent>[];
 };
 
-export type CompletionReason = "done" | "cancelled" | "delegated" | "error" | "terminal-action";
+export type CompletionReason =
+  "done" | "continue" | "cancelled" | "delegated" | "error" | "terminal-action";
 
 /**
  * "absorbed": a running generation projected the frame, so no follow-up work
@@ -704,7 +714,16 @@ export type CompletionReason = "done" | "cancelled" | "delegated" | "error" | "t
  * an already-decided turn. Neither is a completion to react to
  * (parent-completion triggers ignore "suppressed" like "cancelled").
  */
-export type WorkCompletionReason = "end-turn" | "done" | "cancelled" | "delegated" | "error" | "terminal-action" | "absorbed" | "suppressed";
+export type WorkCompletionReason =
+  | "end-turn"
+  | "done"
+  | "continued"
+  | "cancelled"
+  | "delegated"
+  | "error"
+  | "terminal-action"
+  | "absorbed"
+  | "suppressed";
 
 export type WorkActivationMessage = {
   type: "work";
@@ -714,6 +733,7 @@ export type WorkActivationMessage = {
   sourceFrameId: string;
   concurrencyKey: string;
   concurrency: RuntimeConcurrency;
+  continuationState?: unknown;
 };
 
 export type WorkCompletionMessage = {
@@ -749,11 +769,11 @@ export type WorkAbortMessage = {
   note?: string;
 };
 
-export type WorkMessage = WorkActivationMessage | WorkCompletionMessage | WorkAbortMessage;
+export type WorkMessage =
+  WorkActivationMessage | WorkCompletionMessage | WorkAbortMessage;
 
 export type SerializedNodeRef<TDataContent = never> =
-  | DryNode<TDataContent>
-  | Ref;
+  DryNode<TDataContent> | Ref;
 
 /**
  * Durable instance messages use serialized node refs. Hydrated Node objects belong
@@ -829,12 +849,24 @@ export type ActionResultMessage<TDataContent = never> = {
 };
 
 export type ActionMessage<TDataContent = never> =
-  | ActionRequestMessage
-  | ActionResultMessage<TDataContent>;
+  ActionRequestMessage | ActionResultMessage<TDataContent>;
 
 export type ExecuteActionResult<T = unknown, TDataContent = never> =
-  | { success: true; value?: T; messages?: FrameMessage<TDataContent>[]; terminal?: boolean; callId: string }
-  | { success: false; error: string; value?: T; messages?: FrameMessage<TDataContent>[]; terminal?: boolean; callId: string };
+  | {
+      success: true;
+      value?: T;
+      messages?: FrameMessage<TDataContent>[];
+      terminal?: boolean;
+      callId: string;
+    }
+  | {
+      success: false;
+      error: string;
+      value?: T;
+      messages?: FrameMessage<TDataContent>[];
+      terminal?: boolean;
+      callId: string;
+    };
 
 export type FrameMessage<TDataContent = never> = (
   | ActorMessage<TDataContent>
@@ -866,8 +898,7 @@ export type ExecutionReport = {
 } & Record<string, unknown>;
 
 export type FrameProducer =
-  | { executor: ExecutorIdentity }
-  | { machine: string };
+  { executor: ExecutorIdentity } | { machine: string };
 
 /**
  * Framework-owned observational channel. Written only by the framework at
@@ -923,11 +954,14 @@ export type EnqueueFrame<TDataContent = never> = (
 export type ExecutorRunRequest<TDataContent = never> = {
   activationId: string;
   generatorId: GeneratorId;
+  continuationState?: unknown;
   /** The generator node's `executorConfig` namespace for this executor. */
   config?: unknown;
   inference: CompiledInference<TDataContent>;
   enqueueFrame: EnqueueFrame<TDataContent>;
-  createActionContext?: (action: AnyAction) => ActionContext<unknown, TDataContent>;
+  createActionContext?: (
+    action: AnyAction,
+  ) => ActionContext<unknown, TDataContent>;
   output?: OutputConfig<TDataContent>;
   signal?: AbortSignal;
   /**
@@ -944,6 +978,7 @@ export type ExecutorRunResult<TDataContent = never> = {
   completionReason: CompletionReason;
   value?: string;
   frames?: Array<FrameDraft<TDataContent> | Frame<TDataContent>>;
+  continuationState?: unknown;
   /**
    * Run-level execution facts (latency, usage, cost). The machine folds these
    * into the provenance of the frames it synthesizes from this result and the
@@ -999,8 +1034,7 @@ export type ProjectorExecutor<TDataContent = never> = {
   ): ExecutorRealizedPrompt | Promise<ExecutorRealizedPrompt>;
 };
 
-export type Executor<TDataContent = never> =
-  ProjectorExecutor<TDataContent>;
+export type Executor<TDataContent = never> = ProjectorExecutor<TDataContent>;
 
 export type Charter<
   TDataContent = never,
@@ -1050,7 +1084,9 @@ export type CharterConfig<TDataContent = never> = {
   layouts?: readonly LayoutDef[];
   computedParts?: readonly AnyComputedPartDef[];
   discriminators?: readonly AnyDiscriminator[];
-  historyProjections?: readonly HistoryProjectionFunction<NoInfer<TDataContent>>[];
+  historyProjections?: readonly HistoryProjectionFunction<
+    NoInfer<TDataContent>
+  >[];
 };
 
 /**
@@ -1088,7 +1124,11 @@ export type SerializedStateDescriptor = {
   key: string;
   scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
-  projection?: { slot?: string; region?: LayoutRegionName; exposure?: Exposure };
+  projection?: {
+    slot?: string;
+    region?: LayoutRegionName;
+    exposure?: Exposure;
+  };
   init?: unknown;
   schema: unknown;
 };
@@ -1102,7 +1142,11 @@ export type DryPart =
       caller: ActionCaller;
       exposure?: Exposure;
       ref: DryAction;
-      guidance?: Array<{ slot?: string; region?: LayoutRegionName; text: string }>;
+      guidance?: Array<{
+        slot?: string;
+        region?: LayoutRegionName;
+        text: string;
+      }>;
     }
   | { kind: "computed"; ref: Ref }
   // Includes serialize the node KEY (the ref idiom's wire form); hydration
@@ -1126,14 +1170,13 @@ export type DryMemberSelect<TDataContent = never> = {
 };
 
 export type DryMemberEntry<TDataContent = never> =
-  | DryNode<TDataContent>
-  | Ref
-  | DryMemberSelect<TDataContent>;
+  DryNode<TDataContent> | Ref | DryMemberSelect<TDataContent>;
 
 export type DryNode<TDataContent = never> = {
   key: string;
   sourceNodeKey?: string;
   name?: string;
+  purpose?: string;
   params?: unknown;
   parts?: DryPart[];
   states?: Array<SerializedStateDescriptor | Ref>;

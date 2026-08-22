@@ -273,7 +273,6 @@ function createObservabilityExecutor(): Executor<SandboxAttachmentData> {
   const memoryExecutor = new AiSdkExecutor<SandboxAttachmentData>({
     model: modelRef(DISCRETE_MODEL),
     maxOutputTokens: 1024,
-    maxSteps: 3,
   });
   const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>
     request.inference.tools.some((tool) => tool.name === "saveMemories");

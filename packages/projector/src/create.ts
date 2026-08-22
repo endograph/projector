@@ -27,12 +27,13 @@ import {
   type ParamsSatisfyError,
 } from "./params.ts";
 
-export type InferActions<TConfig, TKey extends "tools" | "commands"> = TConfig extends Record<
-  TKey,
-  infer TActions extends readonly ActionConfigEntry[]
->
-  ? TActions
-  : [];
+export type InferActions<TConfig, TKey extends "tools" | "commands"> =
+  TConfig extends Record<
+    TKey,
+    infer TActions extends readonly ActionConfigEntry[]
+  >
+    ? TActions
+    : [];
 
 type ActionEntryMeta<TEntry> = TEntry extends AnyAction
   ? TEntry
@@ -40,17 +41,19 @@ type ActionEntryMeta<TEntry> = TEntry extends AnyAction
     ? AnyAction & { name: TEntry }
     : never;
 
-type InferActionMetas<TConfig, TKey extends "tools" | "commands"> = ActionEntryMeta<
-  InferActions<TConfig, TKey>[number]
->;
+type InferActionMetas<
+  TConfig,
+  TKey extends "tools" | "commands",
+> = ActionEntryMeta<InferActions<TConfig, TKey>[number]>;
 
-type InferParamsSchema<TConfig> = TConfig extends { params: infer TParams extends AnyParamsSchema }
+type InferParamsSchema<TConfig> = TConfig extends {
+  params: infer TParams extends AnyParamsSchema;
+}
   ? TParams
   : typeof emptyParamsSchema;
 
-export type ActionEntryParams<TEntry> = TEntry extends AnyAction<infer TParams>
-  ? TParams
-  : typeof emptyParamsSchema;
+export type ActionEntryParams<TEntry> =
+  TEntry extends AnyAction<infer TParams> ? TParams : typeof emptyParamsSchema;
 
 /**
  * The action types a part entry carries: inline action parts, plus computed
@@ -59,18 +62,21 @@ export type ActionEntryParams<TEntry> = TEntry extends AnyAction<infer TParams>
  * compute-closure returns are type-opaque — the charter-build runtime
  * backstop covers those.
  */
-type PartActionEntryOf<TPart> = TPart extends ActionPart<infer TAction>
-  ? TAction
-  : TPart extends ComputedPartRef<any, infer TAction>
+type PartActionEntryOf<TPart> =
+  TPart extends ActionPart<infer TAction>
     ? TAction
-    : TPart extends ComputedPartDef<any, infer TAction>
+    : TPart extends ComputedPartRef<any, infer TAction>
       ? TAction
-      : never;
+      : TPart extends ComputedPartDef<any, infer TAction>
+        ? TAction
+        : never;
 
 type NodeActionEntries<TConfig> =
   | InferActions<TConfig, "tools">[number]
   | InferActions<TConfig, "commands">[number]
-  | (TConfig extends { parts: readonly (infer TPart)[] } ? PartActionEntryOf<TPart> : never);
+  | (TConfig extends { parts: readonly (infer TPart)[] }
+      ? PartActionEntryOf<TPart>
+      : never);
 
 /**
  * The data content an entry's phantom brand implies (see CreatedAction).
@@ -90,17 +96,23 @@ export type ImpliedDataContentOf<TEntry> = TEntry extends unknown
  * plain node covariance — tools need no charter registration to be held to
  * the charter's declared dataContent.
  */
-export type NodeActionDataContent<TConfig> = ImpliedDataContentOf<NodeActionEntries<TConfig>>;
+export type NodeActionDataContent<TConfig> = ImpliedDataContentOf<
+  NodeActionEntries<TConfig>
+>;
 
-type NodeActionParamErrors<TConfig> = NodeActionEntries<TConfig> extends infer TEntry
-  ? TEntry extends AnyAction
-    ? ParamsSatisfyError<InferParamsSchema<TConfig>, ActionEntryParams<TEntry>> extends infer TError
-      ? [TError] extends [never]
-        ? never
-        : TError & { readonly action: TEntry["name"] }
+type NodeActionParamErrors<TConfig> =
+  NodeActionEntries<TConfig> extends infer TEntry
+    ? TEntry extends AnyAction
+      ? ParamsSatisfyError<
+          InferParamsSchema<TConfig>,
+          ActionEntryParams<TEntry>
+        > extends infer TError
+        ? [TError] extends [never]
+          ? never
+          : TError & { readonly action: TEntry["name"] }
+        : never
       : never
-    : never
-  : never;
+    : never;
 
 /**
  * Every action attached to the node — tools/commands sugar, action parts,
@@ -109,23 +121,29 @@ type NodeActionParamErrors<TConfig> = NodeActionEntries<TConfig> extends infer T
  * of per-action diagnostics (one satisfied action must never mask another's
  * failure, which a union of `unknown | error` would).
  */
-export type ValidateNodeActionParams<TConfig> =
-  [NodeActionParamErrors<TConfig>] extends [never] ? unknown : NodeActionParamErrors<TConfig>;
+export type ValidateNodeActionParams<TConfig> = [
+  NodeActionParamErrors<TConfig>,
+] extends [never]
+  ? unknown
+  : NodeActionParamErrors<TConfig>;
 
 export type NodeParamsSchemaOf<TNode> =
   TNode extends Node<any, infer TParams> ? TParams : typeof emptyParamsSchema;
 
-export type NodeMemberParamsSchema<TNode> =
-  TNode extends { __config: infer TConfig }
-    ? TConfig extends { members: readonly (infer TMember)[] }
-      ? NodeParamsSchemaOf<TMember> | NodeMemberParamsSchema<TMember>
-      : never
-    : never;
+export type NodeMemberParamsSchema<TNode> = TNode extends {
+  __config: infer TConfig;
+}
+  ? TConfig extends { members: readonly (infer TMember)[] }
+    ? NodeParamsSchemaOf<TMember> | NodeMemberParamsSchema<TMember>
+    : never
+  : never;
 
 export type NodeTreeParamsSchema<TNode> =
   NodeParamsSchemaOf<TNode> | NodeMemberParamsSchema<TNode>;
 
-type NodeKeyOf<TNode> = TNode extends { key: infer TKey extends string } ? TKey : string;
+type NodeKeyOf<TNode> = TNode extends { key: infer TKey extends string }
+  ? TKey
+  : string;
 
 /**
  * never-on-pass error collection over a created node and its member tree
@@ -138,17 +156,19 @@ export type NodeTreeParamErrors<TSuper extends AnyParamsSchema, TNode> =
   // Distribute first: an empty nodes tuple infers TNode = never, which must
   // vanish rather than reach ParamsSatisfyError as a degenerate schema.
   TNode extends unknown
-    ?
-        | (ParamsSatisfyError<TSuper, NodeParamsSchemaOf<TNode>> extends infer TError
-            ? [TError] extends [never]
-              ? never
-              : TError & { readonly node: NodeKeyOf<TNode> }
-            : never)
-        | (TNode extends { __config: infer TConfig }
-            ? TConfig extends { members: readonly (infer TMember)[] }
-              ? MemberEntryParamErrors<TSuper, TMember>
-              : never
-            : never)
+    ? | (ParamsSatisfyError<
+          TSuper,
+          NodeParamsSchemaOf<TNode>
+        > extends infer TError
+          ? [TError] extends [never]
+            ? never
+            : TError & { readonly node: NodeKeyOf<TNode> }
+          : never)
+      | (TNode extends { __config: infer TConfig }
+          ? TConfig extends { members: readonly (infer TMember)[] }
+            ? MemberEntryParamErrors<TSuper, TMember>
+            : never
+          : never)
     : never;
 
 type MemberEntryParamErrors<TSuper extends AnyParamsSchema, TMember> =
@@ -159,7 +179,10 @@ type MemberEntryParamErrors<TSuper extends AnyParamsSchema, TMember> =
 export type CreatedNode<
   TDataContent,
   TConfig extends NodeConfig<TDataContent>,
-> = Node<TDataContent | NodeActionDataContent<TConfig>, InferParamsSchema<TConfig>> & {
+> = Node<
+  TDataContent | NodeActionDataContent<TConfig>,
+  InferParamsSchema<TConfig>
+> & {
   __tools?: InferActionMetas<TConfig, "tools">;
   __commands?: InferActionMetas<TConfig, "commands">;
   __config: TConfig;
@@ -171,11 +194,13 @@ const NODE_BRAND: unique symbol = Symbol.for("projector.node") as never;
  * True for hydrated Node objects produced by createNode, as opposed to dry
  * (serialized) node data or refs.
  */
-export function isNode<TDataContent = never>(value: unknown): value is Node<TDataContent> {
+export function isNode<TDataContent = never>(
+  value: unknown,
+): value is Node<TDataContent> {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      (value as { [NODE_BRAND]?: unknown })[NODE_BRAND] === true,
+    typeof value === "object" &&
+    (value as { [NODE_BRAND]?: unknown })[NODE_BRAND] === true,
   );
 }
 
@@ -199,7 +224,10 @@ export function createState<S>(
  * validation compares descriptors by reference, so normalization must never
  * mint a second identity for the same declaration.
  */
-const normalizedStateDescriptors = new WeakMap<object, NormalizedStateDescriptor<any>>();
+const normalizedStateDescriptors = new WeakMap<
+  object,
+  NormalizedStateDescriptor<any>
+>();
 
 export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
@@ -207,7 +235,10 @@ export function normalizeStateDescriptor<S>(
   assertProjectorIdentifier(descriptor.key, "State key");
   const scope = descriptor.scope ?? "hoist";
   const onInitConflict = descriptor.onInitConflict ?? "replace";
-  if (descriptor.scope === scope && descriptor.onInitConflict === onInitConflict) {
+  if (
+    descriptor.scope === scope &&
+    descriptor.onInitConflict === onInitConflict
+  ) {
     return descriptor as NormalizedStateDescriptor<S>;
   }
 
@@ -265,7 +296,9 @@ function assertValidTriggers(trigger: RuntimeTrigger | RuntimeTrigger[]): void {
   const seen = new Set<string>();
   for (const entry of triggers) {
     if (seen.has(entry.type)) {
-      throw new Error(`Duplicate trigger type "${entry.type}" declared on one runtime`);
+      throw new Error(
+        `Duplicate trigger type "${entry.type}" declared on one runtime`,
+      );
     }
     seen.add(entry.type);
   }
@@ -278,7 +311,9 @@ function normalizeBoundaryProjection(
     return "hidden";
   }
   if (value !== "hidden" && value !== "augment") {
-    throw new Error(`Boundary projection must be "hidden" or "augment", got "${String(value)}"`);
+    throw new Error(
+      `Boundary projection must be "hidden" or "augment", got "${String(value)}"`,
+    );
   }
   return value;
 }
@@ -296,7 +331,9 @@ export function createNode<
   const TConfig extends NodeConfig<TDataContent>,
   TDataContent = never,
 >(
-  config: TConfig & NodeConfig<TDataContent> & ValidateNodeActionParams<TConfig>,
+  config: TConfig &
+    NodeConfig<TDataContent> &
+    ValidateNodeActionParams<TConfig>,
 ): CreatedNode<TDataContent, TConfig> {
   const key = config.key ?? config.name;
   if (!key) {
@@ -309,6 +346,7 @@ export function createNode<
     key,
     sourceNodeKey: config.sourceNodeKey,
     name: config.name,
+    purpose: config.purpose,
     params: normalizeParamsSchema(config.params),
     parts: desugarParts<TDataContent>(config),
     states: normalizeStates(config),
@@ -324,7 +362,9 @@ export function createNode<
  * anonymous text part in the preamble default slot, `tools`/`commands` become
  * action parts with their respective callers, followed by explicit `parts`.
  */
-function desugarParts<TDataContent>(config: NodeConfig<TDataContent>): Part<TDataContent>[] {
+function desugarParts<TDataContent>(
+  config: NodeConfig<TDataContent>,
+): Part<TDataContent>[] {
   const parts: Part<TDataContent>[] = [];
   if (config.instructions) {
     parts.push(text(config.instructions));
@@ -346,11 +386,15 @@ function desugarParts<TDataContent>(config: NodeConfig<TDataContent>): Part<TDat
  * normalize into the node's declarations, deduped by key (same key twice on
  * one node is an authoring error).
  */
-function normalizeStates<TDataContent>(config: NodeConfig<TDataContent>): NormalizedStateDescriptor[] {
+function normalizeStates<TDataContent>(
+  config: NodeConfig<TDataContent>,
+): NormalizedStateDescriptor[] {
   const keys = new Set<string>();
   return (config.states ?? []).map((descriptor) => {
     if (keys.has(descriptor.key)) {
-      throw new Error(`Duplicate state "${descriptor.key}" declared on one node`);
+      throw new Error(
+        `Duplicate state "${descriptor.key}" declared on one node`,
+      );
     }
     keys.add(descriptor.key);
     return normalizeStateDescriptor(descriptor);
@@ -382,7 +426,9 @@ function normalizeMemberEntries<TDataContent>(
       // branches may reuse one key across branches — that is the point);
       // distinct entries may not claim the same key. Bare charter-registered
       // returns are opaque here by design.
-      for (const key of new Set((entry.registry ?? []).map((node) => node.key))) {
+      for (const key of new Set(
+        (entry.registry ?? []).map((node) => node.key),
+      )) {
         claim(key);
       }
       continue;

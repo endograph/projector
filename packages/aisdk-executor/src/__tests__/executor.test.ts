@@ -67,9 +67,30 @@ describe("AI SDK prompt rendering", () => {
               stateKey: "status",
               update: { op: "patch", value: { ready: true } },
             },
-            { type: "action", kind: "result", action: "tool", name: "lookup", callId: "lookup-1", success: true, value: { ok: true } },
-            { type: "work", kind: "completion", activationId: "a", reason: "done" },
-            { type: "action", kind: "result", action: "tool", name: "search", callId: "search-1", success: true, value: "done" },
+            {
+              type: "action",
+              kind: "result",
+              action: "tool",
+              name: "lookup",
+              callId: "lookup-1",
+              success: true,
+              value: { ok: true },
+            },
+            {
+              type: "work",
+              kind: "completion",
+              activationId: "a",
+              reason: "done",
+            },
+            {
+              type: "action",
+              kind: "result",
+              action: "tool",
+              name: "search",
+              callId: "search-1",
+              success: true,
+              value: "done",
+            },
           ],
         }),
       ),
@@ -120,7 +141,10 @@ describe("AI SDK prompt rendering", () => {
       ),
     ).toEqual([
       { role: "assistant", content: "hi" },
-      { role: "user", content: "<dynamic-context>\nMode: text.\n</dynamic-context>" },
+      {
+        role: "user",
+        content: "<dynamic-context>\nMode: text.\n</dynamic-context>",
+      },
     ]);
   });
 
@@ -165,7 +189,6 @@ describe("AI SDK prompt rendering", () => {
       model: fakeModel(),
       maxOutputTokens: 100,
       toolChoice: "auto",
-      maxSteps: 7,
     });
 
     expect(
@@ -176,7 +199,13 @@ describe("AI SDK prompt rendering", () => {
             preamble: ["system"],
             recency: ["dynamic"],
             history: [{ ...textUserMessage("hi") }],
-            tools: [{ state: null, name: "lookup", inputSchema: z.object({ query: z.string() }) }],
+            tools: [
+              {
+                state: null,
+                name: "lookup",
+                inputSchema: z.object({ query: z.string() }),
+              },
+            ],
           }),
         }),
       ),
@@ -203,19 +232,31 @@ describe("AI SDK prompt rendering", () => {
 });
 
 describe("Anthropic prompt-cache lowering", () => {
-  const anthropicModel = { provider: "anthropic.messages", modelId: "claude-test" } as never;
+  const anthropicModel = {
+    provider: "anthropic.messages",
+    modelId: "claude-test",
+  } as never;
   const CACHED = { anthropic: { cacheControl: { type: "ephemeral" } } };
 
   it("places one breakpoint on the last stable system block, volatile after it", () => {
     const compiled = inference({
       preamble: [
         "stable charter",
-        { type: "text", text: "volatile status", slot: "volatileTail", volatile: true },
+        {
+          type: "text",
+          text: "volatile status",
+          slot: "volatileTail",
+          volatile: true,
+        },
       ],
       recency: ["Mode: text."],
     });
     expect(buildAiSdkSystemMessages(compiled, anthropicModel)).toEqual([
-      { role: "system", content: "## System\n\nstable charter", providerOptions: CACHED },
+      {
+        role: "system",
+        content: "## System\n\nstable charter",
+        providerOptions: CACHED,
+      },
       {
         role: "system",
         content: `volatile status\n\n## Dynamic Context\n\n${DYNAMIC_CONTEXT_GUIDANCE}`,
@@ -226,7 +267,11 @@ describe("Anthropic prompt-cache lowering", () => {
   it("emits a single cached block when the whole preamble is stable", () => {
     const compiled = inference({ preamble: ["only stable"] });
     expect(buildAiSdkSystemMessages(compiled, anthropicModel)).toEqual([
-      { role: "system", content: "## System\n\nonly stable", providerOptions: CACHED },
+      {
+        role: "system",
+        content: "## System\n\nonly stable",
+        providerOptions: CACHED,
+      },
     ]);
   });
 
@@ -234,25 +279,36 @@ describe("Anthropic prompt-cache lowering", () => {
     const compiled = inference({
       preamble: [
         "stable charter",
-        { type: "text", text: "volatile status", slot: "volatileTail", volatile: true },
+        {
+          type: "text",
+          text: "volatile status",
+          slot: "volatileTail",
+          volatile: true,
+        },
       ],
       recency: ["Mode: text."],
     });
     const messages = buildAiSdkSystemMessages(compiled, anthropicModel);
     expect(Array.isArray(messages)).toBe(true);
-    expect((messages as Array<{ content: string }>).map((message) => message.content).join("\n\n")).toBe(
-      buildAiSdkSystem(compiled),
-    );
+    expect(
+      (messages as Array<{ content: string }>)
+        .map((message) => message.content)
+        .join("\n\n"),
+    ).toBe(buildAiSdkSystem(compiled));
   });
 
   it("passes the ttl through to the breakpoint", () => {
     const compiled = inference({ preamble: ["stable"] });
-    const messages = buildAiSdkSystemMessages(compiled, anthropicModel, { ttl: "1h" });
+    const messages = buildAiSdkSystemMessages(compiled, anthropicModel, {
+      ttl: "1h",
+    });
     expect(messages).toEqual([
       {
         role: "system",
         content: "## System\n\nstable",
-        providerOptions: { anthropic: { cacheControl: { type: "ephemeral", ttl: "1h" } } },
+        providerOptions: {
+          anthropic: { cacheControl: { type: "ephemeral", ttl: "1h" } },
+        },
       },
     ]);
   });
@@ -261,20 +317,39 @@ describe("Anthropic prompt-cache lowering", () => {
     const compiled = inference({
       preamble: [
         "stable",
-        { type: "text", text: "volatile", slot: "volatileTail", volatile: true },
+        {
+          type: "text",
+          text: "volatile",
+          slot: "volatileTail",
+          volatile: true,
+        },
       ],
     });
     const legacy = buildAiSdkSystem(compiled);
     expect(buildAiSdkSystemMessages(compiled, fakeModel())).toBe(legacy);
     expect(
-      buildAiSdkSystemMessages(compiled, { provider: "openai.responses", modelId: "gpt-x" } as never),
+      buildAiSdkSystemMessages(compiled, {
+        provider: "openai.responses",
+        modelId: "gpt-x",
+      } as never),
     ).toBe(legacy);
-    expect(buildAiSdkSystemMessages(compiled, anthropicModel, false)).toBe(legacy);
+    expect(buildAiSdkSystemMessages(compiled, anthropicModel, false)).toBe(
+      legacy,
+    );
 
     const allVolatile = inference({
-      preamble: [{ type: "text", text: "volatile only", slot: "volatileTail", volatile: true }],
+      preamble: [
+        {
+          type: "text",
+          text: "volatile only",
+          slot: "volatileTail",
+          volatile: true,
+        },
+      ],
     });
-    expect(buildAiSdkSystemMessages(allVolatile, anthropicModel)).toBe(buildAiSdkSystem(allVolatile));
+    expect(buildAiSdkSystemMessages(allVolatile, anthropicModel)).toBe(
+      buildAiSdkSystem(allVolatile),
+    );
   });
 });
 
@@ -289,7 +364,13 @@ describe("AiSdkExecutor", () => {
         preamble: ["system"],
         recency: ["dynamic"],
         history: [{ ...textUserMessage("hi") }],
-        tools: [{ state: null, name: "lookup", inputSchema: z.object({ query: z.string() }) }],
+        tools: [
+          {
+            state: null,
+            name: "lookup",
+            inputSchema: z.object({ query: z.string() }),
+          },
+        ],
       }),
     });
     const executor = new AiSdkExecutor({
@@ -304,7 +385,6 @@ describe("AiSdkExecutor", () => {
       seed: 123,
       providerOptions: { openai: { reasoningEffort: "low" } },
       toolChoice: "auto",
-      maxSteps: 7,
     });
 
     await executor.run(requestInput);
@@ -336,6 +416,67 @@ describe("AiSdkExecutor", () => {
     expect(generateInput.stopWhen).toBeDefined();
   });
 
+  it("runs one provider step and asks the machine to continue after tool calls", async () => {
+    const refreshInference = vi.fn(() => inference());
+    const generate = vi.fn(async () =>
+      result({
+        finishReason: "tool-calls",
+        steps: [
+          {
+            stepType: "initial",
+            toolCalls: [
+              { toolCallId: "call-1", toolName: "lookup", input: {} },
+            ],
+          },
+        ],
+      }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    const output = await executor.run(
+      request({
+        refreshInference,
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+
+    const input = (generate.mock.calls as any)[0]?.[0];
+    expect(input.prepareStep).toBeUndefined();
+    expect(refreshInference).not.toHaveBeenCalled();
+    expect(output.completionReason).toBe("continue");
+  });
+
+  it("respects a provider stop after provider-executed tool work", async () => {
+    const generate = vi.fn(async () =>
+      result({
+        text: "Answer after searching.",
+        finishReason: "stop",
+        steps: [
+          {
+            stepType: "initial",
+            toolCalls: [
+              { toolCallId: "web-1", toolName: "webSearch", input: {} },
+            ],
+          },
+        ],
+      }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    const output = await executor.run(request());
+
+    expect(output).toMatchObject({
+      completionReason: "done",
+      value: "Answer after searching.",
+    });
+  });
+
   it("returns generated text for projector-owned output mapping", async () => {
     const frames: FrameDraft[] = [];
     const raw = result({
@@ -349,7 +490,9 @@ describe("AiSdkExecutor", () => {
       generateText: vi.fn(async () => raw) as never,
     });
 
-    const output = await executor.run(request({ enqueueFrame: enqueueTo(frames) }));
+    const output = await executor.run(
+      request({ enqueueFrame: enqueueTo(frames) }),
+    );
 
     expect(output.completionReason).toBe("done");
     expect(output.value).toBe("Final answer.");
@@ -374,7 +517,9 @@ describe("AiSdkExecutor", () => {
       }),
     );
 
-    expect((generate.mock.calls as any)[0]?.[0]?.experimental_output.name).toBe("object");
+    expect((generate.mock.calls as any)[0]?.[0]?.experimental_output.name).toBe(
+      "object",
+    );
     expect(frames).toEqual([]);
   });
 
@@ -382,7 +527,14 @@ describe("AiSdkExecutor", () => {
     const frames: FrameDraft[] = [];
     const streamUpdates: any[] = [];
     const generate = vi.fn(async () => result({ text: "unused" }));
-    const stream = vi.fn(() => streamResult(["Hel", "lo"]));
+    const stream = vi.fn(() =>
+      fullStreamResult([
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", text: "Hel" },
+        { type: "text-delta", id: "t1", text: "lo" },
+        { type: "text-end", id: "t1" },
+      ]),
+    );
     const executor = new AiSdkExecutor({
       model: fakeModel(),
       generateText: generate as never,
@@ -393,25 +545,40 @@ describe("AiSdkExecutor", () => {
       },
     });
 
-    const output = await executor.run(request({ enqueueFrame: enqueueTo(frames) }));
+    const output = await executor.run(
+      request({ enqueueFrame: enqueueTo(frames) }),
+    );
     await flushPromises();
 
     expect(output.completionReason).toBe("done");
     expect(output.value).toBeUndefined();
     expect(generate).not.toHaveBeenCalled();
     expect(stream).toHaveBeenCalledOnce();
-    expect(new Set(streamUpdates.map((update) => update.messageId)).size).toBe(1);
+    expect(new Set(streamUpdates.map((update) => update.messageId)).size).toBe(
+      1,
+    );
     const messageId = streamUpdates[0]?.messageId;
-    expect(streamUpdates.map((update) => update.text)).toEqual(["", "Hel", "Hello"]);
-    expect(streamUpdates.map((update) => update.delta)).toEqual([undefined, "Hel", "lo"]);
+    expect(streamUpdates.map((update) => update.text)).toEqual([
+      "",
+      "Hel",
+      "Hello",
+    ]);
+    expect(streamUpdates.map((update) => update.delta)).toEqual([
+      undefined,
+      "Hel",
+      "lo",
+    ]);
     expect(streamUpdates.map((update) => update.streamState)).toEqual([
       "streaming",
       "streaming",
       "streaming",
     ]);
     expect(streamUpdates.map((update) => update.streamSeq)).toEqual([0, 1, 2]);
+    expect(frames).toEqual([]);
     expect(output.frames).toEqual([
       {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
         messages: [
           {
             type: "assistant",
@@ -424,7 +591,443 @@ describe("AiSdkExecutor", () => {
         ],
       },
     ]);
+  });
+
+  it("records provider-executed action calls and results as frames", async () => {
+    const frames: FrameDraft[] = [];
+    const stream = vi.fn(() =>
+      fullStreamResult([
+        {
+          type: "tool-call",
+          toolCallId: "web-1",
+          toolName: "webSearch",
+          input: {},
+          providerExecuted: true,
+        },
+        {
+          type: "tool-result",
+          toolCallId: "web-1",
+          toolName: "webSearch",
+          input: {},
+          output: {
+            action: { type: "search", queries: ["projector agent framework"] },
+            sources: [{ type: "url", url: "https://example.com/projector" }],
+          },
+          providerExecuted: true,
+        },
+      ]),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      streamText: stream as never,
+      stream: true,
+      executorActions: {
+        webSearch: { type: "provider", id: "openai.web_search" } as never,
+      },
+    });
+
+    const output = await executor.run(
+      request({
+        inference: inference({
+          tools: [{ state: null, name: "webSearch", executorOwned: true }],
+        }),
+        enqueueFrame: enqueueTo(frames),
+      }),
+    );
+
+    expect(output.completionReason).toBe("done");
     expect(frames).toEqual([]);
+    expect(output.frames).toEqual([
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "request",
+            action: "tool",
+            name: "webSearch",
+            input: {},
+            callId: "web-1",
+          },
+        ],
+      },
+      {
+        generatorId: "runtime-1",
+        activationId: "activation-1",
+        inert: true,
+        messages: [
+          {
+            type: "action",
+            kind: "result",
+            action: "tool",
+            name: "webSearch",
+            callId: "web-1",
+            success: true,
+            value: {
+              action: {
+                type: "search",
+                queries: ["projector agent framework"],
+              },
+              sources: [{ type: "url", url: "https://example.com/projector" }],
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("continues work with executor-owned turn budget state after tool calls", async () => {
+    const generate = vi.fn(async () =>
+      result({
+        finishReason: "tool-calls",
+        steps: [
+          {
+            stepType: "initial",
+            toolCalls: [
+              { toolCallId: "call-1", toolName: "lookup", input: {} },
+            ],
+          },
+        ],
+      }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    const output = await executor.run(
+      request({
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+
+    expect(output.completionReason).toBe("continue");
+    expect(output.continuationState).toMatchObject({
+      kind: "working",
+      completedWorkSteps: 1,
+    });
+  });
+
+  it("uses a no-tools respond-now step after the work step budget is exhausted", async () => {
+    const generate = vi.fn(async () =>
+      result({ text: "Here is where I got to." }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+      toolChoice: "required",
+    });
+
+    const output = await executor.run(
+      request({
+        continuationState: {
+          kind: "working",
+          startedAtMs: Date.now() - 1_000,
+          deadlineAtMs: Date.now() + 60_000,
+          completedWorkSteps: 20,
+        },
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+
+    const input = (generate.mock.calls as any)[0]?.[0];
+    expect(input.tools).toBeUndefined();
+    expect(input.stopWhen).toBeUndefined();
+    expect(input.toolChoice).toBeUndefined();
+    expect(input.system).toContain("20 work steps");
+    expect(output).toMatchObject({
+      completionReason: "done",
+      value: "Here is where I got to.",
+    });
+  });
+
+  it("allows twenty work steps followed by exactly one respond-now step", async () => {
+    const generate = vi.fn(async () =>
+      result({
+        finishReason: "tool-calls",
+        steps: [
+          {
+            stepType: "initial",
+            toolCalls: [
+              { toolCallId: "call-1", toolName: "lookup", input: {} },
+            ],
+          },
+        ],
+      }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+      toolChoice: "required",
+    });
+    let continuationState: unknown;
+
+    for (let step = 1; step <= 20; step += 1) {
+      const output = await executor.run(
+        request({
+          continuationState,
+          inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+        }),
+      );
+      expect(output.completionReason).toBe("continue");
+      continuationState = output.continuationState;
+    }
+
+    const final = await executor.run(
+      request({
+        continuationState,
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+
+    expect(generate).toHaveBeenCalledTimes(21);
+    const finalInput = (generate.mock.calls as any[]).at(-1)?.[0];
+    expect(finalInput.tools).toBeUndefined();
+    expect(finalInput.toolChoice).toBeUndefined();
+    expect(final.completionReason).toBe("done");
+    expect(final.continuationState).toBeUndefined();
+  });
+
+  it("uses a no-tools respond-now step after the turn deadline is exhausted", async () => {
+    const generate = vi.fn(async () =>
+      result({ text: "I need to stop here." }),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: generate as never,
+    });
+
+    const output = await executor.run(
+      request({
+        continuationState: {
+          kind: "working",
+          startedAtMs: Date.now() - 31_000,
+          deadlineAtMs: Date.now() - 1_000,
+          completedWorkSteps: 3,
+        },
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+
+    const input = (generate.mock.calls as any)[0]?.[0];
+    expect(input.tools).toBeUndefined();
+    expect(input.system).toContain("30 second deadline");
+    expect(output).toMatchObject({
+      completionReason: "done",
+      value: "I need to stop here.",
+    });
+  });
+
+  it("lets an in-flight streamed response finish after the turn deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseStream: () => void = () => {};
+      const streamGate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const streamUpdates: any[] = [];
+      const stream = vi.fn(() => ({
+        text: Promise.resolve("Complete answer."),
+        steps: Promise.resolve([{ stepType: "initial" }]),
+        usage: Promise.resolve(undefined),
+        finishReason: Promise.resolve("stop"),
+        fullStream: (async function* () {
+          yield { type: "text-start", id: "answer" };
+          yield { type: "text-delta", id: "answer", text: "Complete " };
+          await streamGate;
+          yield { type: "text-delta", id: "answer", text: "answer." };
+          yield { type: "text-end", id: "answer" };
+        })(),
+      }));
+      const executor = new AiSdkExecutor({
+        model: fakeModel(),
+        streamText: stream as never,
+        stream: true,
+        onStreamUpdate: (update) => streamUpdates.push(update),
+        turnDeadlineMs: 30_000,
+      });
+
+      const pending = executor.run(request());
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await flushPromises();
+      vi.advanceTimersByTime(30_001);
+      await flushPromises();
+
+      expect(settled).toBe(false);
+      expect(streamUpdates.at(-1)).toMatchObject({
+        text: "Complete ",
+        streamState: "streaming",
+      });
+
+      releaseStream();
+      const output = await pending;
+
+      expect(output.completionReason).toBe("done");
+      expect(output.continuationState).toBeUndefined();
+      expect(
+        streamUpdates.some((update) => update.streamState === "cancelled"),
+      ).toBe(false);
+      expect(output.frames?.[0]?.messages[0]).toMatchObject({
+        type: "assistant",
+        text: "Complete answer.",
+        streamState: "complete",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes the next continuation the respond-now step after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let finishWorkStep: () => void = () => {};
+      const workStepGate = new Promise<void>((resolve) => {
+        finishWorkStep = resolve;
+      });
+      let call = 0;
+      const generate = vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          await workStepGate;
+          return result({
+            finishReason: "tool-calls",
+            steps: [
+              {
+                stepType: "initial",
+                toolCalls: [
+                  { toolCallId: "call-1", toolName: "lookup", input: {} },
+                ],
+              },
+            ],
+          });
+        }
+        return result({ text: "Final answer." });
+      });
+      const executor = new AiSdkExecutor({
+        model: fakeModel(),
+        generateText: generate as never,
+        toolChoice: "required",
+        turnDeadlineMs: 30_000,
+      });
+
+      const workStep = executor.run(
+        request({
+          inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+        }),
+      );
+      let settled = false;
+      void workStep.then(() => {
+        settled = true;
+      });
+      await flushPromises();
+      vi.advanceTimersByTime(30_001);
+      await flushPromises();
+
+      expect(settled).toBe(false);
+
+      finishWorkStep();
+      const continued = await workStep;
+      expect(continued).toMatchObject({
+        completionReason: "continue",
+        continuationState: {
+          kind: "respond-now",
+          completedWorkSteps: 1,
+          reason: "deadline",
+        },
+      });
+
+      const final = await executor.run(
+        request({
+          continuationState: continued.continuationState,
+          inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+        }),
+      );
+      const finalInput = (generate.mock.calls as any[]).at(-1)?.[0];
+      expect(finalInput.tools).toBeUndefined();
+      expect(finalInput.toolChoice).toBeUndefined();
+      expect(final).toMatchObject({
+        completionReason: "done",
+        value: "Final answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not schedule a respond-now step after user cancellation", async () => {
+    const controller = new AbortController();
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      generateText: vi.fn(() => new Promise(() => {})) as never,
+      turnDeadlineMs: 30_000,
+    });
+
+    const pending = executor.run(
+      request({
+        signal: controller.signal,
+        inference: inference({ tools: [{ state: null, name: "lookup" }] }),
+      }),
+    );
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ completionReason: "cancelled" });
+  });
+
+  it("preserves a native preamble as a distinct frame before tool work", async () => {
+    const frames: FrameDraft[] = [];
+    const streamUpdates: any[] = [];
+    const stream = vi.fn(() =>
+      fullStreamResult([
+        { type: "text-start", id: "preamble" },
+        {
+          type: "text-delta",
+          id: "preamble",
+          text: "I’ll inspect the current state.",
+        },
+        { type: "text-end", id: "preamble" },
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "lookup",
+          input: {},
+        },
+        { type: "text-start", id: "answer" },
+        { type: "text-delta", id: "answer", text: "Here’s what I found." },
+        { type: "text-end", id: "answer" },
+      ]),
+    );
+    const executor = new AiSdkExecutor({
+      model: fakeModel(),
+      streamText: stream as never,
+      stream: true,
+      onStreamUpdate: (update) => streamUpdates.push(update),
+    });
+
+    const output = await executor.run(
+      request({ enqueueFrame: enqueueTo(frames) }),
+    );
+    await flushPromises();
+
+    expect(frames).toEqual([]);
+    expect(output.frames).toHaveLength(2);
+    expect(output.frames?.[0]?.messages[0]).toMatchObject({
+      type: "assistant",
+      text: "I’ll inspect the current state.",
+      streamState: "complete",
+    });
+    expect(output.frames?.[1]?.messages[0]).toMatchObject({
+      type: "assistant",
+      text: "Here’s what I found.",
+      streamState: "complete",
+    });
+    expect(new Set(streamUpdates.map((update) => update.messageId)).size).toBe(
+      2,
+    );
   });
 
   it("does not enqueue a frame when generated text is empty", async () => {
@@ -434,7 +1037,9 @@ describe("AiSdkExecutor", () => {
       generateText: vi.fn(async () => result({ text: "" })) as never,
     });
 
-    const output = await executor.run(request({ enqueueFrame: enqueueTo(frames) }));
+    const output = await executor.run(
+      request({ enqueueFrame: enqueueTo(frames) }),
+    );
 
     expect(output.completionReason).toBe("done");
     expect(output.value).toBeUndefined();
@@ -443,7 +1048,11 @@ describe("AiSdkExecutor", () => {
   });
 
   it("lowers deferred tools through the configured hook, erroring without one", () => {
-    const nativeAction = { state: null, name: "always", description: "native tool" };
+    const nativeAction = {
+      state: null,
+      name: "always",
+      description: "native tool",
+    };
     // Compile tags deferred tool copies with this registered symbol
     // (markActionExposure is compile-internal); the fixture mimics its output.
     const deferredAction = Object.assign(
@@ -463,18 +1072,82 @@ describe("AiSdkExecutor", () => {
     // With a lowering: the hook owns the deferred set (provider tool-search
     // idiom); native tools are untouched.
     const lowering = vi.fn(({ deferred, buildTool }) => ({
-      tool_search: buildTool({ state: null, name: "tool_search", description: "search tools" }),
-      ...(Object.fromEntries(deferred.map((action: { name: string }) => [
-        `deferred_${action.name}`,
-        buildTool(action),
-      ]))),
+      tool_search: buildTool({
+        state: null,
+        name: "tool_search",
+        description: "search tools",
+      }),
+      ...Object.fromEntries(
+        deferred.map((action: { name: string }) => [
+          `deferred_${action.name}`,
+          buildTool(action),
+        ]),
+      ),
     }));
-    const lowered = buildAiSdkTools(requestInput, config({ deferredTools: lowering }));
+    const lowered = buildAiSdkTools(
+      requestInput,
+      config({ deferredTools: lowering }),
+    );
     expect(lowering).toHaveBeenCalledWith(
       expect.objectContaining({ deferred: [deferredAction] }),
     );
-    expect(Object.keys(lowered).sort()).toEqual(["always", "deferred_rare", "tool_search"]);
+    expect(Object.keys(lowered).sort()).toEqual([
+      "always",
+      "deferred_rare",
+      "tool_search",
+    ]);
     expect(Object.keys(lowered)).not.toContain("rare");
+  });
+
+  it("requires an executor record for every projected executor-owned action", () => {
+    const webSearch = {
+      state: null,
+      name: "webSearch",
+      executorOwned: true,
+      inputSchema: z.object({}),
+    };
+    const requestInput = request({
+      inference: inference({ tools: [webSearch] }),
+    });
+
+    expect(() => buildAiSdkTools(requestInput, config())).toThrow(
+      /executor-owned action "webSearch" has no matching executor action/,
+    );
+  });
+
+  it("lowers an executor-owned action to its matching executor tool", () => {
+    const webSearch = {
+      state: null,
+      name: "webSearch",
+      executorOwned: true,
+      inputSchema: z.object({}),
+    };
+    const providerTool = { type: "provider", id: "openai.web_search" } as never;
+    const lowered = buildAiSdkTools(
+      request({ inference: inference({ tools: [webSearch] }) }),
+      config({ executorActions: { webSearch: providerTool } }),
+    );
+
+    expect(lowered).toEqual({ webSearch: providerTool });
+  });
+
+  it("rejects deferred exposure for executor-owned actions", () => {
+    const webSearch = Object.assign(
+      {
+        state: null,
+        name: "webSearch",
+        executorOwned: true,
+        inputSchema: z.object({}),
+      },
+      { [Symbol.for("projector.actionExposure")]: "deferred" },
+    );
+
+    expect(() =>
+      buildAiSdkTools(
+        request({ inference: inference({ tools: [webSearch] }) }),
+        config({ executorActions: { webSearch: {} as never } }),
+      ),
+    ).toThrow(/executor-owned action "webSearch" cannot be deferred/);
   });
 
   it("converts projected actions into tools and executes action.run with fresh context", async () => {
@@ -494,7 +1167,10 @@ describe("AiSdkExecutor", () => {
     });
 
     const tools = buildAiSdkTools(requestInput, config());
-    const output = await (tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" });
+    const output = await (tools.lookup as any).execute(
+      { query: "x" },
+      { toolCallId: "call-1" },
+    );
 
     expect((tools.lookup as any).description).toBe("Look something up.");
     expect(actionRun).toHaveBeenCalledWith(
@@ -520,7 +1196,9 @@ describe("AiSdkExecutor", () => {
     });
 
     const tools = buildAiSdkTools(requestInput, config());
-    await expect((tools.lookup as any).execute({ query: "x" })).resolves.toEqual({
+    await expect(
+      (tools.lookup as any).execute({ query: "x" }),
+    ).resolves.toEqual({
       input: { query: "x" },
       ctx: context,
     });
@@ -540,7 +1218,10 @@ describe("AiSdkExecutor", () => {
               state: null,
               name: "announce",
               run: () => {
-                const message = { ...textAssistantMessage("from tool"), audience: "broadcast" as const };
+                const message = {
+                  ...textAssistantMessage("from tool"),
+                  audience: "broadcast" as const,
+                };
                 return actionResult({ value: message, messages: [message] });
               },
             },
@@ -571,7 +1252,10 @@ describe("AiSdkExecutor", () => {
             action: "tool",
             name: "announce",
             success: true,
-            value: { ...textAssistantMessage("from tool"), audience: "broadcast" },
+            value: {
+              ...textAssistantMessage("from tool"),
+              audience: "broadcast",
+            },
             outputMessageIndices: [2],
             callId: "call-1",
           },
@@ -599,7 +1283,9 @@ describe("AiSdkExecutor", () => {
       config(),
     );
 
-    await expect((tools.lookup as any).execute({ query: "x" })).resolves.toEqual({ ok: true });
+    await expect(
+      (tools.lookup as any).execute({ query: "x" }),
+    ).resolves.toEqual({ ok: true });
 
     expect(frames).toMatchObject([
       {
@@ -647,7 +1333,9 @@ describe("AiSdkExecutor", () => {
       config(),
     );
 
-    await expect((tools.lookup as any).execute({ query: "x" })).resolves.toEqual({ ok: true });
+    await expect(
+      (tools.lookup as any).execute({ query: "x" }),
+    ).resolves.toEqual({ ok: true });
 
     expect(frames).toMatchObject([
       {
@@ -704,8 +1392,9 @@ describe("AiSdkExecutor", () => {
       config(),
     );
 
-    await expect((tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" }))
-      .rejects.toThrow("lookup failed");
+    await expect(
+      (tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" }),
+    ).rejects.toThrow("lookup failed");
 
     expect(frames).toMatchObject([
       {
@@ -743,18 +1432,25 @@ describe("AiSdkExecutor", () => {
       inference: inference({
         tools: [getStateAction],
         retrievableStates: [
-          { address: "memory", target: { instanceId: "r", stateKey: "memory" } },
+          {
+            address: "memory",
+            target: { instanceId: "r", stateKey: "memory" },
+          },
         ],
       }),
     });
     const tools = buildAiSdkTools(requestInput, config());
 
-    await expect((tools.getState as any).execute({ address: "memory" })).resolves.toEqual({
+    await expect(
+      (tools.getState as any).execute({ address: "memory" }),
+    ).resolves.toEqual({
       address: "memory",
       value: 1,
     });
     expect(getState).toHaveBeenCalledWith("memory");
-    expect(requestInput.createActionContext).toHaveBeenCalledWith(getStateAction);
+    expect(requestInput.createActionContext).toHaveBeenCalledWith(
+      getStateAction,
+    );
   });
 
   it("uses runAction override when provided", async () => {
@@ -767,9 +1463,9 @@ describe("AiSdkExecutor", () => {
     });
 
     const tools = buildAiSdkTools(requestInput, config({ runAction }));
-    await expect((tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" })).resolves.toBe(
-      "override",
-    );
+    await expect(
+      (tools.lookup as any).execute({ query: "x" }, { toolCallId: "call-1" }),
+    ).resolves.toBe("override");
 
     expect(actionRun).not.toHaveBeenCalled();
     expect(runAction).toHaveBeenCalledWith({
@@ -790,8 +1486,18 @@ describe("AiSdkExecutor", () => {
       request({
         inference: inference({
           tools: [
-            { state: null, name: "lookup", description: "first", run: firstRun },
-            { state: null, name: "lookup", description: "second", run: secondRun },
+            {
+              state: null,
+              name: "lookup",
+              description: "first",
+              run: firstRun,
+            },
+            {
+              state: null,
+              name: "lookup",
+              description: "second",
+              run: secondRun,
+            },
           ],
         }),
       }),
@@ -806,9 +1512,7 @@ describe("AiSdkExecutor", () => {
   it("stops the tool loop and returns terminal-action when a tool result is terminal", async () => {
     const frames: FrameDraft[] = [];
     const generate = vi.fn(async (input: any) => {
-      expect(input.stopWhen[1]()).toBe(false);
       await input.tools.finish.execute({}, { toolCallId: "call-1" });
-      expect(input.stopWhen[1]()).toBe(true);
       return result({ text: "wrapping up", finishReason: "tool-calls" });
     });
     const executor = new AiSdkExecutor({
@@ -833,74 +1537,22 @@ describe("AiSdkExecutor", () => {
 
     expect(output.completionReason).toBe("terminal-action");
     expect(output.value).toBe("wrapping up");
-    expect(frames).toMatchObject([
+    expect(frames).toEqual([]);
+    expect(output.frames).toMatchObject([
       {
         messages: [
           { type: "action", kind: "request", name: "finish", callId: "call-1" },
-          { type: "action", kind: "result", name: "finish", success: true, terminal: true, callId: "call-1" },
-        ],
-      },
-    ]);
-  });
-
-  it("re-projects fresh history for each step after the first via prepareStep", async () => {
-    const generate = vi.fn(async () => result({ text: "done" }));
-    const refreshInference = vi.fn(() =>
-      inference({
-        preamble: ["fresh system"],
-        history: [
-          { ...textUserMessage("hello") },
-          { ...textUserMessage("arrived mid-step") },
-        ],
-      }),
-    );
-    const executor = new AiSdkExecutor({
-      model: fakeModel(),
-      generateText: generate as never,
-    });
-
-    await executor.run(
-      request({
-        refreshInference,
-        inference: inference({ history: [{ ...textUserMessage("hello") }] }),
-      }),
-    );
-
-    const input = (generate.mock.calls as any)[0]?.[0];
-    expect(input.prepareStep({ stepNumber: 0, steps: [], messages: [] })).toBeUndefined();
-    expect(refreshInference).not.toHaveBeenCalled();
-
-    const responseMessages = [
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: {} }],
-      },
-      {
-        role: "tool",
-        content: [
           {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "lookup",
-            output: { type: "text", value: "ok" },
+            type: "action",
+            kind: "result",
+            name: "finish",
+            success: true,
+            terminal: true,
+            callId: "call-1",
           },
         ],
       },
-    ];
-    expect(
-      input.prepareStep({
-        stepNumber: 1,
-        steps: [{ response: { messages: responseMessages } }],
-        messages: [],
-      }),
-    ).toEqual({
-      system: "## System\n\nfresh system",
-      messages: [
-        { role: "user", content: "hello" },
-        { role: "user", content: "arrived mid-step" },
-        ...responseMessages,
-      ],
-    });
+    ]);
   });
 
   it("omits prepareStep when the request cannot re-project", async () => {
@@ -923,7 +1575,9 @@ describe("AiSdkExecutor", () => {
       generateText: vi.fn(async () => result({ text: "unused" })) as never,
     });
 
-    await expect(alreadyAborted.run(request({ signal: controller.signal }))).resolves.toEqual({
+    await expect(
+      alreadyAborted.run(request({ signal: controller.signal })),
+    ).resolves.toEqual({
       completionReason: "cancelled",
     });
 
@@ -934,14 +1588,22 @@ describe("AiSdkExecutor", () => {
       }) as never,
     });
 
-    await expect(aborting.run(request())).resolves.toEqual({ completionReason: "cancelled" });
+    await expect(aborting.run(request())).resolves.toEqual({
+      completionReason: "cancelled",
+    });
   });
 });
 
 function inference<TDataContent = never>(
-  overrides: Partial<Omit<CompiledInference<TDataContent>, "preamble" | "recency" | "history">> & {
-    preamble?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
-    recency?: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>;
+  overrides: Partial<
+    Omit<CompiledInference<TDataContent>, "preamble" | "recency" | "history">
+  > & {
+    preamble?: Array<
+      string | (ContentPart<any> & { slot?: string; volatile?: boolean })
+    >;
+    recency?: Array<
+      string | (ContentPart<any> & { slot?: string; volatile?: boolean })
+    >;
     history?: CompiledInference<TDataContent>["history"];
   } = {},
 ): CompiledInference<TDataContent> {
@@ -958,7 +1620,9 @@ function inference<TDataContent = never>(
 // Stamps the region's implicit-layout defaults; part-level slot/volatile
 // overrides survive so cache-boundary tests can mark preamble parts volatile.
 function normalizeParts(
-  parts: Array<string | (ContentPart<any> & { slot?: string; volatile?: boolean })>,
+  parts: Array<
+    string | (ContentPart<any> & { slot?: string; volatile?: boolean })
+  >,
   slot: string,
   volatile: boolean,
 ): CompiledPart<any>[] {
@@ -995,16 +1659,16 @@ function request<TDataContent = never>(
     activationId: "activation-1",
     generatorId: "runtime-1",
     inference: inference<TDataContent>({
-      history: [{ ...textUserMessage("hello") }] as CompiledInference<TDataContent>["history"],
+      history: [
+        { ...textUserMessage("hello") },
+      ] as CompiledInference<TDataContent>["history"],
     }),
     enqueueFrame: enqueueTo([]),
     ...overrides,
   };
 }
 
-function enqueueTo<TDataContent = never>(
-  frames: FrameDraft<TDataContent>[],
-) {
+function enqueueTo<TDataContent = never>(frames: FrameDraft<TDataContent>[]) {
   return (frame: FrameDraft<TDataContent>): Frame<TDataContent> => {
     frames.push(frame);
     return { id: `frame-${frames.length}`, ...frame };
@@ -1016,7 +1680,9 @@ async function flushPromises() {
   await Promise.resolve();
 }
 
-function config(overrides: Partial<AiSdkExecutorConfig> = {}): AiSdkExecutorConfig {
+function config(
+  overrides: Partial<AiSdkExecutorConfig> = {},
+): AiSdkExecutorConfig {
   return { model: fakeModel(), ...overrides };
 }
 
@@ -1034,16 +1700,19 @@ function result(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function streamResult(chunks: string[]) {
+function fullStreamResult(parts: Array<Record<string, unknown>>) {
   return {
-    text: Promise.resolve(chunks.join("")),
+    text: Promise.resolve(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.text)
+        .join(""),
+    ),
     steps: Promise.resolve([{ stepType: "initial" }]),
     usage: Promise.resolve({ inputTokens: 1, outputTokens: 2, totalTokens: 3 }),
     finishReason: Promise.resolve("stop"),
-    textStream: (async function* () {
-      for (const chunk of chunks) {
-        yield chunk;
-      }
+    fullStream: (async function* () {
+      for (const part of parts) yield part;
     })(),
   };
 }
