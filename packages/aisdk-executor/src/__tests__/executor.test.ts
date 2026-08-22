@@ -20,6 +20,7 @@ import {
   buildAiSdkSystemMessages,
   buildAiSdkTools,
 } from "../executor.ts";
+import { asSchema } from "ai";
 import type { AiSdkExecutorConfig } from "../types.ts";
 
 const DYNAMIC_CONTEXT_GUIDANCE = [
@@ -1150,7 +1151,7 @@ describe("AiSdkExecutor", () => {
     ).toThrow(/executor-owned action "webSearch" cannot be deferred/);
   });
 
-  it("converts projected actions into tools and executes action.run with fresh context", async () => {
+  it("converts projected actions into compact tools and executes action.run with fresh context", async () => {
     const actionRun = vi.fn((input, context) => ({ input, context }));
     const requestInput = request({
       inference: inference({
@@ -1167,12 +1168,19 @@ describe("AiSdkExecutor", () => {
     });
 
     const tools = buildAiSdkTools(requestInput, config());
+    const inputSchema = await asSchema((tools.lookup as any).inputSchema)
+      .jsonSchema;
     const output = await (tools.lookup as any).execute(
       { query: "x" },
       { toolCallId: "call-1" },
     );
 
     expect((tools.lookup as any).description).toBe("Look something up.");
+    expect(inputSchema).not.toHaveProperty("$schema");
+    expect((tools.lookup as any).strict).toBeUndefined();
+    expect(
+      buildAiSdkTools(requestInput, config({ toolStrict: true })).lookup,
+    ).toHaveProperty("strict", true);
     expect(actionRun).toHaveBeenCalledWith(
       { query: "x" },
       expect.objectContaining({

@@ -18,7 +18,7 @@ import {
 import type { Id } from "./_generated/dataModel";
 import { ACCESS_ERROR, authorizeSessionWrite } from "./access";
 import { anonymousActor } from "./actors";
-import { messageActorValidator, requireClientMessageId, type MessageActor } from "./messageActor";
+import { requireClientMessageId, type MessageActor } from "./messageActor";
 import { addMessageInternal, markSessionStreamsFailed } from "./messages";
 import { escapeConvexJson } from "./convexJson";
 import { getLatestSessionFrameDoc, restoreFrame } from "./frameHistory";
@@ -31,9 +31,10 @@ import {
   assertRunnerLease,
   getRunnerLease,
   inboxItemSettleValidator,
-  renewRunnerLease,
+  pendingInboxItemValidator,
   settleInboxItems,
 } from "./runnerShared";
+import { userMessageKey } from "./transcript";
 
 const MAX_PENDING_ITEMS = 100;
 
@@ -45,7 +46,7 @@ const MAX_PENDING_ITEMS = 100;
  */
 async function ensureRunner(ctx: MutationCtx, sessionId: Id<"sessions">): Promise<void> {
   const lease = await getRunnerLease(ctx, sessionId);
-  if (lease && lease.active !== false && lease.expiresAt > Date.now()) return;
+  if (lease && lease.active && lease.expiresAt > Date.now()) return;
   // A fresh user enqueue re-opens a circuit that stopped after repeated
   // infrastructure failures.
   if (lease && (lease.consecutiveFailures ?? 0) > 0) {
@@ -144,7 +145,7 @@ async function enqueueUserMessage(
     content: trimmed,
     actor,
     clientMessageId: normalizedClientMessageId,
-    idempotencyKey: `user:${messageId}`,
+    idempotencyKey: userMessageKey(messageId),
   });
 
   return await enqueueItem(ctx, {
@@ -217,7 +218,7 @@ export const claim = internalMutation({
   handler: async (ctx, { sessionId }) => {
     const now = Date.now();
     const lease = await getRunnerLease(ctx, sessionId);
-    if (lease && lease.active !== false && lease.expiresAt > now) return null;
+    if (lease && lease.active && lease.expiresAt > now) return null;
     const generation = (lease?.generation ?? 0) + 1;
     if (lease) {
       await ctx.db.patch(lease._id, {
@@ -248,26 +249,22 @@ export const claim = internalMutation({
 
 export const takePending = internalMutation({
   args: { sessionId: v.id("sessions"), generation: v.number() },
-  returns: v.array(
-    v.object({
-      itemId: v.id("agentInbox"),
-      kind: v.union(v.literal("message"), v.literal("command")),
-      payload: v.any(),
-      actor: messageActorValidator,
-    }),
-  ),
+  returns: v.array(pendingInboxItemValidator),
   handler: async (ctx, { sessionId, generation }) => {
-    await renewRunnerLease(ctx, sessionId, generation);
+    const lease = await assertRunnerLease(ctx, sessionId, generation);
+    // This runs at every step boundary; renew only when meaningfully aged so
+    // the common empty poll stays read-only on the lease row.
+    const now = Date.now();
+    if (lease.expiresAt - now < LEASE_TTL_MS / 2) {
+      await ctx.db.patch(lease._id, { expiresAt: now + LEASE_TTL_MS, renewedAt: now });
+    }
     const items = await ctx.db
       .query("agentInbox")
       .withIndex("by_session_status", (q) =>
         q.eq("sessionId", sessionId).eq("status", "pending"),
       )
       .take(MAX_PENDING_ITEMS);
-    const actionable = items.filter(
-      (item): item is typeof item & { kind: "message" | "command" } => item.kind !== "topic",
-    );
-    return actionable.map((item) => ({
+    return items.map((item) => ({
       itemId: item._id,
       kind: item.kind,
       payload: item.payload,
@@ -437,7 +434,7 @@ export const reap = internalMutation({
   handler: async (ctx, { sessionId, generation }) => {
     const lease = await getRunnerLease(ctx, sessionId);
     // A newer generation owns the session, or the runner exited cleanly.
-    if (!lease || lease.active === false || lease.generation !== generation) return null;
+    if (!lease || !lease.active || lease.generation !== generation) return null;
     const now = Date.now();
     if (lease.expiresAt > now) {
       // Still healthy — chase the renewed expiry.

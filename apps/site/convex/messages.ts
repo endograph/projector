@@ -88,16 +88,16 @@ export const add = internalMutation({
 export const appendStreamDelta = internalMutation({
   args: {
     sessionId: v.id("sessions"),
-    // Runner lease fence: a zombie runner superseded by a newer generation
-    // must not keep streaming into the transcript.
-    generation: v.optional(v.number()),
+    // Runner lease fence, required: only the live generation may stream into
+    // the transcript — a zombie runner superseded by a newer claim must not.
+    generation: v.number(),
     messageKey: v.string(),
     text: v.string(),
     streamSeq: v.number(),
   },
   returns: v.id("messages"),
   handler: async (ctx, { sessionId, generation, messageKey, text, streamSeq }) => {
-    if (generation !== undefined) await assertRunnerLease(ctx, sessionId, generation);
+    await assertRunnerLease(ctx, sessionId, generation);
     const existingIndex = await ctx.db
       .query("messageIndex")
       .withIndex("by_session_idempotency_key", (q) =>

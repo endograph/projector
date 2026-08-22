@@ -360,6 +360,10 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
   const sendCommand = useMutation(api.inbox.sendCommand);
 
   const session = useQuery(api.sessions.get, sessionId ? { sessionId } : "skip");
+  // Separate on purpose: the lease row backing this renews once or twice per
+  // frame during a run, and that churn must not re-push the heavy session
+  // payload above.
+  const workStatus = useQuery(api.sessions.workStatus, sessionId ? { sessionId } : "skip");
 
   // The effigy: the framework's client-side stand-in for the machine. Its
   // send transport is the sessions.sendCommand mutation; refs keep the
@@ -985,11 +989,12 @@ function Conversation({ actionsUrl, initialMessage, initialTopic, sessionId: ses
   }
   const streaming = pendingAssistantId !== undefined;
 
-  // A poke (appPanePing) marks the session doc the moment its mutation
-  // commits, so the thinking indicator starts as soon as the agent wake is
-  // scheduled — not when the model's first token arrives. Survives refresh
-  // mid-run; a timestamp a dead run stranded ages out client-side.
-  const workStartedAt = (session as { workStartedAt?: number } | undefined)?.workStartedAt;
+  // Any enqueue lights this in the same transaction (a pending inbox item or
+  // live runner lease drives workStatus), so the thinking indicator starts as
+  // soon as the agent wake is scheduled — not when the model's first token
+  // arrives. Survives refresh mid-run; a timestamp a dead run stranded ages
+  // out client-side.
+  const workStartedAt = workStatus?.workStartedAt;
   const WORK_STALE_MS = 90_000;
   const [, bumpWorkTick] = useState(0);
   useEffect(() => {
