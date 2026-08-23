@@ -25,9 +25,18 @@ import {
   createInitialSerializedInstance,
   createSiteClientSnapshot,
   hydrateSourceInstance,
+  readCardData,
   serializeSourceInstance,
   siteCharter,
 } from "../src/agent/charter";
+import { addMessageInternal } from "./messages";
+import {
+  frameMessageKey,
+  isTranscriptVisible,
+  readMessageActor,
+  readStringField,
+  shouldPersistAssistantMessage,
+} from "./transcript";
 import {
   getSurfaceArtifact,
   getLatestSurfaceArtifact,
@@ -41,10 +50,11 @@ import {
   reserveAnonymousTurn as reserveAnonymousTurnForSession,
 } from "./access";
 import {
+  assertRunnerLease,
+  getRunnerLease,
   inboxItemSettleValidator,
   renewRunnerLease,
   settleInboxItems,
-  type InboxItemSettle,
 } from "./runnerShared";
 import { initializeSessionEphemera } from "./sessionEphemera";
 import { escapeConvexJson, restoreConvexJson, stripClientSchemas } from "./convexJson";
@@ -135,7 +145,6 @@ export const get = query({
       v.object({ version: v.number(), title: v.string(), source: v.string() }),
     ),
     anonymousTurnUsed: v.boolean(),
-    workStartedAt: v.optional(v.number()),
   }),
   handler: async (ctx, { sessionId }) => {
     const session = await ctx.db.get(sessionId);
@@ -164,23 +173,6 @@ export const get = query({
       ? { version: artifact.version, title: artifact.title, source: artifact.source }
       : readLegacySurface(latestInstance);
 
-    // The thinking indicator, derived rather than stored: an unprocessed inbox
-    // item or a live runner lease means the agent owes this session work. The
-    // client ages the timestamp out, so a crashed runner's lease row only ever
-    // strands a stale number.
-    const pendingItem = await ctx.db
-      .query("agentInbox")
-      .withIndex("by_session_status", (q) =>
-        q.eq("sessionId", sessionId).eq("status", "pending"),
-      )
-      .first();
-    const lease = await ctx.db
-      .query("runnerLease")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .unique();
-    const workStartedAt =
-      pendingItem?._creationTime ?? (lease?.active !== false ? lease?.renewedAt : undefined);
-
     return {
       sessionId,
       ...(session.title !== undefined ? { title: session.title } : {}),
@@ -189,8 +181,30 @@ export const get = query({
       syncState,
       surface,
       anonymousTurnUsed: session.anonymousTurnUsedAt !== undefined,
-      ...(workStartedAt !== undefined ? { workStartedAt } : {}),
     };
+  },
+});
+
+// The thinking indicator, derived rather than stored: an unprocessed inbox
+// item or a live runner lease means the agent owes this session work. Its own
+// tiny query on purpose — the lease row is renewed once or twice per frame,
+// and that churn must not invalidate the heavy sessions.get payload for every
+// subscribed client. The client ages the timestamp out, so a crashed runner's
+// lease row only ever strands a stale number.
+export const workStatus = query({
+  args: { sessionId: v.id("sessions") },
+  returns: v.object({ workStartedAt: v.optional(v.number()) }),
+  handler: async (ctx, { sessionId }) => {
+    const pendingItem = await ctx.db
+      .query("agentInbox")
+      .withIndex("by_session_status", (q) =>
+        q.eq("sessionId", sessionId).eq("status", "pending"),
+      )
+      .first();
+    const lease = await getRunnerLease(ctx, sessionId);
+    const workStartedAt =
+      pendingItem?._creationTime ?? (lease?.active ? lease.renewedAt : undefined);
+    return workStartedAt !== undefined ? { workStartedAt } : {};
   },
 });
 
@@ -264,10 +278,12 @@ export const listFrames = query({
 
 // The runner's single durable write path for frames. The lease generation is
 // the fence: a stale runner (superseded by a newer claim) throws here and
-// nothing lands — no frame, no instance snapshot, no item settle. Inbox items
-// settle in the same transaction as their final frame. The reference frame is
-// simply the head at commit time — the lease guarantees no other frame writer
-// exists, so the parent chain can never fork.
+// nothing lands — no frame, no instance snapshot, no transcript row, no item
+// settle. Transcript rows are written in this same transaction as the frame
+// carrying them, so a crashed runner can never leave a durable frame whose
+// messages silently vanished. The reference frame is simply the head at commit
+// time — the lease guarantees no other frame writer exists, so the parent
+// chain can never fork.
 export const appendRunnerFrame = internalMutation({
   args: {
     sessionId: v.id("sessions"),
@@ -279,15 +295,97 @@ export const appendRunnerFrame = internalMutation({
   handler: async (ctx, { sessionId, generation, frame, settleItems }) => {
     await renewRunnerLease(ctx, sessionId, generation, { madeProgress: true });
     const session = await getSessionOrThrow(ctx, sessionId);
+    const restored = restoreConvexJson(frame) as Frame;
     const frameId = await appendMachineFrameInternal(ctx, {
       sessionId,
       session,
-      frame: restoreConvexJson(frame) as Frame,
+      frame: restored,
     });
-    await settleInboxItems(ctx, sessionId, (settleItems ?? []) as InboxItemSettle[]);
+    await persistFrameTranscript(ctx, { sessionId, frame: restored, frameId });
+    await settleInboxItems(ctx, sessionId, settleItems ?? []);
     return frameId;
   },
 });
+
+// Re-persists one frame's transcript idempotently to stamp updatedSurface onto
+// the drain's last assistant message — the same code path as the original
+// write, so the key derivation and stream settling can never drift from it.
+export const stampUpdatedSurface = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    generation: v.number(),
+    frame: v.any(),
+    frameId: v.id("frames"),
+    messageIndex: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, { sessionId, generation, frame, frameId, messageIndex }) => {
+    await assertRunnerLease(ctx, sessionId, generation);
+    await persistFrameTranscript(ctx, {
+      sessionId,
+      frame: restoreConvexJson(frame) as Frame,
+      frameId,
+      updatedSurfaceMessageIndex: messageIndex,
+    });
+    return null;
+  },
+});
+
+async function persistFrameTranscript(
+  ctx: MutationCtx,
+  {
+    sessionId,
+    frame,
+    frameId,
+    updatedSurfaceMessageIndex,
+  }: {
+    sessionId: Id<"sessions">;
+    frame: Frame;
+    frameId: Id<"frames">;
+    updatedSurfaceMessageIndex?: number;
+  },
+): Promise<void> {
+  for (const [messageIndex, message] of frame.messages.entries()) {
+    const text = typeof message.text === "string" ? message.text : "";
+    if (message.type === "user" && text.trim() && isTranscriptVisible(message)) {
+      const actor = readMessageActor(message);
+      const clientMessageId = readStringField(message, "clientMessageId");
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "user",
+        content: text,
+        frameId,
+        ...(actor ? { actor } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
+        idempotencyKey: frameMessageKey("user", frame, message, messageIndex),
+      });
+    }
+
+    if (
+      message.type === "assistant" &&
+      shouldPersistAssistantMessage(frame, message) &&
+      text.trim()
+    ) {
+      // postCard rides an assistant message as a data content part; lift it
+      // onto the message row so the transcript renders the card (content
+      // stays the prose equivalent, same doctrine as explainer widgets).
+      const card = readCardData(message);
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "assistant",
+        content: text,
+        frameId,
+        ...(card ? { card: { title: card.title, source: card.source } } : {}),
+        ...(messageIndex === updatedSurfaceMessageIndex ? { updatedSurface: true } : {}),
+        idempotencyKey: frameMessageKey("assistant", frame, message, messageIndex),
+        // The durable write settles any in-flight stream row for this message:
+        // frame messages never carry streamState, so it must be set here or a
+        // streamed message stays "streaming" forever.
+        streamState: "complete",
+      });
+    }
+  }
+}
 
 export const reserveAnonymousTurn = internalMutation({
   args: {

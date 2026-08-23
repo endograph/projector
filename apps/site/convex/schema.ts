@@ -26,9 +26,7 @@ export default defineSchema({
   // double as the durable command result the client awaits.
   agentInbox: defineTable({
     sessionId: v.id("sessions"),
-    // `topic` remains only so the development deployment can retain already
-    // settled historical rows; no code enqueues new topic items.
-    kind: v.union(v.literal("message"), v.literal("command"), v.literal("topic")),
+    kind: v.union(v.literal("message"), v.literal("command")),
     // Escaped (convexJson): command payloads carry client machine messages.
     payload: v.any(),
     actor: messageActorValidator,
@@ -47,12 +45,12 @@ export default defineSchema({
   runnerLease: defineTable({
     sessionId: v.id("sessions"),
     generation: v.number(),
-    // Lease rows are permanent so generation never resets. Optional while
-    // existing development rows migrate; every new claim writes it.
-    active: v.optional(v.boolean()),
+    // Lease rows are permanent so generation never resets; inactive marks a
+    // clean release.
+    active: v.boolean(),
     expiresAt: v.number(),
     renewedAt: v.number(),
-    consecutiveFailures: v.optional(v.number()),
+    consecutiveFailures: v.number(),
   }).index("by_session", ["sessionId"]),
 
   // High-churn session metadata lives separately so message and artifact

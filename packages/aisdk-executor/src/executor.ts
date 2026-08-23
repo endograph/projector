@@ -1,6 +1,8 @@
 import {
   Output,
+  asSchema,
   generateText,
+  jsonSchema,
   streamText,
   stepCountIs,
   tool,
@@ -910,8 +912,8 @@ export function buildAiSdkTools<TDataContent = never>(
   const buildTool = (action: AnyAction): ToolSet[string] =>
     tool({
       description: action.description ?? "",
-      inputSchema: action.inputSchema ?? z.object({}),
-      strict: config.toolStrict ?? false,
+      inputSchema: compactToolInputSchema(action.inputSchema),
+      ...(config.toolStrict === true ? { strict: true } : {}),
       execute: (input, aiSdkContext) =>
         executeAction(action, input, request, config, aiSdkContext, runState),
     });
@@ -968,6 +970,22 @@ export function buildAiSdkTools<TDataContent = never>(
   }
 
   return tools;
+}
+
+/**
+ * The provider already knows the function-tool JSON Schema dialect. Zod's
+ * standard conversion adds the same `$schema` URI to every tool, so strip only
+ * that redundant marker while preserving the AI SDK validator unchanged.
+ */
+function compactToolInputSchema(schema: AnyAction["inputSchema"]) {
+  const normalized = asSchema(schema ?? z.object({}));
+  return jsonSchema(
+    Promise.resolve(normalized.jsonSchema).then((value) => {
+      const { $schema: _dialect, ...compact } = value;
+      return compact;
+    }),
+    { validate: normalized.validate },
+  );
 }
 
 function executorOwnedAction<TDataContent>(

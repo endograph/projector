@@ -30,6 +30,7 @@ import type * as sessionEphemera from "../sessionEphemera.js";
 import type * as sessionParticipants from "../sessionParticipants.js";
 import type * as sessions from "../sessions.js";
 import type * as topics from "../topics.js";
+import type * as transcript from "../transcript.js";
 
 import type {
   ApiFromModules,
@@ -60,6 +61,7 @@ declare const fullApi: ApiFromModules<{
   sessionParticipants: typeof sessionParticipants;
   sessions: typeof sessions;
   topics: typeof topics;
+  transcript: typeof transcript;
 }>;
 
 /**

@@ -29,7 +29,10 @@ import { charter } from "./helpers.ts";
 // Executors re-encode, never author.
 
 const body = createSlot("body", { default: true });
-const guidelines = createSlot("guidelines", { title: "Guidelines", merge: "list" });
+const guidelines = createSlot("guidelines", {
+  title: "Guidelines",
+  merge: "list",
+});
 const volatileTail = createSlot("volatileTail", { volatile: true });
 const contextSlot = createSlot("context", { default: true, volatile: true });
 const cameraSlot = createSlot("camera", { volatile: true });
@@ -56,7 +59,9 @@ const archive = {
   inputSchema: z.object({ id: z.string() }),
 };
 
-function compiledFixture(options: { deferredTool?: boolean } = {}): CompiledInference {
+function compiledFixture(
+  options: { deferredTool?: boolean } = {},
+): CompiledInference {
   const node = createNode({
     key: "n",
     tools: [lookup],
@@ -67,7 +72,9 @@ function compiledFixture(options: { deferredTool?: boolean } = {}): CompiledInfe
       text(volatileTail, "volatile status"),
       text(contextSlot, "Mode: voice."),
       cameraSnapshot,
-      ...(options.deferredTool ? [tool(archive, { exposure: "deferred" })] : []),
+      ...(options.deferredTool
+        ? [tool(archive, { exposure: "deferred" })]
+        : []),
     ],
   });
   return compileProjection(createSourceInstance({ id: "i", node }), {
@@ -89,7 +96,9 @@ function compiledFixture(options: { deferredTool?: boolean } = {}): CompiledInfe
 }
 
 function regionTexts(parts: CompiledInference["preamble"]): string[] {
-  return parts.flatMap((part) => (part.type === "text" && part.text.trim() ? [part.text] : []));
+  return parts.flatMap((part) =>
+    part.type === "text" && part.text.trim() ? [part.text] : [],
+  );
 }
 
 /** Each needle appears after the previous one — order within a region survives lowering. */
@@ -97,12 +106,17 @@ function expectOrderedSubsequence(haystack: string, needles: string[]): void {
   let cursor = -1;
   for (const needle of needles) {
     const index = haystack.indexOf(needle, cursor + 1);
-    expect(index, `"${needle}" missing or out of order`).toBeGreaterThan(cursor);
+    expect(index, `"${needle}" missing or out of order`).toBeGreaterThan(
+      cursor,
+    );
     cursor = index;
   }
 }
 
-const anthropicModel = { provider: "anthropic.messages", modelId: "claude-test" } as never;
+const anthropicModel = {
+  provider: "anthropic.messages",
+  modelId: "claude-test",
+} as never;
 const opaqueModel = "opaque-model" as never;
 
 function runRequest(inference: CompiledInference) {
@@ -128,7 +142,9 @@ describe("conformance: executor lowering laws", () => {
       }
       const firstVolatile = region.findIndex((part) => part.volatile);
       if (firstVolatile !== -1) {
-        expect(region.slice(firstVolatile).every((part) => part.volatile)).toBe(true);
+        expect(region.slice(firstVolatile).every((part) => part.volatile)).toBe(
+          true,
+        );
       }
     }
   });
@@ -140,7 +156,12 @@ describe("conformance: executor lowering laws", () => {
 
     const messages = buildAiSdkMessages(compiled);
     const realized = JSON.stringify(messages);
-    expectOrderedSubsequence(realized, regionTexts(compiled.recency).map((part) => JSON.stringify(part).slice(1, -1)));
+    expectOrderedSubsequence(
+      realized,
+      regionTexts(compiled.recency).map((part) =>
+        JSON.stringify(part).slice(1, -1),
+      ),
+    );
     // Images pass through as native image content — never silently dropped.
     expect(realized).toContain('"type":"image"');
   });
@@ -154,36 +175,54 @@ describe("conformance: executor lowering laws", () => {
     ]);
     // The text-instructions surface cannot carry images; the declared rule is
     // a metadata placeholder, not a silent drop.
-    expect(instructions).toContain("Image content unavailable in LiveKit text prompt");
+    expect(instructions).toContain(
+      "Image content unavailable in LiveKit text prompt",
+    );
   });
 
   it("preserves the native tool surface on both executors", () => {
     const compiled = compiledFixture();
-    const aisdkTools = buildAiSdkTools(runRequest(compiled), { model: opaqueModel });
+    const aisdkTools = buildAiSdkTools(runRequest(compiled), {
+      model: opaqueModel,
+    });
     expect(Object.keys(aisdkTools)).toContain("lookup");
     expect(aisdkTools.lookup?.description).toBe("Lookup things");
 
     const livekitTools = buildLiveKitToolDefinitions(compiled);
-    expect(livekitTools.map((definition) => definition.name)).toContain("lookup");
+    expect(livekitTools.map((definition) => definition.name)).toContain(
+      "lookup",
+    );
   });
 
   it("deferred tools lower to the provider idiom or refuse loudly — never degrade silently", () => {
     const compiled = compiledFixture({ deferredTool: true });
+    expect(buildAiSdkSystem(compiled)).toContain(
+      "Tool `archive` is available via tool search.",
+    );
+    expect(buildAiSdkSystem(compiled)).not.toContain("Archive things");
     // No tool-search lowering for an opaque model: refusing beats loading the
     // tool natively under a compiled note that promises tool search.
-    expect(() => buildAiSdkTools(runRequest(compiled), { model: opaqueModel })).toThrow(/deferred tools/);
+    expect(() =>
+      buildAiSdkTools(runRequest(compiled), { model: opaqueModel }),
+    ).toThrow(/deferred tools/);
     // The realtime surface has no tool-search mechanism at all: always an error.
-    expect(() => buildLiveKitToolDefinitions(compiled)).toThrow(/deferred tools/);
+    expect(() => buildLiveKitToolDefinitions(compiled)).toThrow(
+      /deferred tools/,
+    );
   });
 
   it("aisdk places exactly one cache breakpoint at the stable/volatile boundary", () => {
     const compiled = compiledFixture();
     const messages = buildAiSdkSystemMessages(compiled, anthropicModel);
     expect(Array.isArray(messages)).toBe(true);
-    const blocks = messages as Array<{ content: string; providerOptions?: Record<string, unknown> }>;
+    const blocks = messages as Array<{
+      content: string;
+      providerOptions?: Record<string, unknown>;
+    }>;
 
     const cached = blocks.filter((block) => {
-      const anthropic = block.providerOptions?.anthropic as Record<string, unknown> | undefined;
+      const anthropic = block.providerOptions?.anthropic as
+        Record<string, unknown> | undefined;
       return Boolean(anthropic?.cacheControl);
     });
     expect(cached).toHaveLength(1);
@@ -194,6 +233,8 @@ describe("conformance: executor lowering laws", () => {
 
     // Re-encoding, not authoring: the block text concatenates to the exact
     // single-string system prompt every other provider receives.
-    expect(blocks.map((block) => block.content).join("\n\n")).toBe(buildAiSdkSystem(compiled));
+    expect(blocks.map((block) => block.content).join("\n\n")).toBe(
+      buildAiSdkSystem(compiled),
+    );
   });
 });

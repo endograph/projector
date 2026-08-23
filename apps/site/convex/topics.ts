@@ -11,6 +11,7 @@ import { authorizeSessionWrite, consumeAnonymousTurn } from "./access";
 import { addMessageInternal } from "./messages";
 import { requireClientMessageId } from "./messageActor";
 import { appendMachineFrameInternal } from "./sessions";
+import { assistantMessageKey, userMessageKey } from "./transcript";
 
 const TOPICS: Record<string, { ask: string; reply: string }> = {
   subagents: {
@@ -88,7 +89,7 @@ export const open = mutation({
       actor,
       clientMessageId: normalizedClientMessageId,
       frameId,
-      idempotencyKey: `user:${userMessageId}`,
+      idempotencyKey: userMessageKey(userMessageId),
     });
     await addMessageInternal(ctx, {
       sessionId,
@@ -96,7 +97,7 @@ export const open = mutation({
       content: entry.reply,
       widget: topic,
       frameId,
-      idempotencyKey: `assistant:${assistantMessageId}`,
+      idempotencyKey: assistantMessageKey(assistantMessageId),
     });
 
     return null;

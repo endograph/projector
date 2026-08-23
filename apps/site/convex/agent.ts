@@ -3,7 +3,6 @@
 import { openai } from "@ai-sdk/openai";
 import { AiSdkExecutor, type AiSdkStreamUpdate } from "@projectors/aisdk-executor";
 import {
-  ROOT_GENERATOR_ID,
   actionResult,
   createMachine,
   executeCommand,
@@ -27,28 +26,24 @@ import {
   WRITE_APP_SURFACE_ACTION_NAME,
   hydrateSiteInstance,
   panesState,
-  readCardData,
   siteCharter,
 } from "../src/agent/charter";
-import type { MessageActor } from "./messageActor";
 import { escapeConvexJson, restoreConvexJson } from "./convexJson";
 import { SITE_MODEL_ID, sitePromptExecutorConfig } from "./executorConfig";
-import { isTranscriptVisible } from "../src/agent/transcript-visibility";
 import { createRepoBash, type RepoBash } from "./repoBash";
 import {
   MAX_RUNNER_MS,
   isStaleLeaseError,
   type InboxItemSettle,
+  type PendingInboxItem,
 } from "./runnerShared";
+import {
+  assistantMessageKey,
+  readStringField,
+  shouldPersistAssistantMessage,
+} from "./transcript";
 
 const STREAM_WRITE_INTERVAL_MS = 250;
-
-type PendingInboxItem = {
-  itemId: Id<"agentInbox">;
-  kind: "message" | "command";
-  payload: unknown;
-  actor: MessageActor;
-};
 
 // The session's single runner. Claims the lease (or exits if a live runner
 // already holds it), keeps ONE machine in memory for its whole tenure, and
@@ -261,14 +256,13 @@ async function drainAndPersist(
 ): Promise<boolean> {
   let surfaceUpdated = false;
   let reachedDeadline = false;
-  let lastAssistant:
-    | { frame: Frame; frameId: Id<"frames">; message: FrameMessage; messageIndex: number }
-    | null = null;
+  let lastAssistant: { frame: Frame; frameId: Id<"frames">; messageIndex: number } | null = null;
 
   try {
     for await (const frame of runMachine(machine)) {
       const settleItems = settlesByFrameId.get(frame.id);
       settlesByFrameId.delete(frame.id);
+      // Frame, transcript rows, and item settles land in this one transaction.
       const frameId: Id<"frames"> = await ctx.runMutation(internal.sessions.appendRunnerFrame, {
         sessionId,
         generation,
@@ -277,8 +271,13 @@ async function drainAndPersist(
       });
 
       for (const message of frame.messages) {
-        if (message.type === "action" && message.name === "writeAppSurface") {
-          if (message.kind === "result" && message.success) surfaceUpdated = true;
+        if (
+          message.type === "action" &&
+          message.name === WRITE_APP_SURFACE_ACTION_NAME &&
+          message.kind === "result" &&
+          message.success
+        ) {
+          surfaceUpdated = true;
         }
       }
       for (const [messageIndex, message] of frame.messages.entries()) {
@@ -288,11 +287,9 @@ async function drainAndPersist(
           shouldPersistAssistantMessage(frame, message) &&
           text.trim()
         ) {
-          lastAssistant = { frame, frameId, message, messageIndex };
+          lastAssistant = { frame, frameId, messageIndex };
         }
       }
-
-      await persistFrameMessages(ctx, { sessionId, frame, frameId });
 
       // Stop only after the yielded frame and its transcript writes are
       // durable. The successor reconstructs any remaining work from the log.
@@ -313,24 +310,15 @@ async function drainAndPersist(
 
   // A successful writeAppSurface anywhere in the drain stamps its last
   // assistant message, so the transcript can offer "open the app pane" at the
-  // end of the response. Idempotent re-add: same key, patched row.
+  // end of the response. Idempotent re-persist through the same code path as
+  // the original transcript write.
   if (surfaceUpdated && lastAssistant) {
-    const text = typeof lastAssistant.message.text === "string" ? lastAssistant.message.text : "";
-    const card = readCardData(lastAssistant.message);
-    await ctx.runMutation(internal.messages.add, {
+    await ctx.runMutation(internal.sessions.stampUpdatedSurface, {
       sessionId,
-      role: "assistant",
-      content: text,
+      generation,
+      frame: escapeConvexJson(lastAssistant.frame),
       frameId: lastAssistant.frameId,
-      ...(card ? { card: { title: card.title, source: card.source } } : {}),
-      idempotencyKey: frameMessageKey(
-        "assistant",
-        lastAssistant.frame,
-        lastAssistant.message,
-        lastAssistant.messageIndex,
-      ),
-      updatedSurface: true,
-      streamState: "complete",
+      messageIndex: lastAssistant.messageIndex,
     });
   }
   return reachedDeadline;
@@ -488,7 +476,7 @@ function createStreamWriter(
               await ctx.runMutation(internal.messages.appendStreamDelta, {
                 sessionId,
                 generation,
-                messageKey: assistantStreamKey(messageId),
+                messageKey: assistantMessageKey(messageId),
                 text: delta,
                 streamSeq: update.streamSeq,
               });
@@ -512,7 +500,7 @@ function createStreamWriter(
       await ctx.runMutation(internal.messages.markStreamFailed, {
         sessionId,
         generation,
-        messageKey: assistantStreamKey(messageId),
+        messageKey: assistantMessageKey(messageId),
         state,
       }).catch(() => {});
     }
@@ -549,108 +537,8 @@ function requireSessionId(input: unknown): Id<"sessions"> {
   return sessionId as Id<"sessions">;
 }
 
-async function persistFrameMessages(
-  ctx: ActionCtx,
-  {
-    sessionId,
-    frame,
-    frameId,
-  }: {
-    sessionId: Id<"sessions">;
-    frame: Frame;
-    frameId: Id<"frames">;
-  },
-): Promise<void> {
-  for (const [messageIndex, message] of frame.messages.entries()) {
-    const text = typeof message.text === "string" ? message.text : "";
-    if (message.type === "user" && text.trim() && isTranscriptVisible(message)) {
-      const actor = readMessageActor(message);
-      const clientMessageId = readStringField(message, "clientMessageId");
-      await ctx.runMutation(internal.messages.add, {
-        sessionId,
-        role: "user",
-        content: text,
-        frameId,
-        ...(actor ? { actor } : {}),
-        ...(clientMessageId ? { clientMessageId } : {}),
-        idempotencyKey: frameMessageKey("user", frame, message, messageIndex),
-      });
-    }
-
-    if (
-      message.type === "assistant" &&
-      shouldPersistAssistantMessage(frame, message) &&
-      text.trim()
-    ) {
-      // postCard rides an assistant message as a data content part; lift it
-      // onto the message row so the transcript renders the card (content
-      // stays the prose equivalent, same doctrine as explainer widgets).
-      const card = readCardData(message);
-      await ctx.runMutation(internal.messages.add, {
-        sessionId,
-        role: "assistant",
-        content: text,
-        frameId,
-        ...(card ? { card: { title: card.title, source: card.source } } : {}),
-        idempotencyKey: frameMessageKey("assistant", frame, message, messageIndex),
-        // The durable write settles any in-flight stream row for this message:
-        // frame messages never carry streamState, so it must be set here or a
-        // streamed message stays "streaming" forever.
-        streamState: "complete",
-      });
-    }
-  }
-}
-
-function shouldPersistAssistantMessage(frame: Frame, message: FrameMessage): boolean {
-  if (message.audience === "self") return false;
-  return frame.generatorId === undefined || frame.generatorId === ROOT_GENERATOR_ID;
-}
-
-function frameMessageKey(
-  prefix: "user" | "assistant",
-  frame: Frame,
-  message: FrameMessage,
-  messageIndex: number,
-): string {
-  const messageId = readStringField(message, "messageId");
-  if (messageId && prefix === "assistant") return assistantStreamKey(messageId);
-  if (messageId) return `${prefix}:${messageId}`;
-  return `${prefix}:${frame.id}:${messageIndex}`;
-}
-
-function assistantStreamKey(messageId: string): string {
-  return `assistant:${messageId}`;
-}
-
-function readStringField(value: unknown, key: string): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const field = (value as Record<string, unknown>)[key];
-  return typeof field === "string" && field.length > 0 ? field : undefined;
-}
-
 function readBooleanField(value: unknown, key: string): boolean | undefined {
   if (!value || typeof value !== "object") return undefined;
   const field = (value as Record<string, unknown>)[key];
   return typeof field === "boolean" ? field : undefined;
-}
-
-
-function readMessageActor(message: FrameMessage): MessageActor | undefined {
-  const actor = message.actor;
-  if (!actor || typeof actor !== "object") return undefined;
-  const { id, kind, label, profileUrl } = actor as Record<string, unknown>;
-  if (
-    typeof id !== "string" ||
-    (kind !== "anonymous" && kind !== "github") ||
-    typeof label !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    id,
-    kind,
-    label,
-    ...(typeof profileUrl === "string" ? { profileUrl } : {}),
-  };
 }

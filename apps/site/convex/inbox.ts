@@ -18,9 +18,12 @@ import {
 import type { Id } from "./_generated/dataModel";
 import { ACCESS_ERROR, authorizeSessionWrite } from "./access";
 import { anonymousActor } from "./actors";
-import { messageActorValidator, requireClientMessageId, type MessageActor } from "./messageActor";
-import { addMessageInternal } from "./messages";
+import { requireClientMessageId, type MessageActor } from "./messageActor";
+import { addMessageInternal, markSessionStreamsFailed } from "./messages";
 import { escapeConvexJson } from "./convexJson";
+import { getLatestSessionFrameDoc, restoreFrame } from "./frameHistory";
+import { appendMachineFrameInternal } from "./sessions";
+import type { Frame } from "@projectors/core";
 import {
   LEASE_TTL_MS,
   MAX_CONSECUTIVE_RUNNER_FAILURES,
@@ -28,9 +31,10 @@ import {
   assertRunnerLease,
   getRunnerLease,
   inboxItemSettleValidator,
-  renewRunnerLease,
+  pendingInboxItemValidator,
   settleInboxItems,
 } from "./runnerShared";
+import { userMessageKey } from "./transcript";
 
 const MAX_PENDING_ITEMS = 100;
 
@@ -42,7 +46,7 @@ const MAX_PENDING_ITEMS = 100;
  */
 async function ensureRunner(ctx: MutationCtx, sessionId: Id<"sessions">): Promise<void> {
   const lease = await getRunnerLease(ctx, sessionId);
-  if (lease && lease.active !== false && lease.expiresAt > Date.now()) return;
+  if (lease && lease.active && lease.expiresAt > Date.now()) return;
   // A fresh user enqueue re-opens a circuit that stopped after repeated
   // infrastructure failures.
   if (lease && (lease.consecutiveFailures ?? 0) > 0) {
@@ -141,7 +145,7 @@ async function enqueueUserMessage(
     content: trimmed,
     actor,
     clientMessageId: normalizedClientMessageId,
-    idempotencyKey: `user:${messageId}`,
+    idempotencyKey: userMessageKey(messageId),
   });
 
   return await enqueueItem(ctx, {
@@ -214,7 +218,7 @@ export const claim = internalMutation({
   handler: async (ctx, { sessionId }) => {
     const now = Date.now();
     const lease = await getRunnerLease(ctx, sessionId);
-    if (lease && lease.active !== false && lease.expiresAt > now) return null;
+    if (lease && lease.active && lease.expiresAt > now) return null;
     const generation = (lease?.generation ?? 0) + 1;
     if (lease) {
       await ctx.db.patch(lease._id, {
@@ -245,26 +249,22 @@ export const claim = internalMutation({
 
 export const takePending = internalMutation({
   args: { sessionId: v.id("sessions"), generation: v.number() },
-  returns: v.array(
-    v.object({
-      itemId: v.id("agentInbox"),
-      kind: v.union(v.literal("message"), v.literal("command")),
-      payload: v.any(),
-      actor: messageActorValidator,
-    }),
-  ),
+  returns: v.array(pendingInboxItemValidator),
   handler: async (ctx, { sessionId, generation }) => {
-    await renewRunnerLease(ctx, sessionId, generation);
+    const lease = await assertRunnerLease(ctx, sessionId, generation);
+    // This runs at every step boundary; renew only when meaningfully aged so
+    // the common empty poll stays read-only on the lease row.
+    const now = Date.now();
+    if (lease.expiresAt - now < LEASE_TTL_MS / 2) {
+      await ctx.db.patch(lease._id, { expiresAt: now + LEASE_TTL_MS, renewedAt: now });
+    }
     const items = await ctx.db
       .query("agentInbox")
       .withIndex("by_session_status", (q) =>
         q.eq("sessionId", sessionId).eq("status", "pending"),
       )
       .take(MAX_PENDING_ITEMS);
-    const actionable = items.filter(
-      (item): item is typeof item & { kind: "message" | "command" } => item.kind !== "topic",
-    );
-    return actionable.map((item) => ({
+    return items.map((item) => ({
       itemId: item._id,
       kind: item.kind,
       payload: item.payload,
@@ -336,6 +336,54 @@ export const retryAfterFailure = internalMutation({
       const delay = RUNNER_RETRY_BASE_DELAY_MS * 2 ** (consecutiveFailures - 1);
       await ctx.scheduler.runAfter(delay, internal.agent.runSession, { sessionId });
     } else {
+      const session = await ctx.db.get(sessionId);
+      if (!session) throw new Error("Session not found");
+      const activation = await latestOutstandingActivation(ctx, session);
+      const terminalFrameId = activation
+        ? await appendMachineFrameInternal(ctx, {
+            sessionId,
+            session,
+            frame: {
+              inert: true,
+              ...(activation.generatorId ? { generatorId: activation.generatorId } : {}),
+              activationId: activation.activationId,
+              metadata: {
+                runnerFailure: true,
+                consecutiveFailures,
+              },
+              messages: [
+                {
+                  type: "work",
+                  kind: "completion",
+                  activationId: activation.activationId,
+                  ...(activation.generatorId ? { generatorId: activation.generatorId } : {}),
+                  reason: "error",
+                },
+              ],
+            },
+          })
+        : undefined;
+      await markSessionStreamsFailed(ctx, sessionId);
+      const pendingItems = await ctx.db
+        .query("agentInbox")
+        .withIndex("by_session_status", (q) =>
+          q.eq("sessionId", sessionId).eq("status", "pending"),
+        )
+        .take(MAX_PENDING_ITEMS);
+      await settleInboxItems(
+        ctx,
+        sessionId,
+        pendingItems.map((item) => ({ itemId: item._id, error })),
+      );
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "assistant",
+        content:
+          "That turn hit an error before Projector could finish. Anything it completed is still available; try sending again.",
+        ...(terminalFrameId ? { frameId: terminalFrameId } : {}),
+        idempotencyKey: `runner-error:${activation?.activationId ?? generation}`,
+        streamState: "error",
+      });
       console.error("Runner retry budget exhausted", {
         sessionId,
         generation,
@@ -346,6 +394,26 @@ export const retryAfterFailure = internalMutation({
     return { retryScheduled, consecutiveFailures };
   },
 });
+
+async function latestOutstandingActivation(
+  ctx: MutationCtx,
+  session: { _id: Id<"sessions"> },
+): Promise<{ activationId: string; generatorId?: string } | undefined> {
+  const latestFrameDoc = await getLatestSessionFrameDoc(ctx, session._id);
+  if (!latestFrameDoc?.activationId) return undefined;
+  const latestFrame = restoreFrame(latestFrameDoc) as Frame;
+  const alreadyCompleted = latestFrame.messages.some(
+    (message) =>
+      message.type === "work" &&
+      message.kind === "completion" &&
+      message.activationId === latestFrameDoc.activationId,
+  );
+  if (alreadyCompleted) return undefined;
+  return {
+    activationId: latestFrameDoc.activationId,
+    ...(latestFrameDoc.generatorId ? { generatorId: latestFrameDoc.generatorId } : {}),
+  };
+}
 
 // Deadline handoff: the runner is near the action ceiling; pass the session to
 // a fresh action (which claims the next generation) instead of dying mid-work.
@@ -366,7 +434,7 @@ export const reap = internalMutation({
   handler: async (ctx, { sessionId, generation }) => {
     const lease = await getRunnerLease(ctx, sessionId);
     // A newer generation owns the session, or the runner exited cleanly.
-    if (!lease || lease.active === false || lease.generation !== generation) return null;
+    if (!lease || !lease.active || lease.generation !== generation) return null;
     const now = Date.now();
     if (lease.expiresAt > now) {
       // Still healthy — chase the renewed expiry.

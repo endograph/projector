@@ -27,6 +27,7 @@ type DbCtx = MutationCtx | QueryCtx;
 type MessageDoc = Doc<"messages">;
 
 const MAX_SESSION_MESSAGES = 2000;
+const MAX_OPEN_STREAMS_TO_FAIL = 20;
 // At the 250ms writer cadence this covers the full ten-minute action limit.
 const MAX_STREAM_DELTAS = 4096;
 // Reap abandoned streaming rows comfortably past the action time ceiling.
@@ -87,16 +88,16 @@ export const add = internalMutation({
 export const appendStreamDelta = internalMutation({
   args: {
     sessionId: v.id("sessions"),
-    // Runner lease fence: a zombie runner superseded by a newer generation
-    // must not keep streaming into the transcript.
-    generation: v.optional(v.number()),
+    // Runner lease fence, required: only the live generation may stream into
+    // the transcript — a zombie runner superseded by a newer claim must not.
+    generation: v.number(),
     messageKey: v.string(),
     text: v.string(),
     streamSeq: v.number(),
   },
   returns: v.id("messages"),
   handler: async (ctx, { sessionId, generation, messageKey, text, streamSeq }) => {
-    if (generation !== undefined) await assertRunnerLease(ctx, sessionId, generation);
+    await assertRunnerLease(ctx, sessionId, generation);
     const existingIndex = await ctx.db
       .query("messageIndex")
       .withIndex("by_session_idempotency_key", (q) =>
@@ -157,23 +158,43 @@ export const markStreamFailed = internalMutation({
         q.eq("sessionId", sessionId).eq("idempotencyKey", messageKey),
       )
       .first();
-    if (!index) return null;
-    const message = await ctx.db.get(index.messageId);
-    if (message?.streamState === "streaming") {
-      const deltas = await ctx.db
-        .query("messageStreamDeltas")
-        .withIndex("by_message_and_stream_seq", (q) => q.eq("messageId", message._id))
-        .order("asc")
-        .take(MAX_STREAM_DELTAS);
-      await ctx.db.patch(message._id, {
-        content: message.content + deltas.map((delta) => delta.text).join(""),
-        streamState: state,
-      });
-      await Promise.all(deltas.map((delta) => ctx.db.delete(delta._id)));
-    }
+    if (index) await markStreamFailedInternal(ctx, index.messageId, state);
     return null;
   },
 });
+
+export async function markSessionStreamsFailed(
+  ctx: MutationCtx,
+  sessionId: Id<"sessions">,
+): Promise<void> {
+  const indexes = await ctx.db
+    .query("messageIndex")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .order("desc")
+    .take(MAX_OPEN_STREAMS_TO_FAIL);
+  for (const index of indexes) {
+    await markStreamFailedInternal(ctx, index.messageId, "error");
+  }
+}
+
+async function markStreamFailedInternal(
+  ctx: MutationCtx,
+  messageId: Id<"messages">,
+  state: "cancelled" | "error",
+): Promise<void> {
+  const message = await ctx.db.get(messageId);
+  if (message?.streamState !== "streaming") return;
+  const deltas = await ctx.db
+    .query("messageStreamDeltas")
+    .withIndex("by_message_and_stream_seq", (q) => q.eq("messageId", message._id))
+    .order("asc")
+    .take(MAX_STREAM_DELTAS);
+  await ctx.db.patch(message._id, {
+    content: message.content + deltas.map((delta) => delta.text).join(""),
+    streamState: state,
+  });
+  await Promise.all(deltas.map((delta) => ctx.db.delete(delta._id)));
+}
 
 // Shared by the agent action (via the mutation) and sendCommand (directly):
 // idempotent message upsert keyed by messageIndex idempotency key.

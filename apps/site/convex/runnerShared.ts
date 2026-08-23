@@ -3,10 +3,11 @@
 // for a constant — and lease helpers live here so any mutation module can
 // fence itself without creating import cycles.
 
-import { v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { escapeConvexJson } from "./convexJson";
+import { messageActorValidator } from "./messageActor";
 
 export const LEASE_TTL_MS = 120_000;
 // Runner self-limit: hand off well inside Convex's 10-minute action ceiling.
@@ -14,14 +15,20 @@ export const MAX_RUNNER_MS = 8 * 60_000;
 export const MAX_CONSECUTIVE_RUNNER_FAILURES = 3;
 export const RUNNER_RETRY_BASE_DELAY_MS = 1_000;
 
-const STALE_LEASE_MESSAGE = "STALE_RUNNER_LEASE";
+const STALE_LEASE_CODE = "STALE_RUNNER_LEASE";
 
-export function staleLeaseError(): Error {
-  return new Error(STALE_LEASE_MESSAGE);
+// Typed application error, not a message substring: ConvexError data survives
+// the mutation→action boundary intact, so classification can't be fooled by
+// an unrelated error that happens to quote the token, or broken by rewrapping.
+export function staleLeaseError(): ConvexError<{ code: string }> {
+  return new ConvexError({ code: STALE_LEASE_CODE });
 }
 
 export function isStaleLeaseError(error: unknown): boolean {
-  return String(error).includes(STALE_LEASE_MESSAGE);
+  return (
+    error instanceof ConvexError &&
+    (error.data as { code?: unknown } | undefined)?.code === STALE_LEASE_CODE
+  );
 }
 
 export const inboxItemSettleValidator = v.object({
@@ -30,13 +37,18 @@ export const inboxItemSettleValidator = v.object({
   error: v.optional(v.string()),
 });
 
-export type InboxItemSettle = {
-  itemId: Id<"agentInbox">;
-  result?: unknown;
-  error?: string;
-};
+export type InboxItemSettle = Infer<typeof inboxItemSettleValidator>;
 
-export async function getRunnerLease(ctx: MutationCtx, sessionId: Id<"sessions">) {
+export const pendingInboxItemValidator = v.object({
+  itemId: v.id("agentInbox"),
+  kind: v.union(v.literal("message"), v.literal("command")),
+  payload: v.any(),
+  actor: messageActorValidator,
+});
+
+export type PendingInboxItem = Infer<typeof pendingInboxItemValidator>;
+
+export async function getRunnerLease(ctx: QueryCtx, sessionId: Id<"sessions">) {
   return await ctx.db
     .query("runnerLease")
     .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -55,8 +67,8 @@ export async function assertRunnerLease(
 ): Promise<Doc<"runnerLease">> {
   const lease = await getRunnerLease(ctx, sessionId);
   // Expiry permits another runner to claim, but does not itself revoke the
-  // holder. An explicit inactive state or a newer generation is the fence.
-  if (!lease || lease.active === false || lease.generation !== generation) {
+  // holder. The inactive state or a newer generation is the fence.
+  if (!lease || !lease.active || lease.generation !== generation) {
     throw staleLeaseError();
   }
   return lease;

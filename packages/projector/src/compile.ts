@@ -96,7 +96,9 @@ import type {
   GeneratorRuntime,
 } from "./types.ts";
 
-export function emptyProjectionIR<TDataContent = never>(): ProjectionIR<TDataContent> {
+export function emptyProjectionIR<
+  TDataContent = never,
+>(): ProjectionIR<TDataContent> {
   return { preamble: [], recency: [], tools: [], states: [] };
 }
 
@@ -109,9 +111,7 @@ export function addProjectionStatePart(
   }
 }
 
-export type CompileProjectionOptions<
-  TDataContent = never,
-> = {
+export type CompileProjectionOptions<TDataContent = never> = {
   targetGeneratorId?: GeneratorId;
   history?: FrameMessage<TDataContent>[];
   frameHistory?: Frame<TDataContent>[];
@@ -145,7 +145,8 @@ function createCompileSession<TDataContent>(
   options: CompileProjectionOptions<TDataContent>,
 ): CompileSession {
   return {
-    layout: options.layout ?? options.charter?.defaultLayout ?? implicitDefaultLayout,
+    layout:
+      options.layout ?? options.charter?.defaultLayout ?? implicitDefaultLayout,
     memo: new Map(),
     computedReturns: new Map(),
     computedMembers: new Map(),
@@ -188,7 +189,10 @@ function effectiveMembers<TDataContent>(
   };
 }
 
-function reportDiagnostic(session: CompileSession, diagnostic: CompileDiagnostic): void {
+function reportDiagnostic(
+  session: CompileSession,
+  diagnostic: CompileDiagnostic,
+): void {
   session.diagnostics.push(diagnostic);
   session.onDiagnostic?.(diagnostic);
 }
@@ -244,7 +248,11 @@ export type CompiledContributorView = {
   states: Array<{
     key: string;
     address: StateAddress;
-    projection?: { slot?: string; region?: LayoutRegionName; exposure: Exposure };
+    projection?: {
+      slot?: string;
+      region?: LayoutRegionName;
+      exposure: Exposure;
+    };
     value: unknown;
   }>;
   tools: ActionMeta[];
@@ -265,23 +273,32 @@ type OutputMeta = {
 };
 
 export function compileProjection<TDataContent = never>(
-  rootOrInstances:
-    | Instance<TDataContent>
-    | Instance<TDataContent>[],
+  rootOrInstances: Instance<TDataContent> | Instance<TDataContent>[],
   options: CompileProjectionOptions<TDataContent> = {},
 ): CompiledInference<TDataContent> {
   assertActivationCompileOptions(options);
-  const root = Array.isArray(rootOrInstances) ? createRootInstance(rootOrInstances) : rootOrInstances;
+  const root = Array.isArray(rootOrInstances)
+    ? createRootInstance(rootOrInstances)
+    : rootOrInstances;
   const states = resolveStates(root);
   const stateByContributor = groupStatesByContributor(states);
   const session = createCompileSession(options);
   const draft = emptyProjectionIR<TDataContent>();
   const targetContributor = options.targetGeneratorId
-    ? findContributorById(root, options.targetGeneratorId, effectiveMembers(options, session))
+    ? findContributorById(
+        root,
+        options.targetGeneratorId,
+        effectiveMembers(options, session),
+      )
     : undefined;
   if (targetContributor && isGeneratorBoundary(targetContributor)) {
     return finalizeSections(
-      compileGeneratorProjection(targetContributor, options, stateByContributor, session),
+      compileGeneratorProjection(
+        targetContributor,
+        options,
+        stateByContributor,
+        session,
+      ),
       compileHistory(root, options, states, session),
       session,
     );
@@ -290,22 +307,42 @@ export function compileProjection<TDataContent = never>(
   const rootContributor = directRootContributor(root);
   if (isGeneratorBoundary(rootContributor)) {
     return finalizeSections(
-      compileGeneratorProjection(rootContributor, options, stateByContributor, session),
+      compileGeneratorProjection(
+        rootContributor,
+        options,
+        stateByContributor,
+        session,
+      ),
       compileHistory(root, options, states, session),
       session,
     );
   }
-  visitContributor(draft, rootContributor, options, stateByContributor, session, newDocumentVisit());
+  visitContributor(
+    draft,
+    rootContributor,
+    options,
+    stateByContributor,
+    session,
+    newDocumentVisit(),
+  );
 
-  return finalizeSections(draft, compileHistory(root, options, states, session), session);
+  return finalizeSections(
+    draft,
+    compileHistory(root, options, states, session),
+    session,
+  );
 }
 
-function assertActivationCompileOptions(options: CompileProjectionOptions<any>): void {
+function assertActivationCompileOptions(
+  options: CompileProjectionOptions<any>,
+): void {
   if (options.activationId === undefined) {
     return;
   }
   if (!options.targetGeneratorId) {
-    throw new Error("compileProjection activationId requires targetGeneratorId");
+    throw new Error(
+      "compileProjection activationId requires targetGeneratorId",
+    );
   }
   if (!options.frameHistory) {
     throw new Error("compileProjection activationId requires frameHistory");
@@ -314,9 +351,14 @@ function assertActivationCompileOptions(options: CompileProjectionOptions<any>):
 
 export function inspectCompiledProjectionTree<TDataContent = never>(
   rootOrInstances: Instance<TDataContent> | Instance<TDataContent>[],
-  options: Omit<CompileProjectionOptions<TDataContent>, "targetGeneratorId"> = {},
+  options: Omit<
+    CompileProjectionOptions<TDataContent>,
+    "targetGeneratorId"
+  > = {},
 ): CompiledProjectionTree<TDataContent> {
-  const root = Array.isArray(rootOrInstances) ? createRootInstance(rootOrInstances) : rootOrInstances;
+  const root = Array.isArray(rootOrInstances)
+    ? createRootInstance(rootOrInstances)
+    : rootOrInstances;
   const states = resolveStates(root);
   const stateByContributor = groupStatesByContributor(states);
   const rootContributor = directRootContributor(root);
@@ -325,8 +367,24 @@ export function inspectCompiledProjectionTree<TDataContent = never>(
   return {
     layout: compiledLayoutView(session.layout),
     roots: isGeneratorBoundary(rootContributor)
-      ? [createCompiledContributor(root, rootContributor, undefined, options, stateByContributor, session)]
-      : collectCompiledContributorChildren(root, rootContributor, undefined, options, stateByContributor, session),
+      ? [
+          createCompiledContributor(
+            root,
+            rootContributor,
+            undefined,
+            options,
+            stateByContributor,
+            session,
+          ),
+        ]
+      : collectCompiledContributorChildren(
+          root,
+          rootContributor,
+          undefined,
+          options,
+          stateByContributor,
+          session,
+        ),
   };
 }
 
@@ -342,8 +400,7 @@ export type DryProjectionStatePart = {
 };
 
 export type DryProjectionPart<TDataContent = never> =
-  | ContentPart<TDataContent>
-  | DryProjectionStatePart;
+  ContentPart<TDataContent> | DryProjectionStatePart;
 
 export type ProjectionIRToolView = {
   name: string;
@@ -370,24 +427,47 @@ export function inspectProjectionIR<TDataContent = never>(
   rootOrInstances: Instance<TDataContent> | Instance<TDataContent>[],
   options: CompileProjectionOptions<TDataContent> = {},
 ): ProjectionIRView<TDataContent> {
-  const root = Array.isArray(rootOrInstances) ? createRootInstance(rootOrInstances) : rootOrInstances;
+  const root = Array.isArray(rootOrInstances)
+    ? createRootInstance(rootOrInstances)
+    : rootOrInstances;
   const states = resolveStates(root);
   const stateByContributor = groupStatesByContributor(states);
   const session = createCompileSession(options);
   const targetContributor = options.targetGeneratorId
-    ? findContributorById(root, options.targetGeneratorId, effectiveMembers(options, session))
+    ? findContributorById(
+        root,
+        options.targetGeneratorId,
+        effectiveMembers(options, session),
+      )
     : undefined;
 
   let draft: ProjectionIR<TDataContent>;
   if (targetContributor && isGeneratorBoundary(targetContributor)) {
-    draft = compileGeneratorProjection(targetContributor, options, stateByContributor, session);
+    draft = compileGeneratorProjection(
+      targetContributor,
+      options,
+      stateByContributor,
+      session,
+    );
   } else {
     const rootContributor = directRootContributor(root);
     if (isGeneratorBoundary(rootContributor)) {
-      draft = compileGeneratorProjection(rootContributor, options, stateByContributor, session);
+      draft = compileGeneratorProjection(
+        rootContributor,
+        options,
+        stateByContributor,
+        session,
+      );
     } else {
       draft = emptyProjectionIR<TDataContent>();
-      visitContributor(draft, rootContributor, options, stateByContributor, session, newDocumentVisit());
+      visitContributor(
+        draft,
+        rootContributor,
+        options,
+        stateByContributor,
+        session,
+        newDocumentVisit(),
+      );
     }
   }
 
@@ -397,7 +477,9 @@ export function inspectProjectionIR<TDataContent = never>(
     recency: draft.recency.map(dryProjectionPart),
     tools: draft.tools.map((tool) => ({
       name: tool.name,
-      ...(tool.description !== undefined ? { description: tool.description } : {}),
+      ...(tool.description !== undefined
+        ? { description: tool.description }
+        : {}),
       exposure: actionExposure(tool),
       depth: toolDepth(tool),
     })),
@@ -440,12 +522,21 @@ function visitContributor<TDataContent>(
   session: CompileSession,
   visit: DocumentVisit,
 ): void {
-  if (isGeneratorBoundary(contributor) && !belongsToGenerator(contributor, options.targetGeneratorId)) {
+  if (
+    isGeneratorBoundary(contributor) &&
+    !belongsToGenerator(contributor, options.targetGeneratorId)
+  ) {
     const runtime = contributor.node.runtime as GeneratorRuntime;
     // A child generator's boundary is an enum: hidden exports nothing;
     // augment forwards every compiled part to the parent document as-is.
     if (runtime.boundaryProjection === "augment") {
-      const exported = compileGeneratorProjection(contributor, options, stateByContributor, session, visit);
+      const exported = compileGeneratorProjection(
+        contributor,
+        options,
+        stateByContributor,
+        session,
+        visit,
+      );
       forwardProjectionIR(draft, exported);
     }
     return;
@@ -469,8 +560,18 @@ function visitContributor<TDataContent>(
   }
   visit.visited.add(contributor.id);
 
-  renderContributor(draft, contributor, options, stateByContributor, session, visit);
-  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
+  renderContributor(
+    draft,
+    contributor,
+    options,
+    stateByContributor,
+    session,
+    visit,
+  );
+  for (const child of directContributorChildren(
+    contributor,
+    effectiveMembers(options, session),
+  )) {
     visitContributor(draft, child, options, stateByContributor, session, visit);
   }
 }
@@ -537,17 +638,30 @@ function renderContributor<TDataContent>(
       // The include splices the target's canonical rendering at this position
       // in the parts list (arrival order within the draft settles within-slot
       // interleaving; the includer's layout arranges the slots).
-      renderIncludePart(draft, contributor, includeNodeKey(part), depth, options, stateByContributor, session, visit);
+      renderIncludePart(
+        draft,
+        contributor,
+        includeNodeKey(part),
+        depth,
+        options,
+        stateByContributor,
+        session,
+        visit,
+      );
       continue;
     }
 
     if (part.kind === "computed") {
       const definition = resolveComputedPartRef(part.part, options.charter);
       const placement = slotPlacement(definition.slot);
-      const returned = evaluateComputedPartReturn(definition, computedPartEnv(contributor, options.charter, session.memo), {
-        key: `${definition.name} ${contributor.id}`,
-        store: session.computedReturns,
-      });
+      const returned = evaluateComputedPartReturn(
+        definition,
+        computedPartEnv(contributor, options.charter, session.memo),
+        {
+          key: `${definition.name} ${contributor.id}`,
+          store: session.computedReturns,
+        },
+      );
       for (const item of returned) {
         if (isComputedActionReturn(item)) {
           // Computed-returned actions route through the exact same binding
@@ -555,7 +669,12 @@ function renderContributor<TDataContent>(
           // the computed's local registry as the first resolution tier — one
           // closure returning both text and tool parts lands both atomically.
           renderActionPart(draft, session, contributor, item, depth, (entry) =>
-            resolveComputedActionEntry(entry, definition, contributor.node, options.charter),
+            resolveComputedActionEntry(
+              entry,
+              definition,
+              contributor.node,
+              options.charter,
+            ),
           );
           continue;
         }
@@ -568,7 +687,16 @@ function renderContributor<TDataContent>(
           const nodeKey = definition.metadata
             ? includeNodeKey(item)
             : resolveComputedIncludeKey(item, definition);
-          renderIncludePart(draft, contributor, nodeKey, depth, options, stateByContributor, session, visit);
+          renderIncludePart(
+            draft,
+            contributor,
+            nodeKey,
+            depth,
+            options,
+            stateByContributor,
+            session,
+            visit,
+          );
           continue;
         }
         // The computed's declared slot (absent on sugar-lowered selects) is
@@ -576,7 +704,8 @@ function renderContributor<TDataContent>(
         // address keeps it, and a placement-less return on a slot-less def
         // lands in the node's default placement.
         const contentPart = computedContentPart<TDataContent>(item);
-        const hasOwnPlacement = contentPart.slot !== undefined || contentPart.region !== undefined;
+        const hasOwnPlacement =
+          contentPart.slot !== undefined || contentPart.region !== undefined;
         pushContentPart(draft, session, {
           ...(hasOwnPlacement ? {} : placement),
           ...contentPart,
@@ -626,7 +755,11 @@ function renderIncludePart<TDataContent>(
   visit: DocumentVisit,
 ): void {
   lintIncludeCycles(session, options.charter, nodeKey);
-  const resolution = resolveIncludeTarget(site, nodeKey, effectiveMembers(options, session));
+  const resolution = resolveIncludeTarget(
+    site,
+    nodeKey,
+    effectiveMembers(options, session),
+  );
   if (resolution.kind === "unresolved") {
     reportDiagnostic(session, {
       severity: "error",
@@ -682,7 +815,14 @@ function renderIncludePart<TDataContent>(
     return;
   }
 
-  visitContributor(draft, target, options, stateByContributor, session, grafted);
+  visitContributor(
+    draft,
+    target,
+    options,
+    stateByContributor,
+    session,
+    grafted,
+  );
 }
 
 /**
@@ -773,7 +913,10 @@ function staticIncludeTargetKeys<TDataContent>(
 
 /** Lifts a computed-returned content contribution into draft-IR form. */
 function computedContentPart<TDataContent>(
-  item: Exclude<ComputedReturnPart<TDataContent>, ActionPart | IncludePart<TDataContent>>,
+  item: Exclude<
+    ComputedReturnPart<TDataContent>,
+    ActionPart | IncludePart<TDataContent>
+  >,
 ): ContentPart<TDataContent> {
   if ("kind" in item) {
     // Authoring text part: kind-tagged, slot addressed via SlotAddress.
@@ -820,20 +963,26 @@ function renderActionPart<TDataContent>(
   assertNodeActionParamsCompatibility(action, contributor.node, "tool");
   if (part.exposure === "deferred" && part.guidance === undefined) {
     // Auto availability note; explicit guidance (even []) replaces it.
-    const summary = action.description?.split("\n", 1)[0];
-    pushContentPart(draft, session, Object.assign(
-      {
-        type: "text" as const,
-        text: `The tool \`${action.name}\`${summary ? ` (${summary})` : ""} is available on demand via tool search.`,
-        partDepth: depth,
-      },
-      { [DEFERRED_NOTE]: action.name },
-    ));
+    pushContentPart(
+      draft,
+      session,
+      Object.assign(
+        {
+          type: "text" as const,
+          text: `Tool \`${action.name}\` is available via tool search.`,
+          partDepth: depth,
+        },
+        { [DEFERRED_NOTE]: action.name },
+      ),
+    );
   }
   draft.tools.push(
-    Object.assign(bindAction(action, { generatorId: contributor.id }, part.exposure), {
-      [PART_DEPTH]: depth,
-    }),
+    Object.assign(
+      bindAction(action, { generatorId: contributor.id }, part.exposure),
+      {
+        [PART_DEPTH]: depth,
+      },
+    ),
   );
 }
 
@@ -845,7 +994,9 @@ const PART_DEPTH: unique symbol = Symbol.for("projector.partDepth") as never;
  * deepest-wins at finalize; the notes must follow the same rule or a
  * multiply-contributed deferred tool repeats its prose.
  */
-const DEFERRED_NOTE: unique symbol = Symbol.for("projector.deferredNote") as never;
+const DEFERRED_NOTE: unique symbol = Symbol.for(
+  "projector.deferredNote",
+) as never;
 
 function deferredNoteName(part: ProjectionPart<any>): string | undefined {
   const name = (part as { [DEFERRED_NOTE]?: unknown })[DEFERRED_NOTE];
@@ -886,9 +1037,10 @@ function pushContentPart<TDataContent>(
   session: CompileSession,
   part: ProjectionPart<TDataContent>,
 ): void {
-  const region: LayoutRegionName = part.region
-    ?? (part.slot !== undefined
-      ? layoutRegionForSlot(session.layout, part.slot) ?? "preamble"
+  const region: LayoutRegionName =
+    part.region ??
+    (part.slot !== undefined
+      ? (layoutRegionForSlot(session.layout, part.slot) ?? "preamble")
       : "preamble");
   if (region === "recency") {
     draft.recency.push(part);
@@ -906,11 +1058,32 @@ function collectCompiledContributorChildren<TDataContent>(
   session: CompileSession,
 ): CompiledContributor<TDataContent>[] {
   const contributors: CompiledContributor<TDataContent>[] = [];
-  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
+  for (const child of directContributorChildren(
+    contributor,
+    effectiveMembers(options, session),
+  )) {
     if (isGeneratorBoundary(child)) {
-      contributors.push(createCompiledContributor(root, child, parentId, options, stateByContributor, session));
+      contributors.push(
+        createCompiledContributor(
+          root,
+          child,
+          parentId,
+          options,
+          stateByContributor,
+          session,
+        ),
+      );
     } else {
-      contributors.push(...collectCompiledContributorChildren(root, child, parentId, options, stateByContributor, session));
+      contributors.push(
+        ...collectCompiledContributorChildren(
+          root,
+          child,
+          parentId,
+          options,
+          stateByContributor,
+          session,
+        ),
+      );
     }
   }
   return contributors;
@@ -930,8 +1103,18 @@ function createCompiledContributor<TDataContent>(
     targetGeneratorId: contributor.id,
   };
   const compiled = finalizeSections(
-    compileGeneratorProjection(contributor, compileOptions, stateByContributor, session),
-    compileHistory(root, compileOptions, statesFromStateByContributor(stateByContributor), session),
+    compileGeneratorProjection(
+      contributor,
+      compileOptions,
+      stateByContributor,
+      session,
+    ),
+    compileHistory(
+      root,
+      compileOptions,
+      statesFromStateByContributor(stateByContributor),
+      session,
+    ),
     session,
   );
 
@@ -953,12 +1136,19 @@ function createCompiledContributor<TDataContent>(
     compiled: {
       preamble: compiled.preamble,
       recency: compiled.recency,
-      tools: compiled.tools.map((tool) => actionMeta(tool, actionExposure(tool))),
+      tools: compiled.tools.map((tool) =>
+        actionMeta(tool, actionExposure(tool)),
+      ),
       retrievableStates: compiled.retrievableStates,
     },
     contributors: [
       contributorView(contributor, options, stateByContributor),
-      ...collectOwnedContributorDescendants(contributor, options, stateByContributor, session),
+      ...collectOwnedContributorDescendants(
+        contributor,
+        options,
+        stateByContributor,
+        session,
+      ),
     ],
     children: collectCompiledContributorChildren(
       root,
@@ -978,12 +1168,22 @@ function collectOwnedContributorDescendants(
   session: CompileSession,
 ): CompiledContributorView[] {
   const views: CompiledContributorView[] = [];
-  for (const child of directContributorChildren(contributor, effectiveMembers(options, session))) {
+  for (const child of directContributorChildren(
+    contributor,
+    effectiveMembers(options, session),
+  )) {
     if (isGeneratorBoundary(child)) {
       continue;
     }
     views.push(contributorView(child, options, stateByContributor));
-    views.push(...collectOwnedContributorDescendants(child, options, stateByContributor, session));
+    views.push(
+      ...collectOwnedContributorDescendants(
+        child,
+        options,
+        stateByContributor,
+        session,
+      ),
+    );
   }
   return views;
 }
@@ -1024,12 +1224,16 @@ function actionMeta(action: AnyAction, exposure: Exposure): ActionMeta {
   return {
     name: action.name,
     description: action.description,
-    inputSchema: action.inputSchema ? z.toJSONSchema(action.inputSchema) : undefined,
+    inputSchema: action.inputSchema
+      ? z.toJSONSchema(action.inputSchema)
+      : undefined,
     exposure,
   };
 }
 
-function outputMeta(output: Contributor<any>["node"]["output"]): OutputMeta | undefined {
+function outputMeta(
+  output: Contributor<any>["node"]["output"],
+): OutputMeta | undefined {
   if (!output) {
     return undefined;
   }
@@ -1055,7 +1259,9 @@ function addStateProjectionSource(
 }
 
 /** A state renders per its declaration's projection config; absent or explicitly hidden emits nothing. */
-function stateProjectionPart(state: ResolvedState): ProjectionStatePart | undefined {
+function stateProjectionPart(
+  state: ResolvedState,
+): ProjectionStatePart | undefined {
   const projection = state.descriptor.projection;
   if (!projection || projection.exposure === "hidden") {
     return undefined;
@@ -1098,7 +1304,9 @@ function finalizeSections<TDataContent>(
   const tools = finalizeTools(draft.tools, session);
   if (retrievableStates.length > 0) {
     if (tools.some((tool) => tool.name === GET_STATE_ACTION_NAME)) {
-      throw new Error(`Projected tool name "${GET_STATE_ACTION_NAME}" is reserved for state retrieval`);
+      throw new Error(
+        `Projected tool name "${GET_STATE_ACTION_NAME}" is reserved for state retrieval`,
+      );
     }
     tools.push(createGetStateAction());
   }
@@ -1120,7 +1328,9 @@ function finalizeSections<TDataContent>(
     ),
     tools,
     retrievableStates,
-    ...(session.diagnostics.length > 0 ? { diagnostics: [...session.diagnostics] } : {}),
+    ...(session.diagnostics.length > 0
+      ? { diagnostics: [...session.diagnostics] }
+      : {}),
   };
 }
 
@@ -1131,7 +1341,9 @@ function finalizeSections<TDataContent>(
  * winner is native (no note belongs at all) or carries explicit guidance
  * (which replaced its note).
  */
-function deferredNoteFilter(tools: AnyAction[]): (part: ProjectionPart<any>) => boolean {
+function deferredNoteFilter(
+  tools: AnyAction[],
+): (part: ProjectionPart<any>) => boolean {
   const winnerDepth = new Map(
     tools
       .filter((tool) => actionExposure(tool) === "deferred")
@@ -1143,7 +1355,11 @@ function deferredNoteFilter(tools: AnyAction[]): (part: ProjectionPart<any>) => 
     if (name === undefined) {
       return true;
     }
-    if (part.type !== "text" || winnerDepth.get(name) !== (part.partDepth ?? 0) || kept.has(name)) {
+    if (
+      part.type !== "text" ||
+      winnerDepth.get(name) !== (part.partDepth ?? 0) ||
+      kept.has(name)
+    ) {
       return false;
     }
     kept.add(name);
@@ -1157,10 +1373,15 @@ function deferredNoteFilter(tools: AnyAction[]): (part: ProjectionPart<any>) => 
  * child's variant shadows its ancestor's, never by merge-order accident.
  * Shadowing is legal and diagnosed, not an error.
  */
-function finalizeTools(tools: AnyAction[], session: CompileSession): AnyAction[] {
+function finalizeTools(
+  tools: AnyAction[],
+  session: CompileSession,
+): AnyAction[] {
   const sorted = [...tools]
     .map((action, index) => ({ action, index }))
-    .sort((a, b) => (toolDepth(a.action) - toolDepth(b.action)) || (a.index - b.index))
+    .sort(
+      (a, b) => toolDepth(a.action) - toolDepth(b.action) || a.index - b.index,
+    )
     .map((entry) => entry.action);
 
   const byName = new Map<string, AnyAction>();
@@ -1191,7 +1412,7 @@ function compileHistory<TDataContent>(
   if (!ctx) {
     return options.frameHistory
       ? frameMessagesFromFrameHistory(options.frameHistory)
-      : options.history ?? [];
+      : (options.history ?? []);
   }
 
   const projection = resolveHistoryProjection(ctx.projection, options.charter);
@@ -1221,7 +1442,11 @@ function historyProjectionContext<TDataContent>(
     return undefined;
   }
 
-  const contributor = findContributorById(root, targetGeneratorId, effectiveMembers(options, session));
+  const contributor = findContributorById(
+    root,
+    targetGeneratorId,
+    effectiveMembers(options, session),
+  );
   if (!contributor || !isGeneratorBoundary(contributor)) {
     return undefined;
   }
@@ -1232,7 +1457,12 @@ function historyProjectionContext<TDataContent>(
       generatorId: targetGeneratorId,
       activationId: options.activationId ?? "",
       trigger: runtime.trigger,
-      history: visibleHistoryForTarget(root, targetGeneratorId, runtime, options),
+      history: visibleHistoryForTarget(
+        root,
+        targetGeneratorId,
+        runtime,
+        options,
+      ),
       states: stateValues(states),
       params: resolveContributorNodeParams(contributor),
     },
@@ -1248,12 +1478,22 @@ function visibleHistoryForTarget<TDataContent>(
   runtime: GeneratorRuntime,
   options: CompileProjectionOptions<TDataContent>,
 ): Frame<TDataContent>[] {
-  if (options.activationId !== undefined && options.frameHistory === undefined) {
+  if (
+    options.activationId !== undefined &&
+    options.frameHistory === undefined
+  ) {
     throw new Error("compileProjection activationId requires frameHistory");
   }
 
-  const rawHistory = options.frameHistory ?? framesFromMessages(options.history ?? [], targetGeneratorId);
-  const visible = visibleFramesForGenerator(rawHistory, targetGeneratorId, runtime, options.activationId);
+  const rawHistory =
+    options.frameHistory ??
+    framesFromMessages(options.history ?? [], targetGeneratorId);
+  const visible = visibleFramesForGenerator(
+    rawHistory,
+    targetGeneratorId,
+    runtime,
+    options.activationId,
+  );
   return visible.map(stripProvenance);
 }
 
@@ -1261,7 +1501,9 @@ function visibleHistoryForTarget<TDataContent>(
  * Provenance is observational: history-projection code never sees it, so the
  * fold cannot come to depend on it and persistence remains free to drop it.
  */
-function stripProvenance<TDataContent>(frame: Frame<TDataContent>): Frame<TDataContent> {
+function stripProvenance<TDataContent>(
+  frame: Frame<TDataContent>,
+): Frame<TDataContent> {
   if (!frame.provenance) {
     return frame;
   }
@@ -1272,17 +1514,25 @@ function stripProvenance<TDataContent>(frame: Frame<TDataContent>): Frame<TDataC
 function resolveHistoryProjection<TDataContent>(
   projection: HistoryProjection<TDataContent>,
   charter: Charter<TDataContent> | undefined,
-): ActorHistoryProjection | MessageHistoryProjection | HistoryProjectionFunction<TDataContent> {
+):
+  | ActorHistoryProjection
+  | MessageHistoryProjection
+  | HistoryProjectionFunction<TDataContent> {
   if (
     isActorHistoryProjection(projection) ||
     isMessageHistoryProjection(projection) ||
     isHistoryProjectionFunction(projection)
   ) {
-    return projection as ActorHistoryProjection | MessageHistoryProjection | HistoryProjectionFunction<TDataContent>;
+    return projection as
+      | ActorHistoryProjection
+      | MessageHistoryProjection
+      | HistoryProjectionFunction<TDataContent>;
   }
 
   if (!charter) {
-    throw new Error(`Cannot resolve history projection ref "${projection}" without charter`);
+    throw new Error(
+      `Cannot resolve history projection ref "${projection}" without charter`,
+    );
   }
   if (typeof projection !== "string") {
     throw new Error(`Cannot resolve unknown history projection`);
@@ -1327,11 +1577,15 @@ function stateValues(states: ResolvedState[]): Record<string, unknown> {
   return values;
 }
 
-function statesFromStateByContributor(stateByContributor: Map<string, ResolvedState[]>): ResolvedState[] {
+function statesFromStateByContributor(
+  stateByContributor: Map<string, ResolvedState[]>,
+): ResolvedState[] {
   return [...stateByContributor.values()].flat();
 }
 
-function collectProjectedStates(draft: ProjectionIR<any>): ProjectionStatePart[] {
+function collectProjectedStates(
+  draft: ProjectionIR<any>,
+): ProjectionStatePart[] {
   const states: ProjectionStatePart[] = [];
   const seen = new Set<ProjectionStatePart>();
   const add = (state: ProjectionStatePart) => {
@@ -1361,7 +1615,9 @@ function collectProjectedStates(draft: ProjectionIR<any>): ProjectionStatePart[]
   return states;
 }
 
-function buildAliases(states: ProjectionStatePart[]): Map<ProjectionStatePart, string> {
+function buildAliases(
+  states: ProjectionStatePart[],
+): Map<ProjectionStatePart, string> {
   return deriveStateAliases(states, (state) => state.target);
 }
 

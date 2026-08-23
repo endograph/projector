@@ -2190,9 +2190,11 @@ a.sessions-owner:hover { color: var(--ink); text-underline-offset: 0.18em; }
 .app-scroll {
   flex: 1;
   overflow-y: auto;
+  /* Turn pages own the available runway; browser anchoring must not compete
+     with explicit author-boundary paging or bottom following. */
+  overflow-anchor: none;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  scroll-behavior: smooth;
 }
 .app-scroll,
 .app-pane-body,
@@ -2239,16 +2241,24 @@ a.sessions-owner:hover { color: var(--ink); text-underline-offset: 0.18em; }
 .app-thread {
   max-width: 44rem;
   margin: 0 auto;
-  /* JS sizes the final spacer from the newest turn's rendered height. */
   padding: 2rem clamp(1rem, 4vw, 2rem) 0;
   display: flex;
   flex-direction: column;
   gap: 1rem;
 }
-.app-thread-spacer {
+.msg-turn {
+  display: flex;
   flex: 0 0 auto;
-  height: 7rem;
-  pointer-events: none;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1rem;
+}
+/* The newest author run is a page, not a message followed by a measured
+   spacer. Short content reserves the rest of the viewport; long content
+   naturally consumes that runway without ever shrinking scrollHeight. */
+.msg-turn[data-latest-turn] {
+  min-height: var(--app-turn-page-height, calc(100dvh - var(--nav-height) - 1.125rem));
+  padding-bottom: var(--app-composer-height, 4.75rem);
 }
 
 /* Offered instead of yanking the viewport when someone else starts a turn
