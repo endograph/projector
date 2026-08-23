@@ -1,9 +1,10 @@
 import { DAY, RateLimiter } from "@convex-dev/rate-limiter";
-import { getAuthUserId } from "@convex-dev/auth/server";
 import { ConvexError } from "convex/values";
 import { components } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { anonymousActor, authenticatedUser } from "./actors";
+import type { MessageActor } from "./messageActor";
 
 const rateLimiter = new RateLimiter(components.rateLimiter, {
   // The cookie is the primary one-free-turn boundary. The IP limit is a
@@ -32,38 +33,63 @@ export async function hashGuestSecret(secret: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+// The one definition of "this caller holds the session's guest secret" —
+// shared by write authorization and viewer attribution so the two can never
+// disagree.
+export async function guestSecretMatches(
+  session: Doc<"sessions">,
+  guestSecret: string | undefined,
+): Promise<boolean> {
+  return (
+    guestSecret !== undefined &&
+    isValidGuestSecret(guestSecret) &&
+    session.guestSecretHash !== undefined &&
+    (await hashGuestSecret(guestSecret)) === session.guestSecretHash
+  );
+}
+
 export async function authorizeSessionWrite(
   ctx: MutationCtx,
   session: Doc<"sessions">,
   guestSecret?: string,
-): Promise<"authenticated" | "guest"> {
-  const userId = await getAuthUserId(ctx);
+): Promise<MessageActor> {
+  const user = await authenticatedUser(ctx);
+
+  // Public demo sessions are collaborative: authentication is sufficient to
+  // write, regardless of who created the session. Preserve ownerUserId only
+  // as creator metadata for a guest who later signs in.
+  if (user) {
+    if (
+      session.ownerUserId === undefined &&
+      (await guestSecretMatches(session, guestSecret))
+    ) {
+      await ctx.db.patch(session._id, {
+        ownerUserId: user.userId,
+        guestSecretHash: undefined,
+      });
+    }
+    return user.actor;
+  }
 
   if (session.ownerUserId !== undefined) {
-    if (userId !== session.ownerUserId) {
-      throw new ConvexError(ACCESS_ERROR.forbidden);
-    }
-    return "authenticated";
+    throw new ConvexError(ACCESS_ERROR.authRequired);
   }
 
-  const guestMatches =
-    guestSecret !== undefined &&
-    isValidGuestSecret(guestSecret) &&
-    session.guestSecretHash !== undefined &&
-    (await hashGuestSecret(guestSecret)) === session.guestSecretHash;
-  if (!guestMatches) {
-    throw new ConvexError(userId ? ACCESS_ERROR.forbidden : ACCESS_ERROR.authRequired);
+  if (!(await guestSecretMatches(session, guestSecret))) {
+    throw new ConvexError(ACCESS_ERROR.authRequired);
   }
 
-  if (userId) {
-    await ctx.db.patch(session._id, {
-      ownerUserId: userId,
-      guestSecretHash: undefined,
-    });
-    return "authenticated";
-  }
+  return anonymousActor(session._id);
+}
 
-  return "guest";
+export async function consumeAnonymousTurn(
+  ctx: MutationCtx,
+  session: Doc<"sessions">,
+): Promise<void> {
+  if (session.ownerUserId !== undefined || session.anonymousTurnUsedAt !== undefined) {
+    throw new ConvexError(ACCESS_ERROR.authRequired);
+  }
+  await ctx.db.patch(session._id, { anonymousTurnUsedAt: Date.now() });
 }
 
 export async function reserveAnonymousTurn(
@@ -87,5 +113,5 @@ export async function reserveAnonymousTurn(
   const ipLimit = await rateLimiter.limit(ctx, "anonymousByIp", { key: ipHash });
   if (!ipLimit.ok) throw new ConvexError(ACCESS_ERROR.ipRateLimited);
 
-  await ctx.db.patch(session._id, { anonymousTurnUsedAt: Date.now() });
+  await consumeAnonymousTurn(ctx, session);
 }

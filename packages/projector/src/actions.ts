@@ -75,8 +75,16 @@ type ActionConfig<
   params?: TParams;
   name: TName;
   description?: string;
-  run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, z.output<TParams>>) => O | Promise<O>;
-};
+} & (
+  | {
+      executorOwned: true;
+      run?: never;
+    }
+  | {
+      executorOwned?: false;
+      run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, z.output<TParams>>) => O | Promise<O>;
+    }
+);
 
 /**
  * The data content a run's return type implies: extracted from the result
@@ -136,6 +144,9 @@ export function createAction<
 ): CreatedAction<TState, TParams, unknown, O, TName, TDataContent>;
 export function createAction(action: AnyAction): AnyAction {
   assertProjectorIdentifier(action.name, "Action name");
+  if (action.executorOwned === true && action.run) {
+    throw new Error(`Executor-owned action "${action.name}" cannot declare run`);
+  }
   if (action.state) {
     assertProjectorIdentifier(action.state.key, "State key");
   }

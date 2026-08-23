@@ -14,9 +14,18 @@ import {
 } from "../computed-parts.ts";
 import { implicitDefaultLayout, layoutRegionForSlot } from "../layouts.ts";
 import { encodeProjectionAddress } from "../projection-address.ts";
-import { callerAllows, resolveContributorActions, type ResolvedNodeAction } from "../scoped-actions.ts";
+import {
+  callerAllows,
+  resolveContributorActions,
+  type ResolvedNodeAction,
+} from "../scoped-actions.ts";
 import { slotPlacement } from "../slots.ts";
-import { groupStatesByContributor, resolveStates, type ResolvedState } from "../state.ts";
+import {
+  applyStateUpdate,
+  groupStatesByContributor,
+  resolveStates,
+  type ResolvedState,
+} from "../state.ts";
 import type {
   Action,
   ActionRequestMessage,
@@ -28,6 +37,7 @@ import type {
   NormalizedRuntime,
   ProjectionAddress,
   StateAddress,
+  StateUpdate,
   TextPart,
   Exposure,
 } from "../types.ts";
@@ -35,7 +45,12 @@ import type {
 export type JSONSchema = unknown;
 
 export type ClientMachineMessage = ActionRequestMessage & { action: "command" };
-export type { ActionRequestMessage, ExecuteActionResult };
+export type {
+  ActionRequestMessage,
+  ExecuteActionResult,
+  StateAddress,
+  StateUpdate,
+};
 
 export type MachineClientSnapshot<TInstance = unknown> = {
   instance: TInstance;
@@ -94,10 +109,7 @@ export type ClientCommandMeta<
   __result?: TResult;
 };
 
-export type ClientToolMeta<
-  TName extends string = string,
-  TInput = unknown,
-> = {
+export type ClientToolMeta<TName extends string = string, TInput = unknown> = {
   name: TName;
   description?: string;
   inputSchema?: JSONSchema;
@@ -115,6 +127,7 @@ export type ClientInstance<
   id?: string;
   nodeKey: string;
   name?: string;
+  purpose?: string;
   contributor: ClientContributorMeta;
   /** The containers currently attached to the concrete instance. */
   storedStates: ClientStateView[];
@@ -234,17 +247,26 @@ export type OptimisticContext<TInstances = unknown> = {
   patch(patch: Record<string, unknown>): void;
   patchAt(address: StateAddress, patch: Record<string, unknown>): void;
   replaceAt(address: StateAddress, value: unknown): void;
+  /**
+   * Applies a machine StateUpdate ({op, value, path…}) through the same fold
+   * the machine uses server-side — the exact prediction of what the durable
+   * log will do with this update. Structurally invalid updates and candidates
+   * rejected by the projected state schema leave the overlay untouched; the
+   * command is still sent and the server remains the arbiter.
+   */
+  updateAt(address: StateAddress, update: StateUpdate): void;
   getInstances(): TInstances | undefined;
 };
 
-export type OptimisticEffigy<TInstances = unknown> = MachineEffigy<TInstances> & {
-  getCommand<TName extends ClientCommandName<TInstances>>(
-    name: TName,
-    options?: ClientCommandOptions<TInstances, TName>,
-  ): ClientCommandHandle<TName, ClientCommandInput<TInstances, TName>>;
-  getPendingCommands(): PendingOptimisticCommand[];
-  clearPending(): void;
-};
+export type OptimisticEffigy<TInstances = unknown> =
+  MachineEffigy<TInstances> & {
+    getCommand<TName extends ClientCommandName<TInstances>>(
+      name: TName,
+      options?: ClientCommandOptions<TInstances, TName>,
+    ): ClientCommandHandle<TName, ClientCommandInput<TInstances, TName>>;
+    getPendingCommands(): PendingOptimisticCommand[];
+    clearPending(): void;
+  };
 
 export type PendingOptimisticCommand = {
   callId: string;
@@ -259,21 +281,22 @@ type PendingOverlay<TInstances> = {
   apply(instances: TInstances | undefined): TInstances | undefined;
 };
 
-type ExtractClientCommands<TValue, TDepth extends readonly unknown[] = []> =
-  TDepth["length"] extends 5
-    ? never
-    : TValue extends readonly (infer TItem)[]
-      ? ExtractClientCommands<TItem, [...TDepth, unknown]>
-      : TValue extends {
-            commands: readonly (infer TCommand)[];
-            members?: readonly (infer TMember)[];
-            children?: readonly (infer TChild)[];
-          }
-        ?
-            | TCommand
-            | ExtractClientCommands<TMember, [...TDepth, unknown]>
-            | ExtractClientCommands<TChild, [...TDepth, unknown]>
-        : never;
+type ExtractClientCommands<
+  TValue,
+  TDepth extends readonly unknown[] = [],
+> = TDepth["length"] extends 5
+  ? never
+  : TValue extends readonly (infer TItem)[]
+    ? ExtractClientCommands<TItem, [...TDepth, unknown]>
+    : TValue extends {
+          commands: readonly (infer TCommand)[];
+          members?: readonly (infer TMember)[];
+          children?: readonly (infer TChild)[];
+        }
+      ? | TCommand
+        | ExtractClientCommands<TMember, [...TDepth, unknown]>
+        | ExtractClientCommands<TChild, [...TDepth, unknown]>
+      : never;
 
 export function createMachineEffigy<TInstances>(
   send: SendMachineMessage,
@@ -309,7 +332,9 @@ export function createMachineEffigy<TInstances>(
   };
 }
 
-export function createCommandActionRequest<TCommand extends AnyCommandDefinition>(
+export function createCommandActionRequest<
+  TCommand extends AnyCommandDefinition,
+>(
   name: ClientCommandDefinitionName<TCommand>,
   input: ClientCommandDefinitionInput<TCommand>,
   options: {
@@ -392,7 +417,11 @@ export function createOptimisticEffigy<TInstances>(
       notify();
     },
     getCommand: (name, options = {}) => {
-      const command = findClientCommand(effigy.getInstances(), name, options.target);
+      const command = findClientCommand(
+        effigy.getInstances(),
+        name,
+        options.target,
+      );
       return {
         name,
         inputSchema: command?.inputSchema,
@@ -418,7 +447,9 @@ export function createOptimisticEffigy<TInstances>(
           try {
             return await effigy.send(message);
           } catch (error) {
-            pending = pending.filter((overlay) => overlay.callId !== message.callId);
+            pending = pending.filter(
+              (overlay) => overlay.callId !== message.callId,
+            );
             notify();
             throw error;
           }
@@ -445,7 +476,10 @@ export function recordCommandResidue(
   if (!callId) {
     return createMachineSyncState(state.recentCommandResidue, options);
   }
-  return createMachineSyncState([...state.recentCommandResidue, callId], options);
+  return createMachineSyncState(
+    [...state.recentCommandResidue, callId],
+    options,
+  );
 }
 
 export function consumeCommandResidue(
@@ -454,7 +488,9 @@ export function consumeCommandResidue(
 ): MachineSyncState {
   const consumed = new Set(callIds);
   return {
-    recentCommandResidue: state.recentCommandResidue.filter((id) => !consumed.has(id)),
+    recentCommandResidue: state.recentCommandResidue.filter(
+      (id) => !consumed.has(id),
+    ),
   };
 }
 
@@ -474,14 +510,19 @@ export function realizeClientInstances(
 ): ClientInstance {
   const root: Instance = Array.isArray(instances)
     ? createRootInstance([...instances])
-    : instances as Instance;
+    : (instances as Instance);
   const states = resolveStates(root);
   const statesByContributor = groupStatesByContributor(states);
   const rootContributor = collectContributors(root)[0];
   if (!rootContributor) {
     throw new Error("Unable to realize empty client instance");
   }
-  return realizeContributor(rootContributor, states, statesByContributor, options.charter);
+  return realizeContributor(
+    rootContributor,
+    states,
+    statesByContributor,
+    options.charter,
+  );
 }
 
 export function findClientCommand<TName extends string>(
@@ -495,7 +536,8 @@ export function findClientCommand<TName extends string>(
     for (const command of instance.commands) {
       if (
         command.name === name &&
-        (!target || (command.target && sameProjectionAddress(command.target, target)))
+        (!target ||
+          (command.target && sameProjectionAddress(command.target, target)))
       ) {
         match = command as ClientCommandMeta<TName>;
       }
@@ -516,7 +558,10 @@ function realizeContributor(
   // The client tree shows effective members (selects and member computeds
   // evaluated, fresh): params and state are definitionally part of the client
   // representation — there is no potential-members view here.
-  for (const child of directContributorChildren(contributor, { mode: "effective", charter })) {
+  for (const child of directContributorChildren(contributor, {
+    mode: "effective",
+    charter,
+  })) {
     if (child.isMember) {
       memberNodes.push(child);
     } else {
@@ -530,27 +575,30 @@ function realizeContributor(
     id: contributor.isMember ? undefined : contributor.concreteInstance.id,
     nodeKey: contributor.node.key,
     name: contributor.node.name,
+    purpose: contributor.node.purpose,
     contributor: {
       id: contributor.id,
       address: contributor.address,
       runtimeType: contributor.node.runtime.type,
     },
     storedStates: realizeStoredStates(contributor, resolvedStates),
-    states: (statesByContributor.get(contributor.id) ?? []).map((state) => realizeState(state)),
+    states: (statesByContributor.get(contributor.id) ?? []).map((state) =>
+      realizeState(state),
+    ),
     boundStates: contributor.node.states.map(realizeStateDescriptor),
     preamble: content.preamble,
     recency: content.recency,
     tools: clientActions(contributor, charter, "generator").map((entry) =>
-      realizeTool(entry, contributor.address)
+      realizeTool(entry, contributor.address),
     ),
     commands: clientActions(contributor, charter, "external").map((entry) =>
-      realizeCommand(entry.action, contributor.address)
+      realizeCommand(entry.action, contributor.address),
     ),
     members: memberNodes.map((member) =>
-      realizeContributor(member, resolvedStates, statesByContributor, charter)
+      realizeContributor(member, resolvedStates, statesByContributor, charter),
     ),
     children: childNodes.map((child) =>
-      realizeContributor(child, resolvedStates, statesByContributor, charter)
+      realizeContributor(child, resolvedStates, statesByContributor, charter),
     ),
   };
 }
@@ -560,25 +608,36 @@ function clientActions(
   charter: Charter | undefined,
   requirement: "generator" | "external",
 ): ResolvedNodeAction[] {
-  return resolveContributorActions(contributor, charter)
-    .filter((entry) => callerAllows(entry.caller, requirement));
+  return resolveContributorActions(contributor, charter).filter((entry) =>
+    callerAllows(entry.caller, requirement),
+  );
 }
 
-function realizeTool(entry: ResolvedNodeAction, target: ProjectionAddress): ClientToolMeta {
+function realizeTool(
+  entry: ResolvedNodeAction,
+  target: ProjectionAddress,
+): ClientToolMeta {
   return {
     name: entry.action.name,
     description: entry.action.description,
-    inputSchema: entry.action.inputSchema ? z.toJSONSchema(entry.action.inputSchema) : undefined,
+    inputSchema: entry.action.inputSchema
+      ? z.toJSONSchema(entry.action.inputSchema)
+      : undefined,
     exposure: entry.exposure,
     target,
   };
 }
 
-function realizeCommand(command: Action, target: ProjectionAddress): ClientCommandMeta {
+function realizeCommand(
+  command: Action,
+  target: ProjectionAddress,
+): ClientCommandMeta {
   return {
     name: command.name,
     description: command.description,
-    inputSchema: command.inputSchema ? z.toJSONSchema(command.inputSchema) : undefined,
+    inputSchema: command.inputSchema
+      ? z.toJSONSchema(command.inputSchema)
+      : undefined,
     target,
   };
 }
@@ -588,14 +647,20 @@ function realizeBoundContent(
   charter: Charter | undefined,
 ): { preamble: ContentPart<unknown>[]; recency: ContentPart<unknown>[] } {
   const layout = charter?.defaultLayout ?? implicitDefaultLayout;
-  const content: { preamble: ContentPart<unknown>[]; recency: ContentPart<unknown>[] } = {
+  const content: {
+    preamble: ContentPart<unknown>[];
+    recency: ContentPart<unknown>[];
+  } = {
     preamble: [],
     recency: [],
   };
 
   const add = (part: ContentPart<unknown>) => {
-    const region: LayoutRegionName = part.region
-      ?? (part.slot ? layoutRegionForSlot(layout, part.slot) ?? "preamble" : "preamble");
+    const region: LayoutRegionName =
+      part.region ??
+      (part.slot
+        ? (layoutRegionForSlot(layout, part.slot) ?? "preamble")
+        : "preamble");
     content[region].push(part);
   };
 
@@ -620,7 +685,10 @@ function realizeBoundContent(
 
     const definition = resolveComputedPartRef(part.part, charter);
     const defaultPlacement = slotPlacement(definition.slot);
-    const returned = evaluateComputedPartReturn(definition, computedPartEnv(contributor, charter));
+    const returned = evaluateComputedPartReturn(
+      definition,
+      computedPartEnv(contributor, charter),
+    );
     for (const item of returned) {
       if (isComputedActionReturn(item)) {
         addGuidance(item.guidance);
@@ -630,10 +698,15 @@ function realizeBoundContent(
         continue;
       }
       if ("kind" in item) {
-        add({ type: "text", text: item.text, ...slotPlacement(item.slot ?? definition.slot) });
+        add({
+          type: "text",
+          text: item.text,
+          ...slotPlacement(item.slot ?? definition.slot),
+        });
         continue;
       }
-      const hasOwnPlacement = item.slot !== undefined || item.region !== undefined;
+      const hasOwnPlacement =
+        item.slot !== undefined || item.region !== undefined;
       add({ ...(hasOwnPlacement ? {} : defaultPlacement), ...item });
     }
   }
@@ -648,20 +721,25 @@ function realizeStoredStates(
   if (contributor.isMember) {
     return [];
   }
-  return Object.entries(contributor.concreteInstance.states ?? {}).map(([key, container]) => {
-    const state = resolvedStates.find(
-      (candidate) =>
-        candidate.address.instanceId === contributor.concreteInstance.id &&
-        candidate.address.stateKey === key,
-    );
-    return state
-      ? realizeState(state)
-      : {
-          key,
-          address: { instanceId: contributor.concreteInstance.id, stateKey: key },
-          value: container.value,
-        };
-  });
+  return Object.entries(contributor.concreteInstance.states ?? {}).map(
+    ([key, container]) => {
+      const state = resolvedStates.find(
+        (candidate) =>
+          candidate.address.instanceId === contributor.concreteInstance.id &&
+          candidate.address.stateKey === key,
+      );
+      return state
+        ? realizeState(state)
+        : {
+            key,
+            address: {
+              instanceId: contributor.concreteInstance.id,
+              stateKey: key,
+            },
+            value: container.value,
+          };
+    },
+  );
 }
 
 function realizeStateDescriptor(
@@ -732,24 +810,51 @@ function createOptimisticContext<TInstances>(
       if (!state) {
         return;
       }
-      state.value = patchObject(state.value, patch);
+      commitValidState(state, patchObject(state.value, patch));
     },
     patchAt: (address, patch) => {
       const state = findStateView(instances, address);
       if (!state) {
         return;
       }
-      state.value = patchObject(state.value, patch);
+      commitValidState(state, patchObject(state.value, patch));
     },
     replaceAt: (address, value) => {
       const state = findStateView(instances, address);
       if (!state) {
         return;
       }
-      state.value = value;
+      commitValidState(state, value);
+    },
+    updateAt: (address, update) => {
+      const state = findStateView(instances, address);
+      if (!state) {
+        return;
+      }
+      try {
+        commitValidState(state, applyStateUpdate(state.value, update));
+      } catch {
+        // The fold rejected the update; leave the optimistic view on truth.
+      }
     },
     getInstances: () => instances,
   };
+}
+
+function commitValidState(state: ClientStateView, candidate: unknown): void {
+  if (state.schema !== undefined) {
+    try {
+      const schema = z.fromJSONSchema(
+        state.schema as Parameters<typeof z.fromJSONSchema>[0],
+      );
+      if (!schema.safeParse(candidate).success) return;
+    } catch {
+      // A projection may carry JSON Schema features z.fromJSONSchema cannot
+      // reconstruct. In that case the client cannot prove invalidity, so keep
+      // the optimistic behavior and let the durable machine arbitrate.
+    }
+  }
+  state.value = candidate;
 }
 
 function createUntypedCommandActionRequest(
@@ -818,22 +923,27 @@ function findStateView(
 function isClientInstance(value: unknown): value is ClientInstance {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      "commands" in value &&
-      "members" in value &&
-      "children" in value &&
-      "contributor" in value,
+    typeof value === "object" &&
+    "commands" in value &&
+    "members" in value &&
+    "children" in value &&
+    "contributor" in value,
   );
 }
 
 function patchObject(value: unknown, patch: Record<string, unknown>): unknown {
   return {
-    ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
+    ...(value && typeof value === "object" && !Array.isArray(value)
+      ? value
+      : {}),
     ...patch,
   };
 }
 
-function sameProjectionAddress(a: ProjectionAddress, b: ProjectionAddress): boolean {
+function sameProjectionAddress(
+  a: ProjectionAddress,
+  b: ProjectionAddress,
+): boolean {
   return encodeProjectionAddress(a) === encodeProjectionAddress(b);
 }
 
@@ -862,7 +972,9 @@ function cloneValue<T>(value: T): T {
 
 function createCallId(): string {
   const cryptoWithRandomUuid = globalThis.crypto as
-    | (Crypto & { randomUUID?: () => `${string}-${string}-${string}-${string}-${string}` })
+    | (Crypto & {
+        randomUUID?: () => `${string}-${string}-${string}-${string}-${string}`;
+      })
     | undefined;
   if (cryptoWithRandomUuid?.randomUUID) {
     return cryptoWithRandomUuid.randomUUID();

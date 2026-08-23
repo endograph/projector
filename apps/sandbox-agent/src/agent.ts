@@ -285,7 +285,6 @@ export default defineAgent({
       const memoryExecutor = new AiSdkExecutor<SandboxAttachmentData>({
         model: aiSdkOpenAI(DISCRETE_MODEL),
         maxOutputTokens: 1024,
-        maxSteps: 3,
         providerOptions: OPENAI_NO_REASONING_OPTIONS,
       });
       const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>

@@ -1,10 +1,6 @@
-// Boot: the only JS the marketing page pays for beyond its inline scripts.
-// Owns the handoff from static page to conversation: warm the app chunk the
-// moment the visitor shows intent, then morph the hero composer into the
-// conversation composer on submit. The React app is never imported unless
-// intent happens, so the landing stays static-page fast.
-
-import { listStoredSessions, removeStoredSession } from "./sessions-store";
+// Boot owns the handoff from the marketing page to a conversation. The app
+// chunk also mounts the authenticated past-conversations island on the
+// landing page, while the full conversation UI remains unmounted until used.
 
 type AppModule = typeof import("./app/main");
 
@@ -14,6 +10,17 @@ const talk = document.querySelector<HTMLFormElement>("#talk")!;
 const talkCard = talk.querySelector<HTMLElement>(".talk-card")!;
 const talkInput = talk.querySelector<HTMLInputElement>(".talk-input")!;
 const talkClear = talk.querySelector<HTMLButtonElement>(".talk-clear")!;
+const talkMic = talk.querySelector<HTMLButtonElement>(".talk-mic")!;
+const projectActions = document.querySelector<HTMLElement>(".page .start")!;
+const projectActionsHome = projectActions.parentNode!;
+const projectActionsHomeNext = projectActions.nextSibling;
+
+const mountProjectActions = () => {
+  document.querySelector<HTMLElement>("[data-app-nav-actions]")?.append(projectActions);
+};
+const restoreProjectActions = () => {
+  projectActionsHome.insertBefore(projectActions, projectActionsHomeNext);
+};
 
 let appPromise: Promise<AppModule> | null = null;
 
@@ -41,7 +48,12 @@ const withTransition = (mutate: () => void) => {
 
 const enterApp = (
   mod: AppModule,
-  opts: { initialMessage?: string; initialTopic?: string; sessionId?: string },
+  opts: {
+    initialMessage?: string;
+    initialTopic?: string;
+    sessionId?: string;
+    route?: "conversation" | "sessions";
+  },
 ) => {
   root.classList.add("launching");
   return withTransition(() => {
@@ -50,17 +62,23 @@ const enterApp = (
     // Mounts synchronously (flushSync inside) so the view transition's new
     // snapshot already contains the conversation with the composer in place.
     mod.launch(opts);
+    mountProjectActions();
   }).then(() => root.classList.remove("launching"));
 };
 
 const exitApp = async () => {
   const mod = await loadApp();
+  // Keep the expensive decorative layers out of the transition's new-page
+  // snapshot. Once the morph is finished, the landing's own tracker resets
+  // and replays its original beam → wash intro.
+  root.classList.add("light-reset");
   await withTransition(() => {
+    restoreProjectActions();
     delete root.dataset.app;
     page.inert = false;
     mod.unmount();
   });
-  refreshPastLink();
+  root.dispatchEvent(new Event("projector:replay-light"));
 };
 
 // Already home: the brand is a no-op instead of a same-page reload.
@@ -68,107 +86,15 @@ document.querySelector<HTMLAnchorElement>(".nav-brand")?.addEventListener("click
   if (location.pathname === "/") e.preventDefault();
 });
 
-// Past conversations: a device-local pointer list (see sessions-store.ts).
-// The link under the composer appears once anything is stored; the dialog
-// lists sessions newest-first and opens straight into the conversation.
-const pastLink = document.querySelector<HTMLButtonElement>(".talk-past");
-const pastDialog = document.querySelector<HTMLDialogElement>(".past-dialog");
-const refreshPastLink = () => {
-  if (pastLink) pastLink.hidden = listStoredSessions().length === 0;
-};
-refreshPastLink();
-// bfcache restores skip boot: re-check on every pageshow so returning from a
-// conversation (or another tab's work) surfaces the link.
-addEventListener("pageshow", refreshPastLink);
-
-const relativeTime = (at: number): string => {
-  const mins = Math.round((Date.now() - at) / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+const openPastConversation = async (sessionId: string) => {
+  const mod = await loadApp();
+  history.pushState({ app: true }, "", `/s/${sessionId}`);
+  await enterApp(mod, { sessionId });
 };
 
-const renderPastSessions = () => {
-  const list = pastDialog?.querySelector<HTMLElement>(".past-list");
-  if (!list) return;
-  list.replaceChildren(
-    ...listStoredSessions().map((session) => {
-      const row = document.createElement("div");
-      row.className = "past-row";
-
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "past-open";
-      const title = document.createElement("span");
-      title.className = "past-title";
-      title.textContent = session.title || "untitled conversation";
-      const when = document.createElement("span");
-      when.className = "past-when";
-      when.textContent = relativeTime(session.at);
-      open.append(title, when);
-      open.addEventListener("click", async () => {
-        pastDialog?.close();
-        const mod = await loadApp();
-        history.pushState({ app: true }, "", `/s/${session.id}`);
-        await enterApp(mod, { sessionId: session.id });
-      });
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "past-remove";
-      remove.textContent = "×";
-      remove.title = "Remove";
-      remove.setAttribute(
-        "aria-label",
-        `Remove ${session.title || "untitled conversation"} from past conversations`,
-      );
-      remove.addEventListener("click", () => {
-        if (!remove.hasAttribute("data-confirm")) {
-          for (const armed of list.querySelectorAll<HTMLButtonElement>(".past-remove[data-confirm]")) {
-            const armedTitle = armed
-              .closest(".past-row")
-              ?.querySelector<HTMLElement>(".past-title")
-              ?.textContent || "untitled conversation";
-            armed.removeAttribute("data-confirm");
-            armed.textContent = "×";
-            armed.title = "Remove";
-            armed.setAttribute(
-              "aria-label",
-              `Remove ${armedTitle} from past conversations`,
-            );
-          }
-          remove.setAttribute("data-confirm", "");
-          remove.textContent = "confirm";
-          remove.title = "Confirm removal";
-          remove.setAttribute(
-            "aria-label",
-            `Confirm removal of ${session.title || "untitled conversation"} from past conversations`,
-          );
-          return;
-        }
-        removeStoredSession(session.id);
-        renderPastSessions();
-        refreshPastLink();
-        if (listStoredSessions().length === 0) pastDialog?.close();
-      });
-
-      row.append(open, remove);
-      return row;
-    }),
-  );
-};
-
-pastLink?.addEventListener("click", () => {
-  if (!pastDialog) return;
-  renderPastSessions();
-  pastDialog.showModal();
-});
-// A click on the dialog element itself is a click on the backdrop.
-pastDialog?.addEventListener("click", (e) => {
-  if (e.target === pastDialog) pastDialog.close();
-});
+// This island owns the auth-aware history link while the marketing page is
+// visible. launch() unmounts it; unmount() restores it when leaving chat.
+void loadApp().then((mod) => mod.mountPastConversations(openPastConversation));
 
 // Intent warms the chunk: hovering near the composer, focusing it, or even
 // touching the page at all after a beat. By the time enter is pressed the
@@ -211,6 +137,29 @@ const commitPreview = () => {
   talkInput.placeholder = "hi";
 };
 const hotWords = [...document.querySelectorAll<HTMLButtonElement>(".hero h1 .hot")];
+const explainerBand = document.querySelector<HTMLElement>(".talk-explainers")!;
+const categoryCards = [
+  ...explainerBand.querySelectorAll<HTMLButtonElement>(
+    ".explainer:not(.explainer-rest) > button",
+  ),
+];
+const bonusCards = [
+  ...document
+    .querySelector<HTMLTemplateElement>("#default-card-bonuses")!
+    .content.querySelectorAll<HTMLButtonElement>("button"),
+];
+const defaultCards = [...categoryCards, ...bonusCards];
+for (let index = 0; index < defaultCards.length; index += 2) {
+  const panel = document.createElement("div");
+  panel.className = "explainer explainer-rest";
+  panel.dataset.explainer = `rest-${index / 2}`;
+  panel.setAttribute("aria-hidden", "true");
+  panel.append(defaultCards[index].cloneNode(true));
+  // An odd final card wraps to the first so the resting state always shows
+  // a pair while still visiting every default card in order.
+  panel.append(defaultCards[(index + 1) % defaultCards.length].cloneNode(true));
+  explainerBand.append(panel);
+}
 const explainers = [...document.querySelectorAll<HTMLElement>("[data-explainer]")];
 
 // On phones a panel is a single column two cards tall; a panel holding more
@@ -287,7 +236,7 @@ const restAdvance = () => {
   restIndex += 1;
 };
 const restResume = () => {
-  if (resting && restTimer === undefined) restTimer = setInterval(restAdvance, 7000);
+  if (resting && restTimer === undefined) restTimer = setInterval(restAdvance, 4900);
 };
 const restPause = () => {
   clearInterval(restTimer);
@@ -308,10 +257,9 @@ if (resting) {
       if (!resting) return;
       restAdvance();
       restResume();
-    }, 1200);
-    const band = document.querySelector<HTMLElement>(".talk-explainers");
-    band?.addEventListener("pointerenter", restPause);
-    band?.addEventListener("pointerleave", restResume);
+    }, 840);
+    explainerBand.addEventListener("pointerenter", restPause);
+    explainerBand.addEventListener("pointerleave", restResume);
   }
 }
 talkInput.addEventListener("input", () => {
@@ -329,8 +277,8 @@ talkClear.addEventListener("click", () => {
   talkInput.focus({ preventScroll: true });
   talkInput.dispatchEvent(new Event("input", { bubbles: true }));
 });
+talkMic.addEventListener("click", () => window.alert("voice coming soon"));
 for (const hot of hotWords) {
-  const ask = hot.dataset.ask ?? "";
   // Touch has no hover, so the first tap plays the hover role: activate the
   // word, preview its question in the composer, and grow the send badge (CSS
   // on [data-active]). A second tap on the armed word sends. Mouse clicks
@@ -344,7 +292,7 @@ for (const hot of hotWords) {
     loadApp();
     if (e.pointerType !== "mouse") return;
     activateHotWord(hot);
-    previewAsk(ask);
+    previewAsk(hot.dataset.ask ?? "");
   });
   hot.addEventListener("pointerdown", (e) => {
     touchTap = e.pointerType !== "mouse";
@@ -355,12 +303,12 @@ for (const hot of hotWords) {
     activateHotWord(hot);
     if (touchTap && !armedAtTap) {
       touchTap = false;
-      previewAsk(ask);
+      previewAsk(hot.dataset.ask ?? "");
       return;
     }
     touchTap = false;
     commitPreview();
-    talkInput.value = ask;
+    talkInput.value = hot.dataset.ask ?? "";
     talk.requestSubmit();
   });
 }
@@ -371,7 +319,14 @@ for (const prompt of document.querySelectorAll<HTMLButtonElement>("[data-prompt]
     if (e.pointerType !== "mouse") return;
     previewAsk(ask);
   });
-  prompt.addEventListener("click", () => {
+  prompt.addEventListener("click", (e) => {
+    // Citation marks sit inside the button (a link can't); clicking one opens
+    // its reference instead of submitting the card's prompt.
+    const mark = (e.target as HTMLElement).closest<HTMLElement>("[data-link]");
+    if (mark) {
+      window.open(mark.dataset.link, "_blank", "noopener");
+      return;
+    }
     commitPreview();
     talkInput.value = ask;
     pendingTopic = prompt.dataset.demo;
@@ -384,7 +339,8 @@ for (const prompt of document.querySelectorAll<HTMLButtonElement>("[data-prompt]
 addEventListener("keydown", (e) => {
   const target = e.target as HTMLElement | null;
   const editing = target?.matches("input, textarea, select, [contenteditable]");
-  if (root.dataset.app || pastDialog?.open || editing || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
+  const historyOpen = document.querySelector<HTMLDialogElement>(".past-dialog")?.open;
+  if (root.dataset.app || historyOpen || editing || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
   e.preventDefault();
   talkInput.focus({ preventScroll: true });
   if (talkInput.hasAttribute("data-suggested")) {
@@ -399,19 +355,28 @@ addEventListener("keydown", (e) => {
 // Deep link (/s/:id): the head script already hid the marketing page before
 // paint; go straight into the conversation.
 if (root.dataset.app) {
-  const sessionId = location.pathname.split("/")[2];
+  const sessionsRoute = location.pathname === "/sessions";
+  const sessionId = sessionsRoute ? undefined : location.pathname.split("/")[2];
   loadApp().then((mod) => {
     page.inert = true;
-    mod.launch({ sessionId: sessionId === "new" ? undefined : sessionId });
+    mod.launch({
+      route: sessionsRoute ? "sessions" : "conversation",
+      sessionId: sessionId === "new" ? undefined : sessionId,
+    });
+    mountProjectActions();
   });
 }
 
 // Back returns to the marketing page; forward re-enters the conversation.
 addEventListener("popstate", () => {
-  const inApp = /^\/s\//.test(location.pathname);
+  const inApp = /^\/s\//.test(location.pathname) || location.pathname === "/sessions";
   if (inApp && !root.dataset.app) {
-    const sessionId = location.pathname.split("/")[2];
-    loadApp().then((mod) => enterApp(mod, { sessionId: sessionId === "new" ? undefined : sessionId }));
+    const sessionsRoute = location.pathname === "/sessions";
+    const sessionId = sessionsRoute ? undefined : location.pathname.split("/")[2];
+    loadApp().then((mod) => enterApp(mod, {
+      route: sessionsRoute ? "sessions" : "conversation",
+      sessionId: sessionId === "new" ? undefined : sessionId,
+    }));
   } else if (!inApp && root.dataset.app) {
     void exitApp();
   }

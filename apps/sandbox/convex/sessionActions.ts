@@ -67,7 +67,6 @@ export const sendMessage = action({
     const memoryExecutor = new AiSdkExecutor<SandboxAttachmentData>({
       model: aiSdkOpenAI(DISCRETE_MODEL),
       maxOutputTokens: 1024,
-      maxSteps: 3,
     });
     const isMemoryRequest = (request: { inference: { tools: Array<{ name: string }> } }) =>
       request.inference.tools.some((tool) => tool.name === "saveMemories");

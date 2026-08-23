@@ -1,8 +1,5 @@
 import * as z from "zod";
-import {
-  createNode,
-  normalizeStateDescriptor,
-} from "./create.ts";
+import { createNode, normalizeStateDescriptor } from "./create.ts";
 import { isComputedMemberDef } from "./computed-parts.ts";
 import {
   memberSelectComputed,
@@ -61,7 +58,9 @@ export function serializeInstance<TDataContent>(
     ...(instance.isSource ? { isSource: true } : {}),
     ...(instance.params ? { params: structuredClone(instance.params) } : {}),
     states: cloneStates(instance.states),
-    children: instance.children?.map((child) => serializeInstance(child, charter)),
+    children: instance.children?.map((child) =>
+      serializeInstance(child, charter),
+    ),
   };
 }
 
@@ -73,9 +72,13 @@ export function hydrateInstance<TDataContent = never>(
     id: serialized.id,
     node: hydrateNode(serialized.node, charter),
     ...(serialized.isSource ? { isSource: true } : {}),
-    ...(serialized.params ? { params: structuredClone(serialized.params) } : {}),
+    ...(serialized.params
+      ? { params: structuredClone(serialized.params) }
+      : {}),
     states: cloneStates(serialized.states),
-    children: serialized.children?.map((child) => hydrateInstance(child, charter)),
+    children: serialized.children?.map((child) =>
+      hydrateInstance(child, charter),
+    ),
   };
 }
 
@@ -94,12 +97,16 @@ export function serializeNode<TDataContent>(
     key: node.key,
     sourceNodeKey,
     name: node.name,
+    purpose: node.purpose,
     params: serializeParams(node.params),
     parts: serializeParts(node.parts, charter, sourceNode, []),
-    states: node.states.length > 0
-      ? node.states.map((state) => serializeStateDescriptor(state, charter))
-      : undefined,
-    members: node.memberEntries.map((entry) => serializeMemberEntry(entry, charter)),
+    states:
+      node.states.length > 0
+        ? node.states.map((state) => serializeStateDescriptor(state, charter))
+        : undefined,
+    members: node.memberEntries.map((entry) =>
+      serializeMemberEntry(entry, charter),
+    ),
     output: node.output ? serializeOutputConfig(node.output) : undefined,
     runtime: serializeRuntime(node.runtime),
     executorConfig: node.executorConfig,
@@ -114,17 +121,24 @@ export function hydrateNode<TDataContent = never>(
     return hydrateNodeRef(serialized, charter);
   }
 
-  const sourceNode = serialized.sourceNodeKey ? charter.nodes[serialized.sourceNodeKey] : undefined;
+  const sourceNode = serialized.sourceNodeKey
+    ? charter.nodes[serialized.sourceNodeKey]
+    : undefined;
   return createNode({
     key: serialized.key,
     sourceNodeKey: serialized.sourceNodeKey,
     name: serialized.name,
+    purpose: serialized.purpose,
     params: serialized.params ? hydrateParams(serialized.params) : undefined,
     parts: serialized.parts
       ? hydrateParts<TDataContent>(serialized.parts, charter, sourceNode, [])
       : undefined,
-    states: serialized.states?.map((state) => hydrateStateDescriptor(state, charter)),
-    members: serialized.members?.map((entry) => hydrateMemberEntry(entry, charter)),
+    states: serialized.states?.map((state) =>
+      hydrateStateDescriptor(state, charter),
+    ),
+    members: serialized.members?.map((entry) =>
+      hydrateMemberEntry(entry, charter),
+    ),
     output: serialized.output
       ? (hydrateOutputConfig(serialized.output) as OutputConfig<TDataContent>)
       : undefined,
@@ -158,7 +172,9 @@ function serializeParts<TDataContent>(
       // serialize — same recoverability invariant as every behavioral ref).
       if (typeof part.node === "string") {
         if (!charter.nodes[part.node]) {
-          throw new Error(`Cannot serialize include of unknown node ref "${part.node}"`);
+          throw new Error(
+            `Cannot serialize include of unknown node ref "${part.node}"`,
+          );
         }
         return { kind: "include", node: part.node };
       }
@@ -174,7 +190,9 @@ function serializeParts<TDataContent>(
       const definition = part.part;
       if (typeof definition === "string") {
         if (!charter.computedParts[definition]) {
-          throw new Error(`Cannot serialize unknown computed part ref "${definition}"`);
+          throw new Error(
+            `Cannot serialize unknown computed part ref "${definition}"`,
+          );
         }
         return { kind: "computed", ref: definition };
       }
@@ -183,9 +201,14 @@ function serializeParts<TDataContent>(
         // Sugar-produced computeds serialize as their declarative data — the
         // same select wire shape the SelectPart kind used — so old stored
         // payloads and new ones hydrate through the same lowering.
-        const discriminator = resolveDiscriminatorRef(select.discriminator, charter);
+        const discriminator = resolveDiscriminatorRef(
+          select.discriminator,
+          charter,
+        );
         if (charter.discriminators[discriminator.name] !== discriminator) {
-          throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
+          throw new Error(
+            `Cannot serialize unregistered discriminator "${discriminator.name}"`,
+          );
         }
         const branches: Record<string, DryPart[] | null> = {};
         for (const [value, branch] of Object.entries(select.branches)) {
@@ -196,10 +219,17 @@ function serializeParts<TDataContent>(
               ])
             : null;
         }
-        return { kind: "select", discriminator: discriminator.name, partial: select.partial, branches };
+        return {
+          kind: "select",
+          discriminator: discriminator.name,
+          partial: select.partial,
+          branches,
+        };
       }
       if (charter.computedParts[definition.name] !== definition) {
-        throw new Error(`Cannot serialize unregistered computed part "${definition.name}"`);
+        throw new Error(
+          `Cannot serialize unregistered computed part "${definition.name}"`,
+        );
       }
       return { kind: "computed", ref: definition.name };
     }
@@ -235,7 +265,9 @@ function hydrateParts<TDataContent>(
     if (part.kind === "include") {
       const node = charter.nodes[part.node];
       if (!node) {
-        throw new Error(`Unknown node ref "${part.node}" for include hydration`);
+        throw new Error(
+          `Unknown node ref "${part.node}" for include hydration`,
+        );
       }
       return { kind: "include", node };
     }
@@ -243,7 +275,9 @@ function hydrateParts<TDataContent>(
     if (part.kind === "computed") {
       const definition = charter.computedParts[part.ref];
       if (!definition) {
-        throw new Error(`Unknown computed part ref "${part.ref}" for node hydration`);
+        throw new Error(
+          `Unknown computed part ref "${part.ref}" for node hydration`,
+        );
       }
       return { kind: "computed", part: definition };
     }
@@ -271,7 +305,9 @@ function hydrateParts<TDataContent>(
     // the reconstructed computed is identical to a freshly authored select.
     const discriminator = charter.discriminators[part.discriminator];
     if (!discriminator) {
-      throw new Error(`Unknown discriminator ref "${part.discriminator}" for node hydration`);
+      throw new Error(
+        `Unknown discriminator ref "${part.discriminator}" for node hydration`,
+      );
     }
     const branches: Record<string, Part<TDataContent>[] | null> = {};
     for (const [value, branch] of Object.entries(part.branches)) {
@@ -282,7 +318,10 @@ function hydrateParts<TDataContent>(
           ])
         : null;
     }
-    return { kind: "computed", part: partSelectComputed(discriminator, part.partial, branches) };
+    return {
+      kind: "computed",
+      part: partSelectComputed(discriminator, part.partial, branches),
+    };
   });
 }
 
@@ -365,7 +404,11 @@ function findActionInParts<TDataContent>(
   const [step, ...rest] = branchPath;
   for (const part of parts) {
     if (step === undefined) {
-      if (part.kind === "action" && typeof part.action !== "string" && part.action.name === name) {
+      if (
+        part.kind === "action" &&
+        typeof part.action !== "string" &&
+        part.action.name === name
+      ) {
         return part.action;
       }
       continue;
@@ -379,9 +422,10 @@ function findActionInParts<TDataContent>(
     if (!select) {
       continue;
     }
-    const discriminator = typeof select.discriminator === "string"
-      ? select.discriminator
-      : select.discriminator.name;
+    const discriminator =
+      typeof select.discriminator === "string"
+        ? select.discriminator
+        : select.discriminator.name;
     if (discriminator !== step.discriminator) {
       continue;
     }
@@ -413,15 +457,28 @@ function serializeMemberEntry<TDataContent>(
     // Sugar-produced computeds serialize as their declarative data — the same
     // select wire shape the MemberSelect kind used — so hydration reconstructs
     // the identical computed through the same lowering.
-    const discriminator = resolveDiscriminatorRef(select.discriminator, charter);
+    const discriminator = resolveDiscriminatorRef(
+      select.discriminator,
+      charter,
+    );
     if (charter.discriminators[discriminator.name] !== discriminator) {
-      throw new Error(`Cannot serialize unregistered discriminator "${discriminator.name}"`);
+      throw new Error(
+        `Cannot serialize unregistered discriminator "${discriminator.name}"`,
+      );
     }
-    const branches: Record<string, Array<DryNode<TDataContent> | Ref> | null> = {};
+    const branches: Record<string, Array<DryNode<TDataContent> | Ref> | null> =
+      {};
     for (const [value, branch] of Object.entries(select.branches)) {
-      branches[value] = branch ? branch.map((member) => serializeNode(member, charter)) : null;
+      branches[value] = branch
+        ? branch.map((member) => serializeNode(member, charter))
+        : null;
     }
-    return { kind: "select", discriminator: discriminator.name, partial: select.partial, branches };
+    return {
+      kind: "select",
+      discriminator: discriminator.name,
+      partial: select.partial,
+      branches,
+    };
   }
   return serializeNode(entry, charter);
 }
@@ -433,18 +490,24 @@ function hydrateMemberEntry<TDataContent>(
   if (typeof entry !== "string" && "kind" in entry && entry.kind === "select") {
     const discriminator = charter.discriminators[entry.discriminator];
     if (!discriminator) {
-      throw new Error(`Unknown discriminator ref "${entry.discriminator}" for node hydration`);
+      throw new Error(
+        `Unknown discriminator ref "${entry.discriminator}" for node hydration`,
+      );
     }
     const branches: Record<string, Node<TDataContent>[] | null> = {};
     for (const [value, branch] of Object.entries(entry.branches)) {
-      branches[value] = branch ? branch.map((member) => hydrateNode(member, charter)) : null;
+      branches[value] = branch
+        ? branch.map((member) => hydrateNode(member, charter))
+        : null;
     }
     return memberSelectComputed(discriminator, entry.partial, branches);
   }
   return hydrateNode(entry as DryNode<TDataContent> | Ref, charter);
 }
 
-export function serializeOutputConfig(output: AnyOutputConfig): SerializedOutputConfig {
+export function serializeOutputConfig(
+  output: AnyOutputConfig,
+): SerializedOutputConfig {
   if (output.mapTextBlock) {
     throw new Error("Cannot serialize inline output config with mapTextBlock");
   }
@@ -460,14 +523,20 @@ function serializeParams(params: Node["params"]): unknown {
 }
 
 function hydrateParams(params: unknown): Node["params"] {
-  return z.fromJSONSchema(params as Parameters<typeof z.fromJSONSchema>[0]) as Node["params"];
+  return z.fromJSONSchema(
+    params as Parameters<typeof z.fromJSONSchema>[0],
+  ) as Node["params"];
 }
 
-export function hydrateOutputConfig(output: SerializedOutputConfig): AnyOutputConfig {
+export function hydrateOutputConfig(
+  output: SerializedOutputConfig,
+): AnyOutputConfig {
   return {
     audience: output.audience,
     schema: output.schema
-      ? z.fromJSONSchema(output.schema as Parameters<typeof z.fromJSONSchema>[0])
+      ? z.fromJSONSchema(
+          output.schema as Parameters<typeof z.fromJSONSchema>[0],
+        )
       : undefined,
   };
 }
@@ -494,7 +563,9 @@ export function serializeStateDescriptor(
   }
 
   if (typeof state.init === "function") {
-    throw new Error("Cannot serialize inline state descriptor with function init");
+    throw new Error(
+      "Cannot serialize inline state descriptor with function init",
+    );
   }
   if (state.projection?.render || state.projection?.note) {
     throw new Error(
@@ -510,7 +581,9 @@ export function serializeStateDescriptor(
       ? {
           projection: {
             ...slotPlacement(state.projection.slot),
-            ...(state.projection.exposure ? { exposure: state.projection.exposure } : {}),
+            ...(state.projection.exposure
+              ? { exposure: state.projection.exposure }
+              : {}),
           },
         }
       : {}),
@@ -533,14 +606,18 @@ export function hydrateStateDescriptor(
 
   return normalizeStateDescriptor({
     key: serialized.key,
-    schema: z.fromJSONSchema(serialized.schema as Parameters<typeof z.fromJSONSchema>[0]),
+    schema: z.fromJSONSchema(
+      serialized.schema as Parameters<typeof z.fromJSONSchema>[0],
+    ),
     init: serialized.init,
     scope: serialized.scope,
     onInitConflict: serialized.onInitConflict,
     projection: serialized.projection
       ? {
           ...hydrateSlotAddress(serialized.projection),
-          ...(serialized.projection.exposure ? { exposure: serialized.projection.exposure } : {}),
+          ...(serialized.projection.exposure
+            ? { exposure: serialized.projection.exposure }
+            : {}),
         }
       : undefined,
   });
@@ -557,8 +634,13 @@ export function sourceNodeKeyFor<TDataContent>(
   return sourceNode && sourceNode !== node ? node.key : undefined;
 }
 
-function findRegisteredKey<T extends object>(registry: Record<string, T>, value: T): string | undefined {
-  return Object.entries(registry).find(([, candidate]) => candidate === value)?.[0];
+function findRegisteredKey<T extends object>(
+  registry: Record<string, T>,
+  value: T,
+): string | undefined {
+  return Object.entries(registry).find(
+    ([, candidate]) => candidate === value,
+  )?.[0];
 }
 
 function cloneStates(

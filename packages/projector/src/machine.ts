@@ -29,7 +29,7 @@ import { decodeContributorId, encodeProjectionAddress } from "./projection-addre
 import { callerAllows, collectAllNodeActions, resolveContributorActions } from "./scoped-actions.ts";
 import { collectScopeDuplicates } from "./scopes.ts";
 import { hydrateInstance, hydrateNode, serializeInstance, serializeNode } from "./serialization.ts";
-import { realizeResolvedState, resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
+import { applyStateUpdate, realizeResolvedState, resolveStates, type ResolveStatesOptions, type StateReset } from "./state.ts";
 import {
   actorMessageVisibleToGenerator,
   isActorMessage,
@@ -149,7 +149,6 @@ export type SyncMachineRuntimeOptions<TDataContent = never> = {
 type ProjectorMachine<TDataContent = never> =
 Machine<TDataContent> & {
   pendingFrames: Frame<TDataContent>[];
-  nextFrameIndex: number;
   listeners: Set<(frame: Frame<TDataContent>) => void>;
   frameCaptures: FrameCapture<TDataContent>[];
 };
@@ -199,14 +198,13 @@ export function createMachine<TDataContent = never>({
     ...(runner ? { runner } : {}),
     frames: [...frames],
     pendingFrames: [],
-    nextFrameIndex: nextFrameIndex(frames),
     listeners: new Set(),
     frameCaptures: [],
     enqueueFrame(frame) {
       const canonical = canonicalizeFrameDraft(frame, this.charter);
       const enqueued = "id" in canonical && typeof canonical.id === "string"
         ? { ...canonical }
-        : { id: `frame-${this.nextFrameIndex++}`, ...canonical };
+        : { id: mintFrameId(), ...canonical };
       const resets = foldFrameIntoMachine(this, enqueued);
       const capture = this.frameCaptures.at(-1);
       if (capture) {
@@ -423,7 +421,7 @@ function commitFrameCapture<TDataContent>(
 }
 
 function mergeCapturedFrameMessages<TDataContent>(
-  frames: readonly Frame<TDataContent>[],
+  frames: readonly FrameDraft<TDataContent>[],
 ): FrameMessage<TDataContent>[] {
   let offset = 0;
   return frames.flatMap((frame) => {
@@ -622,6 +620,20 @@ export async function runActivation<TDataContent = never>(
     generatorId: activation.generatorId,
     activationId,
   };
+  const stepFrames: Frame<TDataContent>[] = [];
+  let stepExecution: ExecutionReport | undefined;
+  const enqueueStepFrame = (
+    draft: FrameDraft<TDataContent> | Frame<TDataContent>,
+  ): Frame<TDataContent> => {
+    const canonical = canonicalizeFrameDraft({
+      id: `captured-${activationId}-${stepFrames.length}`,
+      ...draft,
+      generatorId: draft.generatorId ?? frameDefaults.generatorId,
+      activationId: draft.activationId ?? frameDefaults.activationId,
+    }, machine.charter) as Frame<TDataContent>;
+    stepFrames.push(canonical);
+    return canonical;
+  };
   const consumedFrameIds = new Set<string>();
   const recordConsumedFrames = (frameHistory: Frame<TDataContent>[]) => {
     const visible = visibleFramesForGenerator(
@@ -656,18 +668,24 @@ export async function runActivation<TDataContent = never>(
   const request: ExecutorRunRequest<TDataContent> = {
     generatorId: activation.generatorId,
     activationId,
+    ...(activation.continuationState !== undefined ? { continuationState: activation.continuationState } : {}),
     config: executorNodeConfig(contributor.node, executor),
     inference,
     output,
     ...(options.signal ? { signal: options.signal } : {}),
     createActionContext: (action) =>
-      createMachineActionContext(machine, action, frameDefaults, getState, resolveStateAlias),
-    enqueueFrame: (draft, report) =>
-      machine.enqueueFrame(signFrame({
-        ...draft,
-        generatorId: draft.generatorId ?? frameDefaults.generatorId,
-        activationId: draft.activationId ?? frameDefaults.activationId,
-      }, producer, report, machine.runner)),
+      createMachineActionContext(
+        machine,
+        action,
+        frameDefaults,
+        getState,
+        resolveStateAlias,
+        enqueueStepFrame,
+      ),
+    enqueueFrame: (draft, report) => {
+      stepExecution = mergeExecutionReports(stepExecution, report);
+      return enqueueStepFrame(draft);
+    },
     refreshInference: () => {
       // The executor supplies its own in-flight step messages, so its frames
       // are excluded from the re-projected history to avoid duplicating them.
@@ -678,7 +696,6 @@ export async function runActivation<TDataContent = never>(
   };
 
   const result = await executor.run(request);
-  enqueueExecutorResult(machine, result, output, frameDefaults, producer);
   const workState = foldWork(machine);
   // An abort that landed mid-run wins over whatever the executor reported:
   // the turn completes cancelled (even if the executor ignored the signal and
@@ -696,7 +713,11 @@ export async function runActivation<TDataContent = never>(
       activationId,
       generatorId: activation.generatorId,
       sourceFrameId: activation.sourceFrameId,
-      reason: turnCancelled ? "cancelled" : completionReasonForRuntime(runtime, result.completionReason),
+      reason: turnCancelled
+        ? "cancelled"
+        : result.completionReason === "continue"
+          ? "continued"
+          : completionReasonForRuntime(runtime, result.completionReason),
     } satisfies WorkCompletionMessage) as FrameMessage<TDataContent>);
   }
   if (!turnCancelled) {
@@ -704,9 +725,18 @@ export async function runActivation<TDataContent = never>(
       ...absorbedCompletionMessages(machine, activation, contributor, generatorRuntime, consumedFrameIds, workState),
     );
   }
-  if (completionMessages.length > 0) {
-    machine.enqueueFrame(signFrame({ messages: completionMessages }, producer, result.execution, machine.runner));
-  }
+  enqueueActivationStep(
+    machine,
+    activation,
+    stepFrames,
+    result,
+    output,
+    frameDefaults,
+    producer,
+    completionMessages,
+    result.completionReason === "continue" && !turnCancelled,
+    mergeExecutionReports(stepExecution, result.execution),
+  );
   return result;
 }
 
@@ -906,7 +936,8 @@ function createMachineActionContext<TDataContent>(
   action: AnyAction,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
   getState?: ActionContext["getState"],
-  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress | undefined,
+  enqueueFrame: Machine<TDataContent>["enqueueFrame"] = (frame) => machine.enqueueFrame(frame),
 ): ActionContext<unknown, TDataContent> {
   const binding = getActionBinding(action);
   const contributor = binding
@@ -921,6 +952,7 @@ function createMachineActionContext<TDataContent>(
     action,
     frameDefaults,
     resolveStateAlias,
+    enqueueFrame,
   );
   if (getState) {
     context.getState = getState;
@@ -933,22 +965,22 @@ function createRetrievableStateGetter<TDataContent>(
   retrievableStates: RetrievableState[],
 ): NonNullable<ActionContext["getState"]> {
   const resolve = createRetrievableStateResolver(retrievableStates);
-  return (address) => readStateValue(machine.instance, resolve(address));
+  return (address) => {
+    const target = resolve(address);
+    if (!target) {
+      throw new Error(`Unknown retrievable state address "${address}"`);
+    }
+    return readStateValue(machine.instance, target);
+  };
 }
 
 function createRetrievableStateResolver(
   retrievableStates: RetrievableState[],
-): (address: InferenceStateAddress) => StateAddress {
+): (address: InferenceStateAddress) => StateAddress | undefined {
   const retrievalTargets = new Map(
     retrievableStates.map((state) => [state.address, state.target] as const),
   );
-  return (address) => {
-    const target = retrievalTargets.get(address);
-    if (!target) {
-      throw new Error(`Unknown retrievable state address "${address}"`);
-    }
-    return target;
-  };
+  return (address) => retrievalTargets.get(address);
 }
 
 function createContributorActionContext<TDataContent>(
@@ -956,10 +988,11 @@ function createContributorActionContext<TDataContent>(
   contributor: Contributor<TDataContent>,
   action: AnyAction,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
-  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress | undefined,
+  enqueueFrame: Machine<TDataContent>["enqueueFrame"] = (frame) => machine.enqueueFrame(frame),
 ): ActionContext<unknown, TDataContent> {
   const stateAddress = stateAddressForContributor(contributor, action);
-  const instance = createActionInstanceContext(machine, contributor, frameDefaults);
+  const instance = createActionInstanceContext(machine, contributor, frameDefaults, enqueueFrame);
   const params = resolveActionParams(
     action,
     resolveContributorNodeParams(contributor),
@@ -973,7 +1006,7 @@ function createContributorActionContext<TDataContent>(
     const update = resolveStateUpdate(current, updateInput);
     const next = applyStateUpdate(current, update);
     validateStateValue(machine.instance, address, next);
-    machine.enqueueFrame({
+    enqueueFrame({
       ...frameDefaults,
       messages: [
         {
@@ -1031,22 +1064,41 @@ function createContributorActionContext<TDataContent>(
  * Resolve a StateWriteTarget to the canonical StateAddress. Descriptors
  * resolve by identity: first against the contributor's own node (honoring the
  * descriptor's scope, like the bound-state path), then by global uniqueness
- * across the resolved instance tree. Alias strings resolve only when a
- * generator run supplied the compiled alias map.
+ * across the resolved instance tree. Strings first use a generator's compiled
+ * alias map when available, then resolve as a state key across the live
+ * machine. A bare state key therefore works in every execution mode when it
+ * identifies exactly one state address.
  */
 function resolveStateWriteTarget<TDataContent>(
   machine: Machine<TDataContent>,
   contributor: Contributor<TDataContent>,
   target: StateWriteTarget,
-  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress,
+  resolveStateAlias?: (address: InferenceStateAddress) => StateAddress | undefined,
 ): StateAddress {
   if (typeof target === "string") {
-    if (!resolveStateAlias) {
+    const projectedAddress = resolveStateAlias?.(target);
+    if (projectedAddress) {
+      return projectedAddress;
+    }
+
+    const matches = resolveStates(machine.instance).filter(
+      (candidate) => candidate.address.stateKey === target,
+    );
+    const only = matches.length === 1 ? matches[0] : undefined;
+    if (only) {
+      return only.address;
+    }
+    if (matches.length > 1) {
+      const addresses = matches
+        .map((match) => `${match.address.instanceId}:${match.address.stateKey}`)
+        .join(", ");
       throw new Error(
-        `State alias "${target}" is only resolvable during a generator run; pass a StateAddress or a state descriptor`,
+        `State key "${target}" resolves to multiple instances (${addresses}); pass a StateAddress or a state descriptor`,
       );
     }
-    return resolveStateAlias(target);
+    throw new Error(
+      `State key or alias "${target}" does not resolve to any instance state`,
+    );
   }
 
   if ("instanceId" in target && "stateKey" in target) {
@@ -1089,6 +1141,7 @@ function createActionInstanceContext<TDataContent>(
   machine: Machine<TDataContent>,
   contributor: Contributor<TDataContent>,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
+  enqueueFrame: Machine<TDataContent>["enqueueFrame"] = (frame) => machine.enqueueFrame(frame),
 ): NonNullable<ActionContext<unknown, TDataContent>["instance"]> {
   const ownerInstanceId = contributor.concreteInstance.id;
   return {
@@ -1096,7 +1149,7 @@ function createActionInstanceContext<TDataContent>(
     address: contributor.address,
     ownerInstanceId,
     spawn: (node, options) => {
-      machine.enqueueFrame({
+      enqueueFrame({
         ...frameDefaults,
         messages: [
           {
@@ -1134,13 +1187,13 @@ function createActionInstanceContext<TDataContent>(
       if (messages.length === 0) {
         return;
       }
-      machine.enqueueFrame({
+      enqueueFrame({
         ...frameDefaults,
         messages,
       });
     },
     transition: (node, options) => {
-      machine.enqueueFrame({
+      enqueueFrame({
         ...frameDefaults,
         messages: [
           {
@@ -1170,28 +1223,57 @@ function childInstanceIdsByNodeKey(
     .map((child) => child.id);
 }
 
-function enqueueExecutorResult<TDataContent>(
+function enqueueActivationStep<TDataContent>(
   machine: Machine<TDataContent>,
+  activation: Activation,
+  stepFrames: Frame<TDataContent>[],
   result: ExecutorRunResult<TDataContent>,
   output: OutputConfig<TDataContent> | undefined,
   frameDefaults: Partial<Pick<FrameDraft<TDataContent>, "generatorId" | "activationId">>,
   producer: FrameProducer | undefined,
+  completionMessages: FrameMessage<TDataContent>[],
+  continues: boolean,
+  execution: ExecutionReport | undefined,
 ): void {
-  for (const frame of result.frames ?? []) {
-    enqueueFrameWithDefaults(machine, signFrame(frame, producer, undefined, machine.runner), frameDefaults);
-  }
-
+  const stepFrameId = mintFrameId();
+  const messages = mergeCapturedFrameMessages([...stepFrames, ...(result.frames ?? [])]);
   if (result.value !== undefined) {
-    enqueueFrameWithDefaults(
-      machine,
-      signFrame({
-        messages: [
-          assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>,
-        ],
-      }, producer, result.execution, machine.runner),
-      frameDefaults,
-    );
+    messages.push(assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>);
   }
+  messages.push(...completionMessages);
+  if (continues) {
+    messages.push({
+      type: "work",
+      kind: "activation",
+      activationId: `activation:${machine.id}|${activation.generatorId}|continuation|${stepFrameId}`,
+      generatorId: activation.generatorId,
+      sourceFrameId: stepFrameId,
+      concurrencyKey: activation.concurrencyKey,
+      concurrency: activation.concurrency,
+      ...(result.continuationState !== undefined ? { continuationState: result.continuationState } : {}),
+    });
+  }
+  const frame = canonicalizeFrameDraft(signFrame({
+    id: stepFrameId,
+    ...frameDefaults,
+    messages,
+  }, producer, execution, machine.runner), machine.charter) as Frame<TDataContent>;
+  machine.enqueueFrame(frame);
+}
+
+function mergeExecutionReports(
+  first: ExecutionReport | undefined,
+  second: ExecutionReport | undefined,
+): ExecutionReport | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  return {
+    ...first,
+    ...second,
+    ...(first.usage || second.usage
+      ? { usage: { ...first.usage, ...second.usage } }
+      : {}),
+  };
 }
 
 function outputConfigForRuntime<TDataContent>(
@@ -1610,77 +1692,11 @@ function stateAddressForContributor(
   };
 }
 
-function patchObject(value: unknown, patch: Record<string, unknown>): unknown {
-  return {
-    ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
-    ...patch,
-  };
-}
-
-function applyStateUpdate(value: unknown, update: StateUpdate): unknown {
-  if (update.op === "replace") {
-    return update.value;
-  }
-
-  if (update.op === "patch") {
-    return updateAtPath(value, update.path ?? [], (target) =>
-      patchObject(target, update.value as Record<string, unknown>),
-    );
-  }
-
-  if (update.op === "append") {
-    return updateAtPath(value, update.path ?? [], (target) => {
-      if (!Array.isArray(target)) {
-        throw new Error("Cannot append to non-array state value");
-      }
-      return [...target, ...update.values];
-    });
-  }
-
-  const unreachable: never = update;
-  return unreachable;
-}
-
 function resolveStateUpdate<S>(
   state: S,
   update: StateUpdateInput<S>,
 ): StateUpdate<S> {
   return typeof update === "function" ? update(state) : update;
-}
-
-function updateAtPath(
-  value: unknown,
-  path: StatePath,
-  updater: (target: unknown) => unknown,
-): unknown {
-  if (path.length === 0) {
-    return updater(value);
-  }
-
-  const [segment, ...rest] = path;
-  if (Array.isArray(value)) {
-    if (typeof segment !== "number") {
-      throw new Error("Array state paths must use numeric segments");
-    }
-    if (segment < 0 || segment >= value.length) {
-      throw new Error(`Array state path segment ${segment} is out of bounds`);
-    }
-    const next = [...value];
-    next[segment] = updateAtPath(next[segment], rest, updater);
-    return next;
-  }
-
-  if (!value || typeof value !== "object") {
-    throw new Error("Cannot update nested path on non-object state value");
-  }
-
-  if (typeof segment !== "string") {
-    throw new Error("Object state paths must use string segments");
-  }
-  return {
-    ...(value as Record<string, unknown>),
-    [segment]: updateAtPath((value as Record<string, unknown>)[segment], rest, updater),
-  };
 }
 
 function findInstance(root: Instance<any>, instanceId: string): Instance<any> | undefined {
@@ -2216,7 +2232,11 @@ function triggerMatches<TDataContent>(
       // floor-suppressed no-op are not completions to react to. (Suppressed
       // completions also carry no activation record, so the lookup below
       // would exclude them anyway — this keeps the rule explicit.)
-      if (message.reason === "cancelled" || message.reason === "suppressed") return false;
+      if (
+        message.reason === "cancelled" ||
+        message.reason === "continued" ||
+        message.reason === "suppressed"
+      ) return false;
       const completed = state.activations.get(message.activationId);
       return completed?.generatorId === nearestAncestorGeneratorId(contributor);
     });
@@ -2395,11 +2415,9 @@ function completionReasonForRuntime(
     : "done";
 }
 
-function nextFrameIndex(frames: Frame<any>[]): number {
-  let max = -1;
-  for (const frame of frames) {
-    const match = /^frame-(\d+)$/.exec(frame.id);
-    if (match?.[1]) max = Math.max(max, Number(match[1]));
-  }
-  return max + 1;
+// UUID frame ids: two machines projected from the same persisted log (or from
+// none of it) can never mint the same id, so concurrent writers may fork
+// history but can never corrupt frame identity.
+function mintFrameId(): string {
+  return `frame-${crypto.randomUUID()}`;
 }
