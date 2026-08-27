@@ -39,6 +39,20 @@ These controls deter casual resets; they do not identify a person reliably.
    npx convex env set ANONYMOUS_IP_SALT <random-secret>
    ```
 
+5. Grant developer-panel access with a comma- or whitespace-separated list of
+   stable numeric GitHub account IDs. You can find an account's ID from the
+   GitHub API (`https://api.github.com/users/<handle>` → `id`):
+
+   ```sh
+   npx convex env set ADMIN_GITHUB_IDS "583231,9919"
+   ```
+
+   Convex Auth stores this value as the GitHub account's `providerAccountId`,
+   so authorization survives handle changes. The navigation capability probe
+   reveals only whether the signed-in user is an admin. Every query that
+   returns developer-panel data independently enforces the same server-side
+   admin check.
+
 Production needs its own OAuth App/callback and its own Convex Auth keys and
 environment variables; dev values do not carry over. Run the corresponding
 commands with `--prod`.

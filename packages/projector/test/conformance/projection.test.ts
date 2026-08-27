@@ -45,7 +45,7 @@ describe("conformance: projection IR", () => {
       charter: charter(),
       executor,
     });
-    machine.enqueueFrame({ messages: [{ ...textUserMessage("summarize") }] });
+    const userFrame = machine.enqueueFrame({ messages: [{ ...textUserMessage("summarize") }] });
 
     await drain(runMachine(machine));
 
@@ -58,7 +58,7 @@ describe("conformance: projection IR", () => {
         type: "work",
         kind: "activation",
         generatorId: "instance:r",
-        sourceFrameId: "frame-0",
+        sourceFrameId: userFrame.id,
       },
     ]);
   });

@@ -8,13 +8,9 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server";
-import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   applyInstanceMessage,
-  createMachine,
-  executeCommand,
-  runMachine,
   type Frame,
   type FrameDraft,
   type Instance,
@@ -23,13 +19,11 @@ import {
 } from "@projectors/core";
 import {
   recordCommandResidue,
-  type ClientMachineMessage,
   type MachineSyncState,
 } from "@projectors/core/client";
 import {
   createInitialSerializedInstance,
   createSiteClientSnapshot,
-  hydrateSiteInstance,
   hydrateSourceInstance,
   readCardData,
   serializeSourceInstance,
@@ -37,20 +31,34 @@ import {
 } from "../src/agent/charter";
 import { addMessageInternal } from "./messages";
 import {
+  frameMessageKey,
+  isTranscriptVisible,
+  readMessageActor,
+  readStringField,
+  shouldPersistAssistantMessage,
+} from "./transcript";
+import {
+  getSurfaceArtifact,
   getLatestSurfaceArtifact,
+  readAppSurfaceSelection,
   readLegacySurface,
-  recordSurfaceArtifacts,
 } from "./artifacts";
 import {
-  ACCESS_ERROR,
   authorizeSessionWrite,
   hashGuestSecret,
   isValidGuestSecret,
   reserveAnonymousTurn as reserveAnonymousTurnForSession,
 } from "./access";
+import {
+  assertRunnerLease,
+  getRunnerLease,
+  inboxItemSettleValidator,
+  renewRunnerLease,
+  settleInboxItems,
+} from "./runnerShared";
+import { initializeSessionEphemera } from "./sessionEphemera";
 import { escapeConvexJson, restoreConvexJson, stripClientSchemas } from "./convexJson";
 import {
-  getFrameIndexForSession,
   getLatestSessionFrameDoc,
   listSessionContextFrameDocs,
   listSessionFrameDocs,
@@ -80,6 +88,7 @@ export const create = mutation({
         ? { ownerUserId: userId }
         : { guestSecretHash: await hashGuestSecret(guestSecret!) }),
     });
+    await initializeSessionEphemera(ctx, sessionId, now);
 
     const frameId = await ctx.db.insert("frames", {
       metadata: escapeConvexJson({ type: "init" }),
@@ -136,7 +145,6 @@ export const get = query({
       v.object({ version: v.number(), title: v.string(), source: v.string() }),
     ),
     anonymousTurnUsed: v.boolean(),
-    workStartedAt: v.optional(v.number()),
   }),
   handler: async (ctx, { sessionId }) => {
     const session = await ctx.db.get(sessionId);
@@ -156,7 +164,11 @@ export const get = query({
     // The surface's TSX lives in the artifacts table, not machine state; the
     // legacy read keeps pre-artifacts sessions rendering from the source their
     // snapshots still carry.
-    const artifact = await getLatestSurfaceArtifact(ctx, sessionId);
+    const selection = readAppSurfaceSelection(latestInstance);
+    const activeVersion = session.activeSurfaceVersion ?? selection?.activeVersion;
+    const artifact = activeVersion
+      ? await getSurfaceArtifact(ctx, sessionId, activeVersion)
+      : await getLatestSurfaceArtifact(ctx, sessionId);
     const surface = artifact
       ? { version: artifact.version, title: artifact.title, source: artifact.source }
       : readLegacySurface(latestInstance);
@@ -169,8 +181,30 @@ export const get = query({
       syncState,
       surface,
       anonymousTurnUsed: session.anonymousTurnUsedAt !== undefined,
-      ...(session.workStartedAt !== undefined ? { workStartedAt: session.workStartedAt } : {}),
     };
+  },
+});
+
+// The thinking indicator, derived rather than stored: an unprocessed inbox
+// item or a live runner lease means the agent owes this session work. Its own
+// tiny query on purpose — the lease row is renewed once or twice per frame,
+// and that churn must not invalidate the heavy sessions.get payload for every
+// subscribed client. The client ages the timestamp out, so a crashed runner's
+// lease row only ever strands a stale number.
+export const workStatus = query({
+  args: { sessionId: v.id("sessions") },
+  returns: v.object({ workStartedAt: v.optional(v.number()) }),
+  handler: async (ctx, { sessionId }) => {
+    const pendingItem = await ctx.db
+      .query("agentInbox")
+      .withIndex("by_session_status", (q) =>
+        q.eq("sessionId", sessionId).eq("status", "pending"),
+      )
+      .first();
+    const lease = await getRunnerLease(ctx, sessionId);
+    const workStartedAt =
+      pendingItem?._creationTime ?? (lease?.active ? lease.renewedAt : undefined);
+    return workStartedAt !== undefined ? { workStartedAt } : {};
   },
 });
 
@@ -180,7 +214,6 @@ export const getForAction = internalQuery({
     v.null(),
     v.object({
       sessionId: v.id("sessions"),
-      frameId: v.id("frames"),
       instance: v.any(),
       syncState: v.any(),
     }),
@@ -197,7 +230,6 @@ export const getForAction = internalQuery({
 
     return {
       sessionId,
-      frameId: latestFrame._id,
       // Escaped: return values cross a Convex validation boundary, and a
       // serialized instance with a spawned child carries inline JSON Schema
       // ($-keys). The action restores it.
@@ -244,109 +276,116 @@ export const listFrames = query({
   },
 });
 
-export const appendMachineFrameSequence = internalMutation({
+// The runner's single durable write path for frames. The lease generation is
+// the fence: a stale runner (superseded by a newer claim) throws here and
+// nothing lands — no frame, no instance snapshot, no transcript row, no item
+// settle. Transcript rows are written in this same transaction as the frame
+// carrying them, so a crashed runner can never leave a durable frame whose
+// messages silently vanished. The reference frame is simply the head at commit
+// time — the lease guarantees no other frame writer exists, so the parent
+// chain can never fork.
+export const appendRunnerFrame = internalMutation({
   args: {
     sessionId: v.id("sessions"),
-    referenceFrameId: v.optional(v.id("frames")),
-    frames: v.array(v.any()),
+    generation: v.number(),
+    frame: v.any(),
+    settleItems: v.optional(v.array(inboxItemSettleValidator)),
   },
-  returns: v.array(v.id("frames")),
-  handler: async (ctx, { sessionId, referenceFrameId, frames }) => {
+  returns: v.id("frames"),
+  handler: async (ctx, { sessionId, generation, frame, settleItems }) => {
+    await renewRunnerLease(ctx, sessionId, generation, { madeProgress: true });
     const session = await getSessionOrThrow(ctx, sessionId);
-    const frameIds = await appendMachineFrameSequenceInternal(ctx, {
+    const restored = restoreConvexJson(frame) as Frame;
+    const frameId = await appendMachineFrameInternal(ctx, {
       sessionId,
       session,
-      referenceFrameId,
-      frames: restoreConvexJson(frames) as Frame[],
+      frame: restored,
     });
-    // The run these frames came from is over; retiring the thinking indicator
-    // in the same transaction keeps it from flickering between the stream's
-    // last patch and the durable rows landing.
-    if (session.workStartedAt !== undefined) {
-      await ctx.db.patch(sessionId, { workStartedAt: undefined });
-    }
-    return frameIds;
+    await persistFrameTranscript(ctx, { sessionId, frame: restored, frameId });
+    await settleInboxItems(ctx, sessionId, settleItems ?? []);
+    return frameId;
   },
 });
 
-// Client-issued commands run against the same machine as the executor, in a
-// transaction. Routine commands only write state. A command such as
-// appPanePing may deliberately emit an actor message; the scheduler reconciles
-// that into a work activation while still avoiding a model call in this
-// mutation, then an internal action drains the activation after commit.
-export const sendCommand = mutation({
+// Re-persists one frame's transcript idempotently to stamp updatedSurface onto
+// the drain's last assistant message — the same code path as the original
+// write, so the key derivation and stream settling can never drift from it.
+export const stampUpdatedSurface = internalMutation({
   args: {
     sessionId: v.id("sessions"),
-    message: v.any(),
-    guestSecret: v.optional(v.string()),
+    generation: v.number(),
+    frame: v.any(),
+    frameId: v.id("frames"),
+    messageIndex: v.number(),
   },
   returns: v.null(),
-  handler: async (ctx, { sessionId, message, guestSecret }) => {
-    const session = await getSessionOrThrow(ctx, sessionId);
-    const access = await authorizeSessionWrite(ctx, session, guestSecret);
-    const latestFrame = await getLatestSessionFrameDoc(ctx, sessionId);
-    if (!latestFrame) throw new Error("Session has no frames");
-    const serialized = await getLatestSerializedSource(ctx, sessionId);
-    if (!serialized) throw new Error("Session has no instance snapshot");
-
-    const machine = createMachine({
-      id: sessionId,
-      instance: hydrateSiteInstance(serialized, sessionId),
-      charter: siteCharter,
-      frames: await getMachineContextFrames(ctx, session),
+  handler: async (ctx, { sessionId, generation, frame, frameId, messageIndex }) => {
+    await assertRunnerLease(ctx, sessionId, generation);
+    await persistFrameTranscript(ctx, {
+      sessionId,
+      frame: restoreConvexJson(frame) as Frame,
+      frameId,
+      updatedSurfaceMessageIndex: messageIndex,
     });
-    await executeCommand(machine, restoreConvexJson(message) as ClientMachineMessage);
-
-    const produced: Frame[] = [];
-    for await (const frame of runMachine(machine, { scheduleWork: false })) {
-      produced.push(frame);
-    }
-    if (access === "guest" && containsWorkActivation(produced)) {
-      throw new Error(ACCESS_ERROR.authRequired);
-    }
-    if (produced.length > 0) {
-      const frameIds = await appendMachineFrameSequenceInternal(ctx, {
-        sessionId,
-        session,
-        referenceFrameId: latestFrame._id,
-        frames: produced,
-      });
-      // Command-produced assistant messages (e.g. a postCard run as a client
-      // command) enter the transcript here, mirroring the agent action's
-      // persistence path.
-      for (const [index, frame] of produced.entries()) {
-        const frameId = frameIds[index];
-        if (!frameId) continue;
-        for (const [messageIndex, message] of frame.messages.entries()) {
-          if (message.type !== "assistant") continue;
-          if ((message as { audience?: unknown }).audience === "self") continue;
-          const text = typeof message.text === "string" ? message.text : "";
-          if (!text.trim()) continue;
-          const card = readCardData(message);
-          await addMessageInternal(ctx, {
-            sessionId,
-            role: "assistant",
-            content: text,
-            frameId,
-            ...(card ? { card: { title: card.title, source: card.source } } : {}),
-            idempotencyKey: `assistant:${frame.id}:${messageIndex}`,
-          });
-        }
-      }
-
-      if (containsWorkActivation(produced)) {
-        // Same transaction as the scheduling: the moment the poke commits,
-        // every subscribed client's thinking indicator starts — no waiting
-        // for the model to say its first token.
-        await ctx.db.patch(sessionId, { workStartedAt: Date.now() });
-        await ctx.scheduler.runAfter(0, internal.agent.continueAfterCommand, {
-          sessionId,
-        });
-      }
-    }
     return null;
   },
 });
+
+async function persistFrameTranscript(
+  ctx: MutationCtx,
+  {
+    sessionId,
+    frame,
+    frameId,
+    updatedSurfaceMessageIndex,
+  }: {
+    sessionId: Id<"sessions">;
+    frame: Frame;
+    frameId: Id<"frames">;
+    updatedSurfaceMessageIndex?: number;
+  },
+): Promise<void> {
+  for (const [messageIndex, message] of frame.messages.entries()) {
+    const text = typeof message.text === "string" ? message.text : "";
+    if (message.type === "user" && text.trim() && isTranscriptVisible(message)) {
+      const actor = readMessageActor(message);
+      const clientMessageId = readStringField(message, "clientMessageId");
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "user",
+        content: text,
+        frameId,
+        ...(actor ? { actor } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
+        idempotencyKey: frameMessageKey("user", frame, message, messageIndex),
+      });
+    }
+
+    if (
+      message.type === "assistant" &&
+      shouldPersistAssistantMessage(frame, message) &&
+      text.trim()
+    ) {
+      // postCard rides an assistant message as a data content part; lift it
+      // onto the message row so the transcript renders the card (content
+      // stays the prose equivalent, same doctrine as explainer widgets).
+      const card = readCardData(message);
+      await addMessageInternal(ctx, {
+        sessionId,
+        role: "assistant",
+        content: text,
+        frameId,
+        ...(card ? { card: { title: card.title, source: card.source } } : {}),
+        ...(messageIndex === updatedSurfaceMessageIndex ? { updatedSurface: true } : {}),
+        idempotencyKey: frameMessageKey("assistant", frame, message, messageIndex),
+        // The durable write settles any in-flight stream row for this message:
+        // frame messages never carry streamState, so it must be set here or a
+        // streamed message stays "streaming" forever.
+        streamState: "complete",
+      });
+    }
+  }
+}
 
 export const reserveAnonymousTurn = internalMutation({
   args: {
@@ -362,42 +401,6 @@ export const reserveAnonymousTurn = internalMutation({
   },
 });
 
-export const authorizeAuthenticatedTurn = internalMutation({
-  args: {
-    sessionId: v.id("sessions"),
-    guestSecret: v.optional(v.string()),
-  },
-  returns: v.null(),
-  handler: async (ctx, { sessionId, guestSecret }) => {
-    const session = await getSessionOrThrow(ctx, sessionId);
-    const access = await authorizeSessionWrite(ctx, session, guestSecret);
-    if (access !== "authenticated") throw new Error(ACCESS_ERROR.authRequired);
-    return null;
-  },
-});
-
-// Safety net for runs that die or produce no frames — the transactional clear
-// lives in appendMachineFrameSequence.
-export const clearWork = internalMutation({
-  args: { sessionId: v.id("sessions") },
-  returns: v.null(),
-  handler: async (ctx, { sessionId }) => {
-    const session = await ctx.db.get(sessionId);
-    if (session?.workStartedAt !== undefined) {
-      await ctx.db.patch(sessionId, { workStartedAt: undefined });
-    }
-    return null;
-  },
-});
-
-function containsWorkActivation(frames: Frame[]): boolean {
-  return frames.some((frame) =>
-    frame.messages.some(
-      (message) => message.type === "work" && message.kind === "activation",
-    ),
-  );
-}
-
 async function getSessionOrThrow(ctx: MutationCtx, sessionId: Id<"sessions">) {
   const session = await ctx.db.get(sessionId);
   if (!session) {
@@ -412,22 +415,16 @@ export async function appendMachineFrameInternal(
     sessionId,
     session,
     frame,
-    referenceFrameId,
   }: {
     sessionId: Id<"sessions">;
     session: SessionDoc;
     frame: (FrameDraft | Frame) & { metadata?: Record<string, unknown> };
-    referenceFrameId?: Id<"frames">;
   },
 ) {
-  const effectiveReferenceFrameId =
-    referenceFrameId ?? (await getLatestSessionFrameDoc(ctx, sessionId))?._id;
-  if (
-    effectiveReferenceFrameId &&
-    !(await getFrameIndexForSession(ctx, sessionId, effectiveReferenceFrameId))
-  ) {
-    throw new Error("Reference frame is not indexed for session");
-  }
+  // Parent = head inside this transaction. Runner appends are lease-fenced;
+  // direct non-runner appends must be inert. Convex OCC retries either writer
+  // if another transaction advances the indexed head concurrently.
+  const effectiveReferenceFrameId = (await getLatestSessionFrameDoc(ctx, sessionId))?._id;
 
   const metadata =
     "id" in frame && typeof frame.id === "string"
@@ -455,48 +452,6 @@ export async function appendMachineFrameInternal(
   await applyFrameInstanceMessages(ctx, sessionId, frameId, frame.messages);
   await recordFrameCommandResidue(ctx, sessionId, frame.messages);
   return frameId;
-}
-
-async function appendMachineFrameSequenceInternal(
-  ctx: MutationCtx,
-  {
-    sessionId,
-    session,
-    referenceFrameId,
-    frames,
-  }: {
-    sessionId: Id<"sessions">;
-    session: SessionDoc;
-    referenceFrameId?: Id<"frames">;
-    frames: Frame[];
-  },
-) {
-  const frameIds: Id<"frames">[] = [];
-  let currentReferenceFrameId = referenceFrameId;
-
-  for (const frame of frames) {
-    const frameId = await appendMachineFrameInternal(ctx, {
-      sessionId,
-      session,
-      referenceFrameId: currentReferenceFrameId,
-      frame,
-    });
-    frameIds.push(frameId);
-    currentReferenceFrameId = frameId;
-  }
-
-  // Sequence-scoped on purpose: the machine emits one message per frame, so a
-  // writeAppSurface's request and result arrive in different frames of the
-  // same appended run.
-  await recordSurfaceArtifacts(ctx, {
-    sessionId,
-    entries: frames.map((frame, index) => ({
-      frameId: frameIds[index],
-      messages: frame.messages,
-    })),
-  });
-
-  return frameIds;
 }
 
 // All of one frame's instance messages fold into ONE snapshot row per source
