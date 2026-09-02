@@ -153,6 +153,22 @@ export type AssistantMessage<TDataContent = never> = {
 export type ActorMessage<TDataContent = never> =
   UserMessage<TDataContent> | AssistantMessage<TDataContent>;
 
+/**
+ * A history boundary. For a generator that can see it, rendered history
+ * begins at the frame carrying it; earlier frames are not projected. They
+ * stay in the log and in the fold — state is unaffected — and work
+ * scheduling and absorption ignore horizons entirely: history is what the
+ * model sees, work is durable state. Messages after the horizon in the same
+ * frame render normally, so an app that wants a summary puts it there or in
+ * the next frame; core has no opinion about what follows. Audience defaults
+ * to broadcast, like a user message; a targeted horizon cuts only its
+ * targets' histories.
+ */
+export type HorizonMessage = {
+  type: "horizon";
+  audience?: Audience;
+};
+
 export type AnyActorMessage = ActorMessage<any>;
 
 /**
@@ -873,6 +889,7 @@ export type FrameMessage<TDataContent = never> = (
   | ActionMessage<TDataContent>
   | InstanceMessage<TDataContent>
   | WorkMessage
+  | HorizonMessage
 ) &
   Record<string, unknown>;
 

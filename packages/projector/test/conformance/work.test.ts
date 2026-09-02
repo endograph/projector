@@ -96,6 +96,35 @@ describe("conformance: work scheduling", () => {
     await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
+  it("schedules and absorbs work across a horizon while activations see history from it", async () => {
+    const { executor, requests } = createRecordingExecutor();
+    const root = createNode({
+      key: "root",
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
+    });
+    const machine = createMachine({
+      id: "horizon-demo",
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
+    });
+    const texts = (history: FrameMessage[]) => history.map((message) => ("text" in message ? message.text : message.type));
+
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("old") }] });
+    await drain(runMachine(machine));
+    expect(texts(requests[0]!.inference.history)).toContain("old");
+
+    // The horizon's frame is an actor frame like any other: it schedules work.
+    machine.enqueueFrame({ messages: [{ type: "horizon" }, { ...textUserMessage("summary") }] });
+    await drain(runMachine(machine));
+    expect(requests).toHaveLength(2);
+    // An activation compiled after the horizon sees history from it.
+    expect(requests[1]!.inference.history[0]).toEqual({ type: "horizon" });
+    expect(texts(requests[1]!.inference.history)).not.toContain("old");
+    // The fold kept every frame: the log is untouched.
+    expect(machine.frames.some((frame) => frame.messages.some((message) => "text" in message && message.text === "old"))).toBe(true);
+  });
+
   it("records terminal-action completions from the executor verbatim", async () => {
     const { executor, requests } = createRecordingExecutor(() => ({
       completionReason: "terminal-action",

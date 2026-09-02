@@ -203,6 +203,34 @@ describe("conformance: projection IR", () => {
     ]);
   });
 
+  it("renders history from the latest visible horizon; a targeted horizon cuts only its targets", () => {
+    const generator = createNode({
+      key: "generator",
+      runtime: { type: "generator", trigger: { type: "parent-completion" } },
+    });
+    const root = createNode({ key: "root", members: [generator] });
+    const generatorId = "member:r/generator";
+    const compile = (frameHistory: Frame[]) =>
+      compileProjection({ id: "r", isSource: true, node: root }, { targetGeneratorId: generatorId, frameHistory }).history;
+
+    expect(
+      compile([
+        frame("before", [{ ...textUserMessage("before") }]),
+        frame("cut", [{ ...textUserMessage("same frame, before the cut") }, { type: "horizon" }, { ...textUserMessage("summary") }]),
+        frame("after", [{ ...textUserMessage("after") }]),
+      ]),
+    ).toEqual([{ type: "horizon" }, { ...textUserMessage("summary") }, { ...textUserMessage("after") }]);
+
+    // A horizon addressed to someone else is not this generator's cut.
+    expect(
+      compile([
+        frame("before", [{ ...textUserMessage("before") }]),
+        frame("other", [{ type: "horizon", audience: { type: "instance", instanceId: "r" } }]),
+        frame("after", [{ ...textUserMessage("after") }]),
+      ]),
+    ).toEqual([{ ...textUserMessage("before") }, { ...textUserMessage("after") }]);
+  });
+
   it("applies queued delivery and live activation history", () => {
     const root = createNode({
       key: "root",

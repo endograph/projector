@@ -1493,6 +1493,7 @@ function visibleHistoryForTarget<TDataContent>(
     targetGeneratorId,
     runtime,
     options.activationId,
+    { horizon: "apply" },
   );
   return visible.map(stripProvenance);
 }

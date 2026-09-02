@@ -9,6 +9,7 @@ import type {
   Frame,
   GeneratorId,
   GeneratorRuntime,
+  HorizonMessage,
 } from "./types.ts";
 
 export function isActorMessage<TDataContent = never>(
@@ -20,6 +21,22 @@ export function isActorMessage<TDataContent = never>(
     return true;
   }
   return false;
+}
+
+export function isHorizonMessage(message: unknown): message is HorizonMessage {
+  return Boolean(
+    message &&
+      typeof message === "object" &&
+      (message as { type?: unknown }).type === "horizon",
+  );
+}
+
+export function horizonVisibleToGenerator(
+  message: HorizonMessage,
+  frame: Frame<any>,
+  targetGeneratorId: GeneratorId,
+): boolean {
+  return audienceAllowsGenerator(message.audience ?? "broadcast", frame, targetGeneratorId);
 }
 
 export function isActionMessage<TDataContent = never>(
@@ -128,12 +145,13 @@ export function visibleFramesForGenerator<TDataContent>(
   targetGeneratorId: GeneratorId,
   runtime: GeneratorRuntime,
   activationId?: string,
+  options: VisibleFramesOptions = {},
 ): Frame<TDataContent>[] {
   const activationFrameIndex = activationFrameIndexFor(frames, activationId, {
     requireActivationFrame: activationId !== undefined,
   });
 
-  return frames.flatMap((frame, frameIndex) => {
+  const visible = frames.flatMap((frame, frameIndex) => {
     if (!frameVisibleByActivationHistory(
       frame,
       frameIndex,
@@ -154,11 +172,47 @@ export function visibleFramesForGenerator<TDataContent>(
       if (isActionMessage(message)) {
         return actionMessageVisibleToGenerator(message, frame, targetGeneratorId);
       }
+      if (isHorizonMessage(message)) {
+        return horizonVisibleToGenerator(message, frame, targetGeneratorId);
+      }
       return true;
     });
 
     return frameMessages.length > 0 ? [{ ...frame, messages: frameMessages }] : [];
   });
+  return options.horizon === "apply" ? fromLatestHorizon(visible) : visible;
+}
+
+export type VisibleFramesOptions = {
+  /**
+   * "apply": history begins at the latest visible horizon (projection).
+   * "ignore" (default): horizons are ordinary messages (work absorption —
+   * work is durable state and never forgets a frame).
+   */
+  horizon?: "apply" | "ignore";
+};
+
+/**
+ * Rendered history starts at the latest visible horizon: earlier frames
+ * drop, and within the horizon's frame so do the messages before it. The
+ * horizon message itself stays, so history projections can see the cut.
+ */
+function fromLatestHorizon<TDataContent>(
+  frames: Frame<TDataContent>[],
+): Frame<TDataContent>[] {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index]!;
+    let at = -1;
+    for (let m = frame.messages.length - 1; m >= 0; m -= 1) {
+      if (isHorizonMessage(frame.messages[m])) {
+        at = m;
+        break;
+      }
+    }
+    if (at === -1) continue;
+    return [{ ...frame, messages: frame.messages.slice(at) }, ...frames.slice(index + 1)];
+  }
+  return frames;
 }
 
 export function frameVisibleByActivationHistory(
