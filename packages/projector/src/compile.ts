@@ -1,4 +1,4 @@
-import * as z from "zod";
+import { normalizeSchema } from "./schema.ts";
 import { actionExposure } from "./action-exposure.ts";
 import {
   assertNodeActionStateCompatibility,
@@ -1225,7 +1225,7 @@ function actionMeta(action: AnyAction, exposure: Exposure): ActionMeta {
     name: action.name,
     description: action.description,
     inputSchema: action.inputSchema
-      ? z.toJSONSchema(action.inputSchema)
+      ? normalizeSchema(action.inputSchema).jsonSchema()
       : undefined,
     exposure,
   };
@@ -1239,7 +1239,7 @@ function outputMeta(
   }
   return {
     audience: output.audience,
-    schema: output.schema ? z.toJSONSchema(output.schema) : undefined,
+    schema: output.schema ? normalizeSchema(output.schema).jsonSchema() : undefined,
     mapsTextBlock: Boolean(output.mapTextBlock),
   };
 }

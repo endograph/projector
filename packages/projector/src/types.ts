@@ -1,5 +1,5 @@
-import type { z } from "zod";
-import type { AnyParamsSchema, JsonObject } from "./params.ts";
+import type { Schema } from "./schema.ts";
+import type { AnyParamsSchema, InferParams, JsonObject } from "./params.ts";
 
 export type Ref = string;
 
@@ -255,7 +255,7 @@ export type StateProjection = {
 
 export type StateDescriptor<S = unknown> = {
   key: string;
-  schema: z.ZodType<S>;
+  schema: Schema<unknown, S>;
   init?: S | (() => S);
   scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
@@ -379,12 +379,12 @@ export type Action<
   params?: TParams;
   name: TName;
   description?: string;
-  inputSchema?: z.ZodType<I>;
+  inputSchema?: Schema<unknown, I>;
   /** The executor must supply this action's native tool representation and execution. */
   executorOwned?: boolean;
   run?: (
     input: I,
-    ctx: ActionContext<S, TDataContent, z.output<TParams>>,
+    ctx: ActionContext<S, TDataContent, InferParams<TParams>>,
   ) => O | Promise<O>;
 };
 
@@ -393,7 +393,7 @@ export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
   params?: TParams;
   name: string;
   description?: string;
-  inputSchema?: z.ZodType<any>;
+  inputSchema?: Schema<any, any>;
   executorOwned?: boolean;
   run?: (input: any, ctx: any) => any | Promise<any>;
 };
@@ -957,7 +957,7 @@ export type Frame<TDataContent = never> = FrameDraft<TDataContent> & {
  */
 export type OutputConfig<TDataContent = never> = {
   audience?: Audience;
-  schema?: z.ZodType<TDataContent>;
+  schema?: Schema<unknown, TDataContent>;
   mapTextBlock?: (text: string) => TDataContent;
 };
 
@@ -1042,7 +1042,7 @@ export type ProjectorExecutor<TDataContent = never> = {
    * Validates each node's `executorConfig[identity.name]` at machine creation
    * so misconfiguration fails at bind time, not mid-activation.
    */
-  configSchema?: z.ZodType<unknown>;
+  configSchema?: Schema;
   run(
     request: ExecutorRunRequest<TDataContent>,
   ): ExecutorRunResult<TDataContent> | Promise<ExecutorRunResult<TDataContent>>;
@@ -1061,7 +1061,7 @@ export type Charter<
   version?: string;
   params: TParams;
   /** The log's data-content vocabulary (see CharterConfig.dataContent). */
-  dataContent?: z.ZodType<TDataContent>;
+  dataContent?: Schema<unknown, TDataContent>;
   nodes: Record<string, Node<TDataContent>>;
   /** Unified action registry; tools and commands share one namespace. */
   actions: Record<string, AnyAction>;
@@ -1089,7 +1089,7 @@ export type CharterConfig<TDataContent = never> = {
    * sole inference site — otherwise a mismatched node's data type would union
    * into TDataContent instead of failing against it.
    */
-  dataContent?: z.ZodType<TDataContent>;
+  dataContent?: Schema<unknown, TDataContent>;
   nodes: readonly Node<NoInfer<TDataContent>>[];
   /** Sugar: registered into `actions` alongside `commands`. */
   tools?: readonly AnyAction[];

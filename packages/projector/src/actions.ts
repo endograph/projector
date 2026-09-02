@@ -1,7 +1,8 @@
-import { z } from "zod";
+import * as z from "zod";
+import { normalizeSchema, type InferSchemaOutput, type Schema } from "./schema.ts";
 import { markActionExposure } from "./action-exposure.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
-import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema } from "./params.ts";
+import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema, type InferParams } from "./params.ts";
 import type {
   Action,
   ActionRequestMessage,
@@ -58,7 +59,7 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   __dataContent?: TDataContent;
 };
 
-type InputOf<TSchema> = TSchema extends z.ZodType<infer TInput> ? TInput : unknown;
+type InputOf<TSchema> = TSchema extends Schema ? InferSchemaOutput<TSchema> : unknown;
 type StateOf<TState> = TState extends StateDescriptor<infer S> ? S : undefined;
 
 type ActionStateRequirement = StateDescriptor<any> | null;
@@ -82,7 +83,7 @@ type ActionConfig<
     }
   | {
       executorOwned?: false;
-      run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, z.output<TParams>>) => O | Promise<O>;
+      run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, InferParams<TParams>>) => O | Promise<O>;
     }
 );
 
@@ -115,7 +116,7 @@ type CreatedAction<
 type ActionWithSchema<
   TState extends ActionStateRequirement,
   TParams extends AnyParamsSchema,
-  TSchema extends z.ZodType,
+  TSchema extends Schema,
   O,
   TName extends string,
   TDataContent,
@@ -126,7 +127,7 @@ type ActionWithSchema<
 export function createAction<
   const TName extends string,
   const TState extends ActionStateRequirement,
-  const TSchema extends z.ZodType,
+  const TSchema extends Schema,
   const TParams extends AnyParamsSchema = typeof emptyParamsSchema,
   O = unknown,
   TDataContent = never,
@@ -151,6 +152,7 @@ export function createAction(action: AnyAction): AnyAction {
     assertProjectorIdentifier(action.state.key, "State key");
   }
   action.params = normalizeParamsSchema(action.params);
+  if (action.inputSchema) normalizeSchema(action.inputSchema);
   return action;
 }
 
@@ -512,12 +514,12 @@ export function createGetStateAction(
     state: null,
     name: GET_STATE_ACTION_NAME,
     description: "Retrieve a projected state value by exact address.",
-    inputSchema: inputSchema as z.ZodType<unknown>,
+    inputSchema,
     run: (input, ctx) => {
       if (!ctx.getState) {
         throw new Error("No getState handler is available for this action context");
       }
-      const { address } = inputSchema.parse(input);
+      const { address } = normalizeSchema(inputSchema).parse(input);
       return ctx.getState(address);
     },
   };
