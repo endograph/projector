@@ -75,6 +75,7 @@ import type {
   WorkActivationMessage,
   WorkCompletionMessage,
   WorkCompletionReason,
+  MessageRef,
 } from "./types.ts";
 import { compileProjection } from "./compile.ts";
 import {
@@ -1241,7 +1242,16 @@ function enqueueActivationStep<TDataContent>(
   if (result.value !== undefined) {
     messages.push(assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>);
   }
-  messages.push(...completionMessages);
+  // This step's completion points at the last result it produced (an action
+  // result or an assistant message) so hosts need not scan for it.
+  const lastResult = lastResultRef(stepFrameId, messages);
+  messages.push(
+    ...completionMessages.map((message) =>
+      lastResult && isWorkCompletionMessage(message) && message.activationId === activation.activationId
+        ? ({ ...message, lastResult } as FrameMessage<TDataContent>)
+        : message,
+    ),
+  );
   if (continues) {
     messages.push({
       type: "work",
@@ -1260,6 +1270,19 @@ function enqueueActivationStep<TDataContent>(
     messages,
   }, producer, execution, machine.runner), machine.charter) as Frame<TDataContent>;
   machine.enqueueFrame(frame);
+}
+
+function lastResultRef<TDataContent>(
+  frameId: string,
+  messages: readonly FrameMessage<TDataContent>[],
+): MessageRef | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.type === "assistant" || (message.type === "action" && message.kind === "result")) {
+      return { frameId, messageIndex: index };
+    }
+  }
+  return undefined;
 }
 
 function mergeExecutionReports(

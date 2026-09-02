@@ -752,10 +752,24 @@ export type WorkActivationMessage = {
   continuationState?: unknown;
 };
 
+/** A pointer to one message in the log. */
+export type MessageRef = {
+  frameId: string;
+  messageIndex: number;
+};
+
 export type WorkCompletionMessage = {
   type: "work";
   kind: "completion";
   activationId: string;
+  /**
+   * The last result-bearing message the completing step produced — an
+   * action result (a terminal action's included) or an assistant message —
+   * as a pointer into the completion's own frame. Most apps treat it as the
+   * activation's result; apps with another convention read the frames
+   * themselves. Absent when the step produced neither (cancelled, empty).
+   */
+  lastResult?: MessageRef;
   /**
    * The generator whose work completed. Optional for completions that pair
    * with an activation message already in the log; required to record a
@@ -877,6 +891,11 @@ export type ExecuteActionResult<T = unknown, TDataContent = never> =
     }
   | {
       success: false;
+      /**
+       * Human-readable. Input rejections render schema issues into one line
+       * (see formatSchemaIssues); structured issues may be added alongside
+       * later, the string stays.
+       */
       error: string;
       value?: T;
       messages?: FrameMessage<TDataContent>[];

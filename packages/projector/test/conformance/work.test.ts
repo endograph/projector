@@ -125,6 +125,51 @@ describe("conformance: work scheduling", () => {
     expect(machine.frames.some((frame) => frame.messages.some((message) => "text" in message && message.text === "old"))).toBe(true);
   });
 
+  it("points each completion at the last result its step produced", async () => {
+    const generator = () =>
+      createNode({ key: "root", runtime: { type: "generator", trigger: { type: "actor-frame" } } });
+    const completionOf = (frames: Frame[]) => {
+      for (const frame of frames) {
+        const index = frame.messages.findIndex((m) => m.type === "work" && m.kind === "completion");
+        if (index !== -1) return { frame, completion: frame.messages[index] as FrameMessage & { lastResult?: { frameId: string; messageIndex: number } } };
+      }
+      throw new Error("no completion");
+    };
+
+    // Final text: the pointer lands on the assistant message.
+    const text = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({ completionReason: "done", value: "all done" })).executor,
+    });
+    text.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
+    const t = completionOf(await drain(runMachine(text)));
+    expect(t.completion.lastResult).toEqual({ frameId: t.frame.id, messageIndex: expect.any(Number) });
+    expect(t.frame.messages[t.completion.lastResult!.messageIndex]).toMatchObject({ type: "assistant", text: "all done" });
+
+    // Terminal action: the pointer lands on its result, even with later frames from the executor.
+    const terminal = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({
+        completionReason: "terminal-action",
+        frames: [{ messages: [{ type: "action", kind: "result", action: "tool", name: "resolve", callId: "c1", success: true, value: "resolved", terminal: true }] }],
+      })).executor,
+    });
+    terminal.enqueueFrame({ messages: [{ ...textUserMessage("finish") }] });
+    const r = completionOf(await drain(runMachine(terminal)));
+    expect(r.frame.messages[r.completion.lastResult!.messageIndex]).toMatchObject({ type: "action", kind: "result", name: "resolve", value: "resolved" });
+
+    // Nothing produced: no pointer.
+    const empty = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({ completionReason: "done" })).executor,
+    });
+    empty.enqueueFrame({ messages: [{ ...textUserMessage("silence") }] });
+    expect(completionOf(await drain(runMachine(empty))).completion.lastResult).toBeUndefined();
+  });
+
   it("records terminal-action completions from the executor verbatim", async () => {
     const { executor, requests } = createRecordingExecutor(() => ({
       completionReason: "terminal-action",
