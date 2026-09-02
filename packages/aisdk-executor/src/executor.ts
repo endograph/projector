@@ -1,6 +1,5 @@
 import {
   Output,
-  asSchema,
   generateText,
   jsonSchema,
   streamText,
@@ -21,6 +20,8 @@ import {
   executeActionInvocation,
   hasActionOutputMessages,
   isActorMessage,
+  normalizeSchema,
+  SchemaError,
 } from "@projectors/core";
 import type {
   ActionContext,
@@ -38,6 +39,7 @@ import type {
   FrameDraft,
   FrameMessage,
   ProjectorExecutor,
+  Schema,
 } from "@projectors/core";
 import { z } from "zod";
 import type {
@@ -520,7 +522,7 @@ function buildAiSdkInput<TDataContent = never>(
     frequencyPenalty: config.frequencyPenalty,
     seed: config.seed,
     experimental_output: request.output?.schema
-      ? Output.object({ schema: request.output.schema })
+      ? Output.object({ schema: aiSdkSchema(request.output.schema) })
       : undefined,
     providerOptions: config.providerOptions as never,
     toolChoice: respondNow ? undefined : (config.toolChoice as never),
@@ -530,7 +532,7 @@ function buildAiSdkInput<TDataContent = never>(
 
 function parseNodeConfig(config: unknown): AiSdkExecutorNodeConfig {
   if (config === undefined) return {};
-  return nodeConfigSchema.parse(config);
+  return normalizeSchema(nodeConfigSchema).parse(config);
 }
 
 function normalizeTurnPolicy<TDataContent>(
@@ -972,20 +974,28 @@ export function buildAiSdkTools<TDataContent = never>(
   return tools;
 }
 
-/**
- * The provider already knows the function-tool JSON Schema dialect. Zod's
- * standard conversion adds the same `$schema` URI to every tool, so strip only
- * that redundant marker while preserving the AI SDK validator unchanged.
- */
+const EMPTY_OBJECT_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
+
 function compactToolInputSchema(schema: AnyAction["inputSchema"]) {
-  const normalized = asSchema(schema ?? z.object({}));
-  return jsonSchema(
-    Promise.resolve(normalized.jsonSchema).then((value) => {
-      const { $schema: _dialect, ...compact } = value;
-      return compact;
-    }),
-    { validate: normalized.validate },
-  );
+  return schema ? aiSdkSchema(schema) : jsonSchema(EMPTY_OBJECT_SCHEMA as never);
+}
+
+/**
+ * An AI SDK schema over projector's normalized schema: its JSON Schema
+ * document minus the `$schema` dialect marker (the provider already knows the
+ * function-tool dialect), validated by the schema itself.
+ */
+function aiSdkSchema<T>(schema: Schema<unknown, T>) {
+  const normalized = normalizeSchema(schema);
+  const { $schema: _dialect, ...compact } = normalized.jsonSchema();
+  return jsonSchema<T>(compact as never, {
+    validate: (value) => {
+      const result = normalized.validate(value);
+      return result.issues
+        ? { success: false, error: new SchemaError(result.issues) }
+        : { success: true, value: result.value };
+    },
+  });
 }
 
 function executorOwnedAction<TDataContent>(

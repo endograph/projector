@@ -31,8 +31,8 @@
     "@types/bun": "latest",
     "vitest": "^4.0.17"
   },
-  "peerDependencies": {
-    "zod": ">=4.0.0 <5"
-  },
-  "dependencies": {}
+  "dependencies": {
+    "@standard-schema/spec": "^1.1.0",
+    "zod": "^4.4.3"
+  }
 }

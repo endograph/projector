@@ -1,3 +1,4 @@
+import { normalizeSchema } from "./schema.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import type {
   ActorHistoryProjection,
@@ -344,7 +345,7 @@ export function assistantMessageFromTextOutput<TDataContent = never>(
 
   if (mapTextBlock) {
     const mapped = mapTextBlock(text);
-    const content = schema ? schema.parse(mapped) : mapped;
+    const content = schema ? normalizeSchema(schema).parse(mapped) : mapped;
     return {
       type: "assistant",
       content: [dataContent(content)],
@@ -356,7 +357,7 @@ export function assistantMessageFromTextOutput<TDataContent = never>(
   if (schema) {
     return {
       type: "assistant",
-      content: [dataContent(schema.parse(text))],
+      content: [dataContent(normalizeSchema(schema).parse(text))],
       text,
       ...(output?.audience ? { audience: output.audience } : {}),
     };

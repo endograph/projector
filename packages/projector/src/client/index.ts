@@ -1,4 +1,4 @@
-import * as z from "zod";
+import { normalizeSchema, schemaFromJsonSchema, type Schema } from "../schema.ts";
 import {
   collectContributors,
   computedPartEnv,
@@ -146,7 +146,7 @@ export type ClientInstance<
 
 export type AnyCommandDefinition = {
   name: string;
-  inputSchema?: z.ZodType;
+  inputSchema?: Schema;
 };
 
 export type ClientCommandDefinitionName<TCommand> = TCommand extends {
@@ -156,7 +156,7 @@ export type ClientCommandDefinitionName<TCommand> = TCommand extends {
   : string;
 
 export type ClientCommandDefinitionInput<TCommand> = TCommand extends {
-  inputSchema?: z.ZodType<infer TInput>;
+  inputSchema?: Schema<any, infer TInput>;
 }
   ? TInput
   : unknown;
@@ -172,7 +172,7 @@ export type ClientToolOf<TTool> = ClientToolMeta<
 >;
 
 export type ClientStateOf<TStateDescriptor> = TStateDescriptor extends {
-  schema: z.ZodType<infer TValue>;
+  schema: Schema<any, infer TValue>;
 }
   ? TValue
   : unknown;
@@ -621,7 +621,7 @@ function realizeTool(
     name: entry.action.name,
     description: entry.action.description,
     inputSchema: entry.action.inputSchema
-      ? z.toJSONSchema(entry.action.inputSchema)
+      ? normalizeSchema(entry.action.inputSchema).jsonSchema()
       : undefined,
     exposure: entry.exposure,
     target,
@@ -636,7 +636,7 @@ function realizeCommand(
     name: command.name,
     description: command.description,
     inputSchema: command.inputSchema
-      ? z.toJSONSchema(command.inputSchema)
+      ? normalizeSchema(command.inputSchema).jsonSchema()
       : undefined,
     target,
   };
@@ -749,7 +749,7 @@ function realizeStateDescriptor(
     key: descriptor.key,
     scope: descriptor.scope,
     onInitConflict: descriptor.onInitConflict,
-    schema: z.toJSONSchema(descriptor.schema),
+    schema: normalizeSchema(descriptor.schema).jsonSchema(),
     projection: descriptor.projection
       ? {
           ...slotPlacement(descriptor.projection.slot),
@@ -767,7 +767,7 @@ function realizeState(
     key: state.address.stateKey,
     address: state.address,
     value: state.container.value,
-    schema: z.toJSONSchema(descriptor.schema),
+    schema: normalizeSchema(descriptor.schema).jsonSchema(),
     projection: descriptor.projection
       ? {
           ...slotPlacement(descriptor.projection.slot),
@@ -844,12 +844,10 @@ function createOptimisticContext<TInstances>(
 function commitValidState(state: ClientStateView, candidate: unknown): void {
   if (state.schema !== undefined) {
     try {
-      const schema = z.fromJSONSchema(
-        state.schema as Parameters<typeof z.fromJSONSchema>[0],
-      );
-      if (!schema.safeParse(candidate).success) return;
+      const schema = normalizeSchema(schemaFromJsonSchema(state.schema));
+      if (!schema.accepts(candidate)) return;
     } catch {
-      // A projection may carry JSON Schema features z.fromJSONSchema cannot
+      // A projection may carry JSON Schema features hydration cannot
       // reconstruct. In that case the client cannot prove invalidity, so keep
       // the optimistic behavior and let the durable machine arbitrate.
     }

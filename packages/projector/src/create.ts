@@ -1,3 +1,4 @@
+import { normalizeSchema } from "./schema.ts";
 import type {
   ActionConfigEntry,
   ActionPart,
@@ -233,6 +234,7 @@ export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
 ): NormalizedStateDescriptor<S> {
   assertProjectorIdentifier(descriptor.key, "State key");
+  normalizeSchema(descriptor.schema);
   const scope = descriptor.scope ?? "hoist";
   const onInitConflict = descriptor.onInitConflict ?? "replace";
   if (
@@ -340,6 +342,7 @@ export function createNode<
     throw new Error("Node requires key or name");
   }
   assertProjectorIdentifier(key, "Node key");
+  if (config.output?.schema) normalizeSchema(config.output.schema);
 
   return {
     [NODE_BRAND]: true,

@@ -7,6 +7,8 @@ import {
   hasActionOutputMessages,
   ROOT_GENERATOR_ID,
   isActorMessage,
+  normalizeSchema,
+  SchemaError,
   textContent,
 } from "@projectors/core";
 import type {
@@ -21,7 +23,6 @@ import type {
   ExecutorRealizePromptRequest,
   RuntimeSyncContext,
 } from "@projectors/core";
-import { z } from "zod";
 import type {
   ExecutorRunRequest,
   ExecutorRunResult,
@@ -212,9 +213,16 @@ export class LiveKitCascadeConnection<TDataContent = never> {
       throw new Error(`No LiveKit tool named "${name}" is registered in the current projection`);
     }
 
+    let parsedInput = input;
+    if (action.inputSchema) {
+      const parsed = normalizeSchema(action.inputSchema).validate(input);
+      if (parsed.issues) throw new SchemaError(parsed.issues);
+      parsedInput = parsed.value;
+    }
+
     const callId = crypto.randomUUID();
     const actionRequest = {
-      ...createToolActionRequest(name, input, callId),
+      ...createToolActionRequest(name, parsedInput, callId),
       source: { external: true },
     };
     const context: ActionContext<unknown, TDataContent> =
@@ -224,7 +232,7 @@ export class LiveKitCascadeConnection<TDataContent = never> {
       context.getState ??= (address) => this.getRetrievableState(address);
     }
     const runAction = this.config.runAction;
-    const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
+    const runInput: RunActionInput<TDataContent> = { action, input: parsedInput, context, liveKitContext };
     const result = await executeActionInvocation({
       request: actionRequest,
       throwErrors: true,
@@ -726,13 +734,18 @@ export function buildLiveKitToolDefinitions(
       type: "function",
       name: action.name,
       description: action.description ?? "",
-      parameters: action.inputSchema
-        ? z.toJSONSchema(action.inputSchema)
-        : { type: "object", properties: {}, additionalProperties: false },
+      parameters: liveKitToolParameters(action),
     });
   }
 
   return [...definitions.values()];
+}
+
+/** Raw JSON Schema for LiveKit; the executor validates input itself (executeTool). */
+function liveKitToolParameters(action: AnyAction): Record<string, unknown> {
+  return action.inputSchema
+    ? normalizeSchema(action.inputSchema).jsonSchema()
+    : { type: "object", properties: {}, additionalProperties: false };
 }
 
 export function buildLiveKitToolContext<TDataContent = never>(
@@ -744,7 +757,7 @@ export function buildLiveKitToolContext<TDataContent = never>(
   for (const action of inference.tools) {
     tools[action.name] = createLiveKitTool({
       description: action.description ?? "",
-      parameters: action.inputSchema ?? z.object({}),
+      parameters: liveKitToolParameters(action) as never,
       execute: (input, liveKitContext) => connection.executeTool(action.name, input, liveKitContext),
     });
   }

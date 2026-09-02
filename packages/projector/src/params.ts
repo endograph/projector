@@ -1,18 +1,26 @@
-import { z } from "zod";
+import * as z from "zod";
+import {
+  jsonSchemaProperties,
+  jsonSchemaRequired,
+  normalizeSchema,
+  type InferSchemaInput,
+  type InferSchemaOutput,
+  type Schema,
+} from "./schema.ts";
 import type { AnyAction, Instance, Node } from "./types.ts";
 
-export const emptyParamsSchema = z.object({});
-
 export type JsonObject = Record<string, unknown>;
-export type AnyParamsSchema = z.ZodObject<any>;
-type ParamsSchemaKeys<TSchema extends AnyParamsSchema> = keyof TSchema["shape"];
+/** A params schema: any Standard Schema over an object. */
+export type AnyParamsSchema = Schema<JsonObject, JsonObject>;
+export const emptyParamsSchema: Schema<{}, {}> = z.object({});
+type ParamsSchemaKeys<TSchema extends AnyParamsSchema> = keyof InferSchemaInput<TSchema>;
 
 export type InferParams<TSchema> = TSchema extends AnyParamsSchema
-  ? z.output<TSchema>
+  ? InferSchemaOutput<TSchema>
   : {};
 
 export type InputParams<TSchema> = TSchema extends AnyParamsSchema
-  ? z.input<TSchema>
+  ? InferSchemaInput<TSchema>
   : {};
 
 /**
@@ -27,12 +35,12 @@ export type ParamsSatisfyError<
   TSub extends AnyParamsSchema,
 > = ParamsSchemaKeys<TSub> extends never
   ? never
-  : z.output<TSuper> extends z.input<TSub>
+  : InferSchemaOutput<TSuper> extends InferSchemaInput<TSub>
   ? never
   : {
       readonly __paramCompatibilityError: "params do not satisfy required schema";
-      readonly expected: z.input<TSub>;
-      readonly received: z.output<TSuper>;
+      readonly expected: InferSchemaInput<TSub>;
+      readonly received: InferSchemaOutput<TSuper>;
     };
 
 export type InferNodeParams<N> =
@@ -50,7 +58,9 @@ export type InputCharterParams<C> =
 export function normalizeParamsSchema(
   schema: AnyParamsSchema | undefined,
 ): AnyParamsSchema {
-  return schema ?? emptyParamsSchema;
+  const resolved = schema ?? emptyParamsSchema;
+  normalizeSchema(resolved);
+  return resolved;
 }
 
 export function resolveEffectiveParams(instancePath: readonly Instance<any>[]): JsonObject {
@@ -77,7 +87,7 @@ export function resolveNodeParams(
 ): JsonObject {
   const schema = normalizeParamsSchema(node.params);
   const picked = pickDeclaredParamKeys(effectiveParams, schema);
-  return schema.parse(picked) as JsonObject;
+  return normalizeSchema(schema).parse(picked);
 }
 
 export function resolveActionParams(
@@ -86,16 +96,17 @@ export function resolveActionParams(
 ): JsonObject {
   const schema = normalizeParamsSchema(action.params);
   const picked = pickDeclaredParamKeys(nodeParams, schema);
-  return schema.parse(picked) as JsonObject;
+  return normalizeSchema(schema).parse(picked);
 }
 
 /**
  * Bind-time mirror of the type-level params check, for everything types cannot
  * see (string refs, computed-closure returns, hydrated dry nodes, JS callers).
- * Every param key the action's schema cannot resolve without (no optional/
- * default) must be declared by the node: resolveNodeParams filters effective
- * params down to the node's declared keys before resolveActionParams picks
- * from them, so an undeclared key can never reach the action at runtime.
+ * Every param key the action's schema cannot resolve without (required on the
+ * input side of its JSON Schema) must be declared by the node:
+ * resolveNodeParams filters effective params down to the node's declared keys
+ * before resolveActionParams picks from them, so an undeclared key can never
+ * reach the action at runtime.
  */
 export function assertNodeActionParamsCompatibility(
   action: AnyAction,
@@ -105,15 +116,14 @@ export function assertNodeActionParamsCompatibility(
   if (!action.params) {
     return;
   }
-  const nodeSchema = normalizeParamsSchema(node.params);
-  for (const [key, field] of Object.entries(action.params.shape)) {
-    if (key in nodeSchema.shape) {
+  const nodeKeys = declaredParamKeys(normalizeParamsSchema(node.params));
+  const actionInput = normalizeSchema(action.params).jsonSchema({ io: "input" });
+  const required = jsonSchemaRequired(actionInput);
+  for (const key of jsonSchemaProperties(actionInput)) {
+    if (nodeKeys.includes(key) || !required.has(key)) {
       continue;
     }
-    if ((field as z.ZodType).safeParse(undefined).success) {
-      continue;
-    }
-    const declared = Object.keys(nodeSchema.shape).join(", ") || "none";
+    const declared = nodeKeys.join(", ") || "none";
     throw new Error(
       `Node "${node.key}" ${kind} "${action.name}" requires param "${key}" but the node declares: ${declared}`,
     );
@@ -125,10 +135,14 @@ export function pickDeclaredParamKeys(
   schema: AnyParamsSchema,
 ): JsonObject {
   const picked: JsonObject = {};
-  for (const key of Object.keys(schema.shape)) {
+  for (const key of declaredParamKeys(schema)) {
     if (key in params) {
       picked[key] = params[key];
     }
   }
   return picked;
+}
+
+function declaredParamKeys(schema: AnyParamsSchema): string[] {
+  return jsonSchemaProperties(normalizeSchema(schema).jsonSchema({ io: "input" }));
 }

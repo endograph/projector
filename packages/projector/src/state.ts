@@ -1,3 +1,4 @@
+import { normalizeSchema } from "./schema.ts";
 import type { Contributor } from "./contributors.ts";
 import { hoistStateInstance, collectContributors } from "./contributors.ts";
 import { encodeProjectionAddress } from "./projection-address.ts";
@@ -355,7 +356,7 @@ function allSchemasValidate<TDataContent>(
   entries: StateGroup<TDataContent>["entries"],
   value: unknown,
 ): boolean {
-  return entries.every((entry) => entry.descriptor.schema.safeParse(value).success);
+  return entries.every((entry) => normalizeSchema(entry.descriptor.schema).accepts(value));
 }
 
 function validateAllSchemas(
@@ -363,7 +364,7 @@ function validateAllSchemas(
   value: unknown,
   stateKey: string,
 ): void {
-  const invalid = entries.find((entry) => !entry.descriptor.schema.safeParse(value).success);
+  const invalid = entries.find((entry) => !normalizeSchema(entry.descriptor.schema).accepts(value));
   if (invalid) {
     throw new Error(`Incompatible state descriptors for "${stateKey}": schema validation failed`);
   }

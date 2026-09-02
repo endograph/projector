@@ -1,4 +1,4 @@
-import * as z from "zod";
+import { normalizeSchema, schemaFromJsonSchema } from "./schema.ts";
 import { createNode, normalizeStateDescriptor } from "./create.ts";
 import { isComputedMemberDef } from "./computed-parts.ts";
 import {
@@ -514,18 +514,16 @@ export function serializeOutputConfig(
 
   return {
     audience: output.audience,
-    schema: output.schema ? z.toJSONSchema(output.schema) : undefined,
+    schema: output.schema ? normalizeSchema(output.schema).jsonSchema() : undefined,
   };
 }
 
 function serializeParams(params: Node["params"]): unknown {
-  return z.toJSONSchema(params);
+  return normalizeSchema(params).jsonSchema();
 }
 
 function hydrateParams(params: unknown): Node["params"] {
-  return z.fromJSONSchema(
-    params as Parameters<typeof z.fromJSONSchema>[0],
-  ) as Node["params"];
+  return schemaFromJsonSchema(params) as Node["params"];
 }
 
 export function hydrateOutputConfig(
@@ -533,11 +531,7 @@ export function hydrateOutputConfig(
 ): AnyOutputConfig {
   return {
     audience: output.audience,
-    schema: output.schema
-      ? z.fromJSONSchema(
-          output.schema as Parameters<typeof z.fromJSONSchema>[0],
-        )
-      : undefined,
+    schema: output.schema ? schemaFromJsonSchema(output.schema) : undefined,
   };
 }
 
@@ -588,7 +582,7 @@ export function serializeStateDescriptor(
         }
       : {}),
     init: state.init,
-    schema: z.toJSONSchema(state.schema),
+    schema: normalizeSchema(state.schema).jsonSchema(),
   };
 }
 
@@ -606,9 +600,7 @@ export function hydrateStateDescriptor(
 
   return normalizeStateDescriptor({
     key: serialized.key,
-    schema: z.fromJSONSchema(
-      serialized.schema as Parameters<typeof z.fromJSONSchema>[0],
-    ),
+    schema: schemaFromJsonSchema(serialized.schema),
     init: serialized.init,
     scope: serialized.scope,
     onInitConflict: serialized.onInitConflict,

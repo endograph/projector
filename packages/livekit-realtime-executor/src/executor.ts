@@ -11,6 +11,8 @@ import {
   ROOT_GENERATOR_ID,
   createRuntimeTurnFrame,
   isActorMessage,
+  normalizeSchema,
+  SchemaError,
   textContent,
 } from "@projectors/core";
 import type {
@@ -27,7 +29,6 @@ import type {
   ExecutorRealizePromptRequest,
   RuntimeSyncContext,
 } from "@projectors/core";
-import { z } from "zod";
 import type {
   ExecutorRunRequest,
   ExecutorRunResult,
@@ -378,9 +379,9 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
 
     let parsedInput = input;
     if (action.inputSchema) {
-      const parsed = action.inputSchema.safeParse(input);
-      if (!parsed.success) this.recordFailedToolInvocation(name, input, callId, parsed.error);
-      parsedInput = parsed.data;
+      const parsed = normalizeSchema(action.inputSchema).validate(input);
+      if (parsed.issues) this.recordFailedToolInvocation(name, input, callId, new SchemaError(parsed.issues));
+      parsedInput = parsed.value;
     }
 
     const actionRequest = {
@@ -2106,7 +2107,7 @@ function toolExchangeToRealtimeItems<TDataContent>(
 
 function liveKitToolParameters(action: AnyAction): unknown {
   return action.inputSchema
-    ? z.toJSONSchema(action.inputSchema, { target: "draft-7", io: "output", reused: "inline" })
+    ? normalizeSchema(action.inputSchema).jsonSchema({ target: "draft-07", libraryOptions: { reused: "inline" } })
     : { type: "object", properties: {}, additionalProperties: false };
 }
 
