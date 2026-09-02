@@ -1,4 +1,4 @@
-import type { Schema } from "./schema.ts";
+import type { Schema, SchemaIssue } from "./schema.ts";
 import type { AnyParamsSchema, InferParams, JsonObject } from "./params.ts";
 
 export type Ref = string;
@@ -873,6 +873,8 @@ export type ActionResultMessage<TDataContent = never> = {
   success: boolean;
   value?: unknown;
   error?: string;
+  /** Standard Schema issues, verbatim, when the failure was input validation. */
+  issues?: readonly SchemaIssue[];
   terminal?: boolean;
   outputMessageIndices?: number[];
   audience?: Audience;
@@ -891,12 +893,10 @@ export type ExecuteActionResult<T = unknown, TDataContent = never> =
     }
   | {
       success: false;
-      /**
-       * Human-readable. Input rejections render schema issues into one line
-       * (see formatSchemaIssues); structured issues may be added alongside
-       * later, the string stays.
-       */
+      /** Human-readable rendering; for input rejections, formatSchemaIssues(issues). */
       error: string;
+      /** Standard Schema issues, verbatim, when the failure was input validation. */
+      issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
       terminal?: boolean;

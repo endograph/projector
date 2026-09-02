@@ -813,6 +813,7 @@ export async function executeCommand<
       return enqueueImmediateActionResult(machine, message, {
         success: false,
         error: formatSchemaIssues(parsed.issues),
+        issues: parsed.issues,
         callId: message.callId,
       });
     }

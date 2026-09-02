@@ -1,5 +1,5 @@
 import * as z from "zod";
-import { normalizeSchema, type InferSchemaOutput, type Schema } from "./schema.ts";
+import { normalizeSchema, type InferSchemaOutput, type Schema, type SchemaIssue } from "./schema.ts";
 import { markActionExposure } from "./action-exposure.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema, type InferParams } from "./params.ts";
@@ -42,6 +42,8 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   | {
       success: false;
       error: string;
+      /** Standard Schema issues, verbatim, when the failure was input validation. */
+      issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
       terminal?: boolean;
@@ -286,7 +288,7 @@ export function createActionResultMessage<TDataContent = never>(
     ...(request.target ? { target: request.target } : {}),
     success: result.success,
     ...("value" in result && result.value !== undefined ? { value: result.value } : {}),
-    ...(!result.success ? { error: result.error } : {}),
+    ...(!result.success ? { error: result.error, ...(result.issues ? { issues: result.issues } : {}) } : {}),
     ...(result.terminal ? { terminal: true } : {}),
     ...(options.outputMessageIndices?.length ? { outputMessageIndices: options.outputMessageIndices } : {}),
   };
@@ -346,6 +348,7 @@ function normalizeActionReturn<T, TDataContent>(
       return {
         success: false,
         error: value.error,
+        ...(value.issues ? { issues: value.issues } : {}),
         ...(value.value !== undefined ? { value: value.value } : {}),
         ...(value.messages !== undefined ? { messages: value.messages } : {}),
         ...(value.terminal ? { terminal: true } : {}),

@@ -3,9 +3,12 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   applyInstanceMessage,
   createAction,
+  createCharter,
+  createMachine,
   createNode,
   createSourceInstance,
   createState,
+  executeCommand,
   hydrateInstance,
   inspectCompiledProjectionTree,
   normalizeSchema,
@@ -14,6 +17,7 @@ import {
   type Instance,
 } from "../../index.ts";
 import { charter } from "./helpers.ts";
+import * as z from "zod";
 
 type Counter = { count: number };
 
@@ -123,5 +127,23 @@ describe("conformance: Standard Schema positions", () => {
     expect(() => createAction({ state: null, name: "opaque", inputSchema: opaqueSchema })).toThrow(
       /no JSON Schema source/,
     );
+  });
+
+  it("rejects command input with Standard Schema issues, verbatim and durable", async () => {
+    const command = createAction({
+      state: null,
+      name: "greet",
+      inputSchema: z.object({ NAME: z.string() }).strict(),
+      run: ({ NAME }) => `hi ${NAME}`,
+    });
+    const node = createNode({ key: "root", commands: [command] });
+    const machine = createMachine({ instance: { id: "r", isSource: true, node }, charter: createCharter({ nodes: [node], commands: [command] }) });
+    const result = await executeCommand(machine, { type: "action", kind: "request", action: "command", name: "greet", input: { NOPE: 1 }, callId: "c1" });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error();
+    expect(result.issues?.map((issue) => issue.path?.map(String).join("."))).toEqual(["NAME", ""]);
+    expect(result.error).toContain("NAME");
+    const recorded = machine.frames.flatMap((frame) => frame.messages).find((m) => m.type === "action" && m.kind === "result");
+    expect(recorded).toMatchObject({ success: false, issues: result.issues });
   });
 });
