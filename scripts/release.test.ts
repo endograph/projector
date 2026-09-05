@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bumpVersion, discoverPublishablePackages, highestVersion, parseArgs, runRelease } from "./release.ts";
+import { bumpVersion, discoverPublishablePackages, highestVersion, parseArgs, runRelease, verifyPublishedVersion, updatePackageVersions } from "./release.ts";
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -196,7 +196,7 @@ describe("release flow", () => {
         "jj git export",
         "git symbolic-ref HEAD refs/heads/main",
         "git reset",
-        "npm pack --dry-run",
+        "bun pm pack --dry-run",
       ]),
     );
   });
@@ -268,9 +268,31 @@ describe("release flow", () => {
     expect(packageJson.version).toBe("0.0.0");
     expect(calls).toContain("bun run typecheck");
     expect(calls).toContain("bun --filter @projectors/core test");
-    expect(calls).toContain("npm pack --dry-run");
+    expect(calls).toContain("bun pm pack --dry-run");
     expect(calls.some((call) => call.startsWith("git commit"))).toBe(false);
     expect(calls.some((call) => call.startsWith("npm publish"))).toBe(false);
+  });
+
+  it.each(["E404", "E401", "E500"])("handles registry %s during first-publication preflight", async (code) => {
+    const root = fixtureRepo();
+    const calls: string[] = [];
+    const base = releaseRunner(calls, { published: false });
+    const runner = (command: string, args: string[]) => {
+      if (command === "npm" && args[0] === "view") {
+        return { status: 1, stdout: JSON.stringify({ error: { code } }), stderr: code };
+      }
+      return base(command, args);
+    };
+    const release = runRelease({ cwd: root, dryRun: true, bump: "patch" }, runner, {
+      bump: async () => "patch", preid: async () => "alpha", confirm: async () => true,
+    });
+    if (code === "E404") {
+      await release;
+      expect(calls).toContain("bun pm pack --dry-run");
+    } else {
+      await expect(release).rejects.toThrow("Unable to read npm version");
+      expect(calls).not.toContain("bun run typecheck");
+    }
   });
 
   it("commits, tags, pushes, publishes, and verifies in order", async () => {
@@ -297,13 +319,17 @@ describe("release flow", () => {
         "git tag -a v0.0.1 -m v0.0.1",
         "git push origin main",
         "git push origin v0.0.1",
-        "npm publish --access public",
       ]),
     );
     expect(calls.indexOf("git tag -a v0.0.1 -m v0.0.1")).toBeGreaterThan(
       calls.indexOf("git commit -m chore(release): v0.0.1"),
     );
-    expect(calls.indexOf("npm publish --access public")).toBeGreaterThan(calls.indexOf("git push origin v0.0.1"));
+    const packed = calls.find((call) => call.startsWith("bun pm pack --filename "))!;
+    const tarball = packed.slice("bun pm pack --filename ".length);
+    expect(tarball).toMatch(/projectors-core-0\.0\.1\.tgz$/);
+    expect(calls.indexOf(packed)).toBeGreaterThan(calls.indexOf("bun install --lockfile-only"));
+    expect(calls.indexOf(packed)).toBeLessThan(calls.indexOf("git commit -m chore(release): v0.0.1"));
+    expect(calls.indexOf(`npm publish ${tarball} --access public`)).toBeGreaterThan(calls.indexOf("git push origin v0.0.1"));
   });
 });
 
@@ -333,16 +359,63 @@ function releaseRunner(calls: string[], state: { published: boolean }) {
     if (command === "git" && joined === "rev-parse HEAD") {
       return { status: 0, stdout: "def\n", stderr: "" };
     }
-    if (command === "npm" && joined === "view @projectors/core version --json") {
+    if (command === "npm" && args[0] === "view") {
       return { status: 0, stdout: JSON.stringify(state.published ? "0.0.1" : "0.0.0"), stderr: "" };
     }
     if (command === "npm" && joined === "whoami") {
       return { status: 0, stdout: "zack\n", stderr: "" };
     }
-    if (command === "npm" && joined === "publish --access public") {
+    if (command === "tar") {
+      return { status: 0, stdout: JSON.stringify({ name: "@projectors/core", version: "0.0.1" }), stderr: "" };
+    }
+    if (command === "npm" && args[0] === "publish") {
       state.published = true;
       return { status: 0, stdout: "", stderr: "" };
     }
     return { status: 0, stdout: "", stderr: "" };
   };
 }
+
+
+describe("registry visibility after publication", () => {
+  it("retries an initially missing exact version without republishing", async () => {
+    let attempts = 0;
+    const calls: string[][] = [];
+    await verifyPublishedVersion((_command, args) => {
+      calls.push(args);
+      return ++attempts < 3
+        ? { status: 1, stdout: JSON.stringify({ error: { code: "E404" } }), stderr: "Not found" }
+        : { status: 0, stdout: JSON.stringify("0.0.4"), stderr: "" };
+    }, "@projectors/aisdk-executor", "0.0.4", { cwd: "/tmp", dryRun: false }, async () => {});
+    expect(attempts).toBe(3);
+    expect(calls.every((args) => args.join(" ") === "view @projectors/aisdk-executor@0.0.4 version --json")).toBe(true);
+  });
+
+  it("bounds retries and explains recovery without another release", async () => {
+    let attempts = 0;
+    await expect(verifyPublishedVersion(() => {
+      attempts++;
+      return { status: 1, stdout: "", stderr: "Not found" };
+    }, "@projectors/aisdk-executor", "0.0.4", { cwd: "/tmp", dryRun: false }, async () => {}))
+      .rejects.toThrow("Do not rerun the release or bump versions");
+    expect(attempts).toBe(12);
+  });
+});
+
+
+it("bumps released workspace references along with package versions", () => {
+  const root = fixtureRepo();
+  const dir = join(root, "packages", "executor");
+  mkdirSync(dir);
+  writeJson(join(dir, "package.json"), {
+    name: "@projectors/executor", version: "0.0.0",
+    dependencies: { "@projectors/core": "workspace:*", zod: "catalog:" },
+    devDependencies: { "@projectors/private-one": "workspace:*" },
+  });
+  updatePackageVersions(discoverPublishablePackages(root), "0.0.5");
+  expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))).toMatchObject({
+    version: "0.0.5",
+    dependencies: { "@projectors/core": "workspace:0.0.5", zod: "catalog:" },
+    devDependencies: { "@projectors/private-one": "workspace:*" },
+  });
+});

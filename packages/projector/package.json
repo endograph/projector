@@ -1,6 +1,6 @@
 {
   "name": "@projectors/core",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "module": "index.ts",
   "type": "module",
   "license": "MIT",
@@ -26,7 +26,7 @@
     "typecheck": "tsgo"
   },
   "devDependencies": {
-    "@projectors/aisdk-executor": "workspace:*",
+    "@projectors/aisdk-executor": "workspace:0.0.5",
     "@projectors/livekit-realtime-executor": "workspace:*",
     "@types/bun": "latest",
     "vitest": "^4.0.17",
