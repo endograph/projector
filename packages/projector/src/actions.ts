@@ -1,7 +1,14 @@
-import { z } from "zod";
+import {
+  normalizeSchema,
+  schemaFromJsonSchema,
+  type AnySchema,
+  type InferSchemaValue,
+  type SchemaIssue,
+  type SchemaTransformError,
+} from "./schema.ts";
 import { markActionExposure } from "./action-exposure.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
-import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema } from "./params.ts";
+import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema, type InferParams } from "./params.ts";
 import type {
   Action,
   ActionRequestMessage,
@@ -41,6 +48,8 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   | {
       success: false;
       error: string;
+      /** Canonical validator issues when the failure was input validation. */
+      issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
       terminal?: boolean;
@@ -58,7 +67,7 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   __dataContent?: TDataContent;
 };
 
-type InputOf<TSchema> = TSchema extends z.ZodType<infer TInput> ? TInput : unknown;
+type InputOf<TSchema> = TSchema extends AnySchema ? InferSchemaValue<TSchema> : unknown;
 type StateOf<TState> = TState extends StateDescriptor<infer S> ? S : undefined;
 
 type ActionStateRequirement = StateDescriptor<any> | null;
@@ -82,7 +91,7 @@ type ActionConfig<
     }
   | {
       executorOwned?: false;
-      run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, z.output<TParams>>) => O | Promise<O>;
+      run?: (input: I, ctx: ActionContext<StateOf<TState>, TDataContent, InferParams<TParams>>) => O | Promise<O>;
     }
 );
 
@@ -115,7 +124,7 @@ type CreatedAction<
 type ActionWithSchema<
   TState extends ActionStateRequirement,
   TParams extends AnyParamsSchema,
-  TSchema extends z.ZodType,
+  TSchema extends AnySchema,
   O,
   TName extends string,
   TDataContent,
@@ -126,12 +135,14 @@ type ActionWithSchema<
 export function createAction<
   const TName extends string,
   const TState extends ActionStateRequirement,
-  const TSchema extends z.ZodType,
+  const TSchema extends AnySchema,
   const TParams extends AnyParamsSchema = typeof emptyParamsSchema,
   O = unknown,
   TDataContent = never,
 >(
-  action: ActionConfig<TState, TParams, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
+  action: ActionConfig<TState, TParams, InputOf<TSchema>, O, TName, TDataContent>
+    & { inputSchema: TSchema }
+    & SchemaTransformError<TSchema>,
 ): ActionWithSchema<TState, TParams, TSchema, O, TName, TDataContent>;
 export function createAction<
   const TName extends string,
@@ -151,6 +162,7 @@ export function createAction(action: AnyAction): AnyAction {
     assertProjectorIdentifier(action.state.key, "State key");
   }
   action.params = normalizeParamsSchema(action.params);
+  if (action.inputSchema) normalizeSchema(action.inputSchema);
   return action;
 }
 
@@ -284,7 +296,7 @@ export function createActionResultMessage<TDataContent = never>(
     ...(request.target ? { target: request.target } : {}),
     success: result.success,
     ...("value" in result && result.value !== undefined ? { value: result.value } : {}),
-    ...(!result.success ? { error: result.error } : {}),
+    ...(!result.success ? { error: result.error, ...(result.issues ? { issues: result.issues } : {}) } : {}),
     ...(result.terminal ? { terminal: true } : {}),
     ...(options.outputMessageIndices?.length ? { outputMessageIndices: options.outputMessageIndices } : {}),
   };
@@ -344,6 +356,7 @@ function normalizeActionReturn<T, TDataContent>(
       return {
         success: false,
         error: value.error,
+        ...(value.issues ? { issues: value.issues } : {}),
         ...(value.value !== undefined ? { value: value.value } : {}),
         ...(value.messages !== undefined ? { messages: value.messages } : {}),
         ...(value.terminal ? { terminal: true } : {}),
@@ -505,19 +518,24 @@ export function createGetStateAction(
   unknown,
   typeof GET_STATE_ACTION_NAME
 > {
-  const inputSchema = z.object({
-    address: z.string(),
+  const inputSchema = schemaFromJsonSchema<{ address: string }>({
+    type: "object",
+    properties: { address: { type: "string" } },
+    required: ["address"],
+    additionalProperties: false,
   });
   return {
     state: null,
     name: GET_STATE_ACTION_NAME,
     description: "Retrieve a projected state value by exact address.",
-    inputSchema: inputSchema as z.ZodType<unknown>,
+    inputSchema,
     run: (input, ctx) => {
       if (!ctx.getState) {
         throw new Error("No getState handler is available for this action context");
       }
-      const { address } = inputSchema.parse(input);
+      const schema = normalizeSchema(inputSchema);
+      schema.assert(input);
+      const { address } = input as { address: string };
       return ctx.getState(address);
     },
   };

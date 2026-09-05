@@ -1,3 +1,9 @@
+import {
+  normalizeSchema,
+  type AnySchema,
+  type InferSchemaValue,
+  type SchemaTransformError,
+} from "./schema.ts";
 import type {
   ActionConfigEntry,
   ActionPart,
@@ -212,9 +218,11 @@ export function isNode<TDataContent = never>(
  * schemas by reference, so sharing one created descriptor is the way to
  * satisfy it).
  */
-export function createState<S>(
-  descriptor: StateDescriptor<S>,
-): NormalizedStateDescriptor<S> {
+export function createState<const TSchema extends AnySchema>(
+  descriptor: Omit<StateDescriptor<InferSchemaValue<TSchema>>, "schema">
+    & { schema: TSchema }
+    & SchemaTransformError<TSchema>,
+): NormalizedStateDescriptor<InferSchemaValue<TSchema>> {
   return normalizeStateDescriptor(descriptor);
 }
 
@@ -233,6 +241,7 @@ export function normalizeStateDescriptor<S>(
   descriptor: StateDescriptor<S>,
 ): NormalizedStateDescriptor<S> {
   assertProjectorIdentifier(descriptor.key, "State key");
+  normalizeSchema(descriptor.schema);
   const scope = descriptor.scope ?? "hoist";
   const onInitConflict = descriptor.onInitConflict ?? "replace";
   if (
@@ -340,6 +349,7 @@ export function createNode<
     throw new Error("Node requires key or name");
   }
   assertProjectorIdentifier(key, "Node key");
+  if (config.output?.schema) normalizeSchema(config.output.schema);
 
   return {
     [NODE_BRAND]: true,

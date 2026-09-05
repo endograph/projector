@@ -18,14 +18,11 @@
     "@ai-sdk/anthropic": "catalog:",
     "@ai-sdk/openai": "catalog:",
     "ai": "catalog:",
-    "@projectors/core": "workspace:*"
+    "@projectors/core": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "vitest": "^4.0.17",
-    "zod": "^4.0.0"
-  },
-  "peerDependencies": {
-    "zod": "catalog:"
+    "vitest": "^4.0.17"
   }
 }

@@ -96,6 +96,80 @@ describe("conformance: work scheduling", () => {
     await expect(drain(runMachine(machine, { scheduleWork: false }))).resolves.toEqual([]);
   });
 
+  it("schedules and absorbs work across a horizon while activations see history from it", async () => {
+    const { executor, requests } = createRecordingExecutor();
+    const root = createNode({
+      key: "root",
+      runtime: { type: "generator", trigger: { type: "actor-frame" } },
+    });
+    const machine = createMachine({
+      id: "horizon-demo",
+      instance: { id: "r", isSource: true, node: root },
+      charter: charter(),
+      executor,
+    });
+    const texts = (history: FrameMessage[]) => history.map((message) => ("text" in message ? message.text : message.type));
+
+    machine.enqueueFrame({ messages: [{ ...textUserMessage("old") }] });
+    await drain(runMachine(machine));
+    expect(texts(requests[0]!.inference.history)).toContain("old");
+
+    // The horizon's frame is an actor frame like any other: it schedules work.
+    machine.enqueueFrame({ messages: [{ type: "horizon" }, { ...textUserMessage("summary") }] });
+    await drain(runMachine(machine));
+    expect(requests).toHaveLength(2);
+    // An activation compiled after the horizon sees history from it.
+    expect(requests[1]!.inference.history[0]).toEqual({ type: "horizon" });
+    expect(texts(requests[1]!.inference.history)).not.toContain("old");
+    // The fold kept every frame: the log is untouched.
+    expect(machine.frames.some((frame) => frame.messages.some((message) => "text" in message && message.text === "old"))).toBe(true);
+  });
+
+  it("points each completion at the last result its step produced", async () => {
+    const generator = () =>
+      createNode({ key: "root", runtime: { type: "generator", trigger: { type: "actor-frame" } } });
+    const completionOf = (frames: Frame[]) => {
+      for (const frame of frames) {
+        const index = frame.messages.findIndex((m) => m.type === "work" && m.kind === "completion");
+        if (index !== -1) return { frame, completion: frame.messages[index] as FrameMessage & { lastResult?: { frameId: string; messageIndex: number } } };
+      }
+      throw new Error("no completion");
+    };
+
+    // Final text: the pointer lands on the assistant message.
+    const text = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({ completionReason: "done", value: "all done" })).executor,
+    });
+    text.enqueueFrame({ messages: [{ ...textUserMessage("go") }] });
+    const t = completionOf(await drain(runMachine(text)));
+    expect(t.completion.lastResult).toEqual({ frameId: t.frame.id, messageIndex: expect.any(Number) });
+    expect(t.frame.messages[t.completion.lastResult!.messageIndex]).toMatchObject({ type: "assistant", text: "all done" });
+
+    // Terminal action: the pointer lands on its result, even with later frames from the executor.
+    const terminal = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({
+        completionReason: "terminal-action",
+        frames: [{ messages: [{ type: "action", kind: "result", action: "tool", name: "resolve", callId: "c1", success: true, value: "resolved", terminal: true }] }],
+      })).executor,
+    });
+    terminal.enqueueFrame({ messages: [{ ...textUserMessage("finish") }] });
+    const r = completionOf(await drain(runMachine(terminal)));
+    expect(r.frame.messages[r.completion.lastResult!.messageIndex]).toMatchObject({ type: "action", kind: "result", name: "resolve", value: "resolved" });
+
+    // Nothing produced: no pointer.
+    const empty = createMachine({
+      instance: { id: "r", isSource: true, node: generator() },
+      charter: charter(),
+      executor: createRecordingExecutor(() => ({ completionReason: "done" })).executor,
+    });
+    empty.enqueueFrame({ messages: [{ ...textUserMessage("silence") }] });
+    expect(completionOf(await drain(runMachine(empty))).completion.lastResult).toBeUndefined();
+  });
+
   it("records terminal-action completions from the executor verbatim", async () => {
     const { executor, requests } = createRecordingExecutor(() => ({
       completionReason: "terminal-action",

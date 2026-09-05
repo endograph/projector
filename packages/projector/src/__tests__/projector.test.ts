@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import {
+  normalizeSchema,
   actorMessages,
   appendState,
   compileProjection,
@@ -513,9 +514,7 @@ describe("params", () => {
 
     const hydrated = hydrateInstance(serialized, appCharter);
     expect(hydrated.params).toEqual({ userId: "user_123" });
-    expect(hydrated.node.params.parse({ userId: "user_456" })).toEqual({
-      userId: "user_456",
-    });
+    expect(normalizeSchema(hydrated.node.params).accepts({ userId: "user_456" })).toBe(true);
   });
 });
 
@@ -3607,7 +3606,7 @@ describe("serialization and refs", () => {
         serializedInline.node.states![0]!,
         registry,
       );
-      expect(hydratedState.schema.parse(3)).toBe(3);
+      expect(normalizeSchema(hydratedState.schema).accepts(3)).toBe(true);
     }
 
     const serializedRegistered = serializeInstance(
@@ -3617,7 +3616,7 @@ describe("serialization and refs", () => {
     expect(serializedRegistered.node).toBe("registered");
 
     const hydratedInline = hydrateInstance(serializedInline, registry);
-    expect(hydratedInline.node.states[0]?.schema.parse(4)).toBe(4);
+    expect(normalizeSchema(hydratedInline.node.states[0]!.schema).accepts(4)).toBe(true);
   });
 
   it("serializes inline output schema and rejects inline output mappers", () => {
@@ -3639,9 +3638,7 @@ describe("serialization and refs", () => {
     }
     expect(serialized.node.output?.audience).toBe("broadcast");
     const hydrated = hydrateInstance(serialized, registry);
-    expect(hydrated.node.output?.schema?.parse({ answer: "ok" })).toEqual({
-      answer: "ok",
-    });
+    expect(normalizeSchema(hydrated.node.output!.schema!).accepts({ answer: "ok" })).toBe(true);
 
     const mapped = createNode({
       key: "mappedOutput",
@@ -3696,7 +3693,7 @@ function getStateJsonSchema(
   if (!getState?.inputSchema) {
     throw new Error("Expected getState tool schema");
   }
-  return z.toJSONSchema(getState.inputSchema);
+  return normalizeSchema(getState.inputSchema).jsonSchema();
 }
 
 async function flushPromises(): Promise<void> {

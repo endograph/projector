@@ -1,5 +1,5 @@
-import type { z } from "zod";
-import type { AnyParamsSchema, JsonObject } from "./params.ts";
+import type { Schema, SchemaIssue } from "./schema.ts";
+import type { AnyParamsSchema, InferParams, JsonObject } from "./params.ts";
 
 export type Ref = string;
 
@@ -153,6 +153,22 @@ export type AssistantMessage<TDataContent = never> = {
 export type ActorMessage<TDataContent = never> =
   UserMessage<TDataContent> | AssistantMessage<TDataContent>;
 
+/**
+ * A history boundary. For a generator that can see it, rendered history
+ * begins at the frame carrying it; earlier frames are not projected. They
+ * stay in the log and in the fold — state is unaffected — and work
+ * scheduling and absorption ignore horizons entirely: history is what the
+ * model sees, work is durable state. Messages after the horizon in the same
+ * frame render normally, so an app that wants a summary puts it there or in
+ * the next frame; core has no opinion about what follows. Audience defaults
+ * to broadcast, like a user message; a targeted horizon cuts only its
+ * targets' histories.
+ */
+export type HorizonMessage = {
+  type: "horizon";
+  audience?: Audience;
+};
+
 export type AnyActorMessage = ActorMessage<any>;
 
 /**
@@ -239,7 +255,7 @@ export type StateProjection = {
 
 export type StateDescriptor<S = unknown> = {
   key: string;
-  schema: z.ZodType<S>;
+  schema: Schema<S>;
   init?: S | (() => S);
   scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
@@ -363,12 +379,12 @@ export type Action<
   params?: TParams;
   name: TName;
   description?: string;
-  inputSchema?: z.ZodType<I>;
+  inputSchema?: Schema<I>;
   /** The executor must supply this action's native tool representation and execution. */
   executorOwned?: boolean;
   run?: (
     input: I,
-    ctx: ActionContext<S, TDataContent, z.output<TParams>>,
+    ctx: ActionContext<S, TDataContent, InferParams<TParams>>,
   ) => O | Promise<O>;
 };
 
@@ -377,7 +393,7 @@ export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
   params?: TParams;
   name: string;
   description?: string;
-  inputSchema?: z.ZodType<any>;
+  inputSchema?: Schema<any>;
   executorOwned?: boolean;
   run?: (input: any, ctx: any) => any | Promise<any>;
 };
@@ -736,10 +752,24 @@ export type WorkActivationMessage = {
   continuationState?: unknown;
 };
 
+/** A pointer to one message in the log. */
+export type MessageRef = {
+  frameId: string;
+  messageIndex: number;
+};
+
 export type WorkCompletionMessage = {
   type: "work";
   kind: "completion";
   activationId: string;
+  /**
+   * The last result-bearing message the completing step produced — an
+   * action result (a terminal action's included) or an assistant message —
+   * as a pointer into the completion's own frame. Most apps treat it as the
+   * activation's result; apps with another convention read the frames
+   * themselves. Absent when the step produced neither (cancelled, empty).
+   */
+  lastResult?: MessageRef;
   /**
    * The generator whose work completed. Optional for completions that pair
    * with an activation message already in the log; required to record a
@@ -843,6 +873,8 @@ export type ActionResultMessage<TDataContent = never> = {
   success: boolean;
   value?: unknown;
   error?: string;
+  /** Canonical validator issues when the failure was input validation. */
+  issues?: readonly SchemaIssue[];
   terminal?: boolean;
   outputMessageIndices?: number[];
   audience?: Audience;
@@ -861,7 +893,10 @@ export type ExecuteActionResult<T = unknown, TDataContent = never> =
     }
   | {
       success: false;
+      /** Human-readable rendering; for input rejections, formatSchemaIssues(issues). */
       error: string;
+      /** Canonical validator issues when the failure was input validation. */
+      issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
       terminal?: boolean;
@@ -873,6 +908,7 @@ export type FrameMessage<TDataContent = never> = (
   | ActionMessage<TDataContent>
   | InstanceMessage<TDataContent>
   | WorkMessage
+  | HorizonMessage
 ) &
   Record<string, unknown>;
 
@@ -940,7 +976,7 @@ export type Frame<TDataContent = never> = FrameDraft<TDataContent> & {
  */
 export type OutputConfig<TDataContent = never> = {
   audience?: Audience;
-  schema?: z.ZodType<TDataContent>;
+  schema?: Schema<TDataContent>;
   mapTextBlock?: (text: string) => TDataContent;
 };
 
@@ -1025,7 +1061,7 @@ export type ProjectorExecutor<TDataContent = never> = {
    * Validates each node's `executorConfig[identity.name]` at machine creation
    * so misconfiguration fails at bind time, not mid-activation.
    */
-  configSchema?: z.ZodType<unknown>;
+  configSchema?: Schema;
   run(
     request: ExecutorRunRequest<TDataContent>,
   ): ExecutorRunResult<TDataContent> | Promise<ExecutorRunResult<TDataContent>>;
@@ -1044,7 +1080,7 @@ export type Charter<
   version?: string;
   params: TParams;
   /** The log's data-content vocabulary (see CharterConfig.dataContent). */
-  dataContent?: z.ZodType<TDataContent>;
+  dataContent?: Schema<TDataContent>;
   nodes: Record<string, Node<TDataContent>>;
   /** Unified action registry; tools and commands share one namespace. */
   actions: Record<string, AnyAction>;
@@ -1072,7 +1108,7 @@ export type CharterConfig<TDataContent = never> = {
    * sole inference site — otherwise a mismatched node's data type would union
    * into TDataContent instead of failing against it.
    */
-  dataContent?: z.ZodType<TDataContent>;
+  dataContent?: Schema<TDataContent>;
   nodes: readonly Node<NoInfer<TDataContent>>[];
   /** Sugar: registered into `actions` alongside `commands`. */
   tools?: readonly AnyAction[];

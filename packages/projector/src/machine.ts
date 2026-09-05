@@ -1,3 +1,4 @@
+import { formatSchemaIssues, normalizeSchema } from "./schema.ts";
 import {
   assertNodeActionStateCompatibility,
   createActionTerminalMessages,
@@ -74,6 +75,7 @@ import type {
   WorkActivationMessage,
   WorkCompletionMessage,
   WorkCompletionReason,
+  MessageRef,
 } from "./types.ts";
 import { compileProjection } from "./compile.ts";
 import {
@@ -242,7 +244,7 @@ export function createMachine<TDataContent = never>({
   };
   assertUniqueInstanceIds(machine.instance);
   assertHasSourceInstance(machine.instance);
-  charter.params.parse(resolveEffectiveParams([machine.instance]));
+  normalizeSchema(charter.params).assert(resolveEffectiveParams([machine.instance]));
   validateMachineActionStateCompatibility(machine.instance, machine.charter);
   validateExecutorConfig(machine.instance, machine.charter, executor);
   return machine;
@@ -271,7 +273,7 @@ function validateExecutorConfig<TDataContent>(
     const config = node.executorConfig?.[namespace];
     if (config !== undefined) {
       try {
-        schema.parse(config);
+        normalizeSchema(schema).assert(config);
       } catch (error) {
         throw new Error(
           `Invalid executorConfig["${namespace}"] on node "${node.key}": ${
@@ -806,15 +808,15 @@ export async function executeCommand<
 
   let input = message.input;
   if (resolved.command.inputSchema) {
-    const parsed = resolved.command.inputSchema.safeParse(input);
-    if (!parsed.success) {
+    const checked = normalizeSchema(resolved.command.inputSchema).check(input);
+    if (checked.issues) {
       return enqueueImmediateActionResult(machine, message, {
         success: false,
-        error: parsed.error.message,
+        error: formatSchemaIssues(checked.issues),
+        issues: checked.issues,
         callId: message.callId,
       });
     }
-    input = parsed.data;
   }
 
   const projectorMachine = machine as ProjectorMachine<TDataContent>;
@@ -1240,7 +1242,16 @@ function enqueueActivationStep<TDataContent>(
   if (result.value !== undefined) {
     messages.push(assistantMessageFromTextOutput(result.value, output) as FrameMessage<TDataContent>);
   }
-  messages.push(...completionMessages);
+  // This step's completion points at the last result it produced (an action
+  // result or an assistant message) so hosts need not scan for it.
+  const lastResult = lastResultRef(stepFrameId, messages);
+  messages.push(
+    ...completionMessages.map((message) =>
+      lastResult && isWorkCompletionMessage(message) && message.activationId === activation.activationId
+        ? ({ ...message, lastResult } as FrameMessage<TDataContent>)
+        : message,
+    ),
+  );
   if (continues) {
     messages.push({
       type: "work",
@@ -1259,6 +1270,19 @@ function enqueueActivationStep<TDataContent>(
     messages,
   }, producer, execution, machine.runner), machine.charter) as Frame<TDataContent>;
   machine.enqueueFrame(frame);
+}
+
+function lastResultRef<TDataContent>(
+  frameId: string,
+  messages: readonly FrameMessage<TDataContent>[],
+): MessageRef | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.type === "assistant" || (message.type === "action" && message.kind === "result")) {
+      return { frameId, messageIndex: index };
+    }
+  }
+  return undefined;
 }
 
 function mergeExecutionReports(
@@ -1484,7 +1508,7 @@ export function applyInstanceMessage<TDataContent>(
     const address = { instanceId: message.instanceId, stateKey: message.stateKey };
     const state = findResolvedState(root, address, options);
     const next = applyStateUpdate(state.container.value, message.update);
-    state.descriptor.schema.parse(next);
+    normalizeSchema(state.descriptor.schema).assert(next);
     // Realization is a logged write: an unrealized state's container attaches
     // here, at the instance resolveStates derived for the declaring
     // contributor's scope, with the updater having seen init as `current`.
@@ -1649,7 +1673,7 @@ function validateStateValue(
   value: unknown,
 ): void {
   const state = findResolvedState(root, address);
-  state.descriptor.schema.parse(value);
+  normalizeSchema(state.descriptor.schema).assert(value);
 }
 
 function findResolvedState(

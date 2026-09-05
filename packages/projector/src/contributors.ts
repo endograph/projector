@@ -1,3 +1,4 @@
+import { normalizeSchema } from "./schema.ts";
 import { createNode } from "./create.ts";
 // Function-level cycle with discriminator-eval.ts (it reads contributor
 // params); safe because both modules only declare functions at init.
@@ -93,8 +94,8 @@ export function createRoot<
   instances: Instance<TDataContent>[],
   params: InputCharterParams<TCharter>,
 ): Instance<TDataContent> {
-  const parsedParams = charter.params.parse(params);
-  return createRootInstance(instances, parsedParams);
+  normalizeSchema(charter.params).assert(params);
+  return createRootInstance(instances, params as JsonObject);
 }
 
 export function createRootInstance<TDataContent = never>(
