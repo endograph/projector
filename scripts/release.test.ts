@@ -196,7 +196,7 @@ describe("release flow", () => {
         "jj git export",
         "git symbolic-ref HEAD refs/heads/main",
         "git reset",
-        "npm pack --dry-run",
+        "bun pm pack --dry-run",
       ]),
     );
   });
@@ -268,9 +268,31 @@ describe("release flow", () => {
     expect(packageJson.version).toBe("0.0.0");
     expect(calls).toContain("bun run typecheck");
     expect(calls).toContain("bun --filter @projectors/core test");
-    expect(calls).toContain("npm pack --dry-run");
+    expect(calls).toContain("bun pm pack --dry-run");
     expect(calls.some((call) => call.startsWith("git commit"))).toBe(false);
     expect(calls.some((call) => call.startsWith("npm publish"))).toBe(false);
+  });
+
+  it.each(["E404", "E401", "E500"])("handles registry %s during first-publication preflight", async (code) => {
+    const root = fixtureRepo();
+    const calls: string[] = [];
+    const base = releaseRunner(calls, { published: false });
+    const runner = (command: string, args: string[]) => {
+      if (command === "npm" && args[0] === "view") {
+        return { status: 1, stdout: JSON.stringify({ error: { code } }), stderr: code };
+      }
+      return base(command, args);
+    };
+    const release = runRelease({ cwd: root, dryRun: true, bump: "patch" }, runner, {
+      bump: async () => "patch", preid: async () => "alpha", confirm: async () => true,
+    });
+    if (code === "E404") {
+      await release;
+      expect(calls).toContain("bun pm pack --dry-run");
+    } else {
+      await expect(release).rejects.toThrow("Unable to read npm version");
+      expect(calls).not.toContain("bun run typecheck");
+    }
   });
 
   it("commits, tags, pushes, publishes, and verifies in order", async () => {
@@ -297,13 +319,17 @@ describe("release flow", () => {
         "git tag -a v0.0.1 -m v0.0.1",
         "git push origin main",
         "git push origin v0.0.1",
-        "npm publish --access public",
       ]),
     );
     expect(calls.indexOf("git tag -a v0.0.1 -m v0.0.1")).toBeGreaterThan(
       calls.indexOf("git commit -m chore(release): v0.0.1"),
     );
-    expect(calls.indexOf("npm publish --access public")).toBeGreaterThan(calls.indexOf("git push origin v0.0.1"));
+    const packed = calls.find((call) => call.startsWith("bun pm pack --filename "))!;
+    const tarball = packed.slice("bun pm pack --filename ".length);
+    expect(tarball).toMatch(/projectors-core-0\.0\.1\.tgz$/);
+    expect(calls.indexOf(packed)).toBeGreaterThan(calls.indexOf("bun install --lockfile-only"));
+    expect(calls.indexOf(packed)).toBeLessThan(calls.indexOf("git commit -m chore(release): v0.0.1"));
+    expect(calls.indexOf(`npm publish ${tarball} --access public`)).toBeGreaterThan(calls.indexOf("git push origin v0.0.1"));
   });
 });
 
@@ -339,7 +365,7 @@ function releaseRunner(calls: string[], state: { published: boolean }) {
     if (command === "npm" && joined === "whoami") {
       return { status: 0, stdout: "zack\n", stderr: "" };
     }
-    if (command === "npm" && joined === "publish --access public") {
+    if (command === "npm" && args[0] === "publish") {
       state.published = true;
       return { status: 0, stdout: "", stderr: "" };
     }

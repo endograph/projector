@@ -1,5 +1,6 @@
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -228,14 +229,14 @@ async function runReleaseInner(context: ReleaseContext, prompter: Prompter): Pro
     fail(context, "Worktree must be clean before release.");
   }
 
-  const npmVersions = new Map<string, string>();
+  const npmVersions = new Map<string, string | undefined>();
   for (const pkg of packages) {
-    npmVersions.set(pkg.name, getNpmVersion(runner, pkg.name, options));
+    npmVersions.set(pkg.name, getNpmVersion(runner, pkg.name, options, true));
   }
 
   const bump = options.bump ?? (await prompter.bump());
   const preid = bump === "prerelease" ? options.preid ?? (await prompter.preid()) : options.preid;
-  const baseVersion = highestVersion([...packages.map((pkg) => pkg.version), ...npmVersions.values()]);
+  const baseVersion = highestVersion([...packages.map((pkg) => pkg.version), ...[...npmVersions.values()].filter((version): version is string => version !== undefined)]);
   const targetVersion = bumpVersion(baseVersion, bump, preid);
   context.targetVersion = targetVersion;
   const tag = `v${targetVersion}`;
@@ -262,7 +263,7 @@ async function runReleaseInner(context: ReleaseContext, prompter: Prompter): Pro
 
   context.stage = "verify-version";
   runVerification(context, packages);
-  runPackDryRun(context, packages);
+  const tarballs = packPackages(context, packages);
 
   context.stage = "commit";
   const filesToCommit = [...packages.map((pkg) => relative(options.cwd, pkg.packageJsonPath)), "bun.lock"];
@@ -281,7 +282,7 @@ async function runReleaseInner(context: ReleaseContext, prompter: Prompter): Pro
 
   context.stage = "publish";
   for (const pkg of packages) {
-    checkedRun(context, "npm", publishArgs(options), { cwd: pkg.dir, stdio: "inherit" });
+    checkedRun(context, "npm", publishArgs(options, tarballs.get(pkg.name)!), { cwd: pkg.dir, stdio: "inherit" });
     context.publishedPackages.push(pkg.name);
   }
 
@@ -292,6 +293,8 @@ async function runReleaseInner(context: ReleaseContext, prompter: Prompter): Pro
       fail(context, `${pkg.name} published version ${publishedVersion}, expected ${targetVersion}.`);
     }
   }
+
+  rmSync(dirname(tarballs.values().next().value!), { recursive: true, force: true });
 
   const commitHash = capture(runner, "git", ["rev-parse", "HEAD"], { cwd: options.cwd }).trim();
   console.log(`Released ${tag} from ${commitHash}.`);
@@ -396,16 +399,35 @@ function ensureNpmAuth(context: ReleaseContext): void {
 
 function runPackDryRun(context: ReleaseContext, packages: WorkspacePackage[]): void {
   for (const pkg of packages) {
-    checkedRun(context, "npm", registryArgs(["pack", "--dry-run"], context.options), { cwd: pkg.dir });
+    checkedRun(context, "bun", ["pm", "pack", "--dry-run"], { cwd: pkg.dir });
   }
 }
 
-function getNpmVersion(runner: CommandRunner, packageName: string, options: ReleaseOptions): string {
+function packPackages(context: ReleaseContext, packages: WorkspacePackage[]): Map<string, string> {
+  const directory = mkdtempSync(join(tmpdir(), "projectors-release-"));
+  console.log(`Packing release tarballs into ${directory}`);
+  const tarballs = new Map<string, string>();
+  for (const pkg of packages) {
+    const path = join(directory, `${pkg.name.replace(/^@/, "").replaceAll("/", "-")}-${context.targetVersion}.tgz`);
+    checkedRun(context, "bun", ["pm", "pack", "--filename", path], { cwd: pkg.dir });
+    tarballs.set(pkg.name, path);
+  }
+  return tarballs;
+}
+
+function getNpmVersion(runner: CommandRunner, packageName: string, options: ReleaseOptions, allowMissing = false): string | undefined {
   const result = runner("npm", registryArgs(["view", packageName, "version", "--json"], options), {
     cwd: options.cwd,
     allowFailure: true,
   });
   if (result.status !== 0) {
+    let code: unknown;
+    try {
+      code = JSON.parse(result.stdout).error?.code;
+    } catch {
+      // Only a structured npm E404 means this may be a first publication.
+    }
+    if (allowMissing && code === "E404") return undefined;
     throw new ReleaseError(`Unable to read npm version for ${packageName}: ${result.stderr.trim()}`, "preflight");
   }
   const parsed = JSON.parse(result.stdout.trim()) as unknown;
@@ -442,7 +464,7 @@ function updatePackageVersions(packages: WorkspacePackage[], targetVersion: stri
 
 function printSummary(
   packages: WorkspacePackage[],
-  npmVersions: Map<string, string>,
+  npmVersions: Map<string, string | undefined>,
   bump: Bump,
   preid: string | undefined,
   targetVersion: string,
@@ -459,7 +481,7 @@ function printSummary(
   console.log(`Target version: ${targetVersion}`);
   console.log("Packages:");
   for (const pkg of packages) {
-    console.log(`- ${pkg.name}: local ${pkg.version}, npm ${npmVersions.get(pkg.name) ?? "<unknown>"}`);
+    console.log(`- ${pkg.name}: local ${pkg.version}, npm ${npmVersions.get(pkg.name) ?? "<unpublished>"}`);
   }
   console.log("");
 }
@@ -531,8 +553,8 @@ function registryArgs(args: string[], options: ReleaseOptions): string[] {
   return options.registry ? [...args, "--registry", options.registry] : args;
 }
 
-function publishArgs(options: ReleaseOptions): string[] {
-  return registryArgs(["publish", "--access", "public"], options);
+function publishArgs(options: ReleaseOptions, tarball: string): string[] {
+  return registryArgs(["publish", tarball, "--access", "public"], options);
 }
 
 async function promptBump(): Promise<Bump> {
