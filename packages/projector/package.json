@@ -29,10 +29,11 @@
     "@projectors/aisdk-executor": "workspace:*",
     "@projectors/livekit-realtime-executor": "workspace:*",
     "@types/bun": "latest",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "zod": "^4.4.3"
   },
   "dependencies": {
-    "@standard-schema/spec": "^1.1.0",
-    "zod": "^4.4.3"
+    "@cfworker/json-schema": "^4.1.1",
+    "@standard-schema/spec": "^1.1.0"
   }
 }

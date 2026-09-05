@@ -94,8 +94,8 @@ export function createRoot<
   instances: Instance<TDataContent>[],
   params: InputCharterParams<TCharter>,
 ): Instance<TDataContent> {
-  const parsedParams = normalizeSchema(charter.params).parse(params);
-  return createRootInstance(instances, parsedParams);
+  normalizeSchema(charter.params).assert(params);
+  return createRootInstance(instances, params as JsonObject);
 }
 
 export function createRootInstance<TDataContent = never>(

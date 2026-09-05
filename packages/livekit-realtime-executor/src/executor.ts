@@ -377,15 +377,13 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       );
     }
 
-    let parsedInput = input;
     if (action.inputSchema) {
-      const parsed = normalizeSchema(action.inputSchema).validate(input);
-      if (parsed.issues) this.recordFailedToolInvocation(name, input, callId, new SchemaError(parsed.issues));
-      parsedInput = parsed.value;
+      const checked = normalizeSchema(action.inputSchema).check(input);
+      if (checked.issues) this.recordFailedToolInvocation(name, input, callId, new SchemaError(checked.issues));
     }
 
     const actionRequest = {
-      ...createToolActionRequest(name, parsedInput, callId),
+      ...createToolActionRequest(name, input, callId),
       source: { external: true },
     };
     const context: ActionContext<unknown, TDataContent> =
@@ -395,7 +393,7 @@ export class LiveKitRealtimeConnection<TDataContent = never> {
       context.getState ??= (address) => this.getRetrievableState(address);
     }
     const runAction = this.config.runAction;
-    const runInput: RunActionInput<TDataContent> = { action, input: parsedInput, context, liveKitContext };
+    const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
     const result = await executeActionInvocation({
       request: actionRequest,
       throwErrors: true,

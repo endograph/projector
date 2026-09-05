@@ -1,4 +1,9 @@
-import { normalizeSchema } from "./schema.ts";
+import {
+  normalizeSchema,
+  type AnySchema,
+  type InferSchemaValue,
+  type SchemaTransformError,
+} from "./schema.ts";
 import type {
   ActionConfigEntry,
   ActionPart,
@@ -213,9 +218,11 @@ export function isNode<TDataContent = never>(
  * schemas by reference, so sharing one created descriptor is the way to
  * satisfy it).
  */
-export function createState<S>(
-  descriptor: StateDescriptor<S>,
-): NormalizedStateDescriptor<S> {
+export function createState<const TSchema extends AnySchema>(
+  descriptor: Omit<StateDescriptor<InferSchemaValue<TSchema>>, "schema">
+    & { schema: TSchema }
+    & SchemaTransformError<TSchema>,
+): NormalizedStateDescriptor<InferSchemaValue<TSchema>> {
   return normalizeStateDescriptor(descriptor);
 }
 

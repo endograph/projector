@@ -1,5 +1,11 @@
-import * as z from "zod";
-import { normalizeSchema, type InferSchemaOutput, type Schema, type SchemaIssue } from "./schema.ts";
+import {
+  normalizeSchema,
+  schemaFromJsonSchema,
+  type AnySchema,
+  type InferSchemaValue,
+  type SchemaIssue,
+  type SchemaTransformError,
+} from "./schema.ts";
 import { markActionExposure } from "./action-exposure.ts";
 import { assertProjectorIdentifier } from "./identifiers.ts";
 import { emptyParamsSchema, normalizeParamsSchema, type AnyParamsSchema, type InferParams } from "./params.ts";
@@ -42,7 +48,7 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   | {
       success: false;
       error: string;
-      /** Standard Schema issues, verbatim, when the failure was input validation. */
+      /** Canonical validator issues when the failure was input validation. */
       issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
@@ -61,7 +67,7 @@ export type ActionResultEnvelope<T = unknown, TDataContent = never> = (
   __dataContent?: TDataContent;
 };
 
-type InputOf<TSchema> = TSchema extends Schema ? InferSchemaOutput<TSchema> : unknown;
+type InputOf<TSchema> = TSchema extends AnySchema ? InferSchemaValue<TSchema> : unknown;
 type StateOf<TState> = TState extends StateDescriptor<infer S> ? S : undefined;
 
 type ActionStateRequirement = StateDescriptor<any> | null;
@@ -118,7 +124,7 @@ type CreatedAction<
 type ActionWithSchema<
   TState extends ActionStateRequirement,
   TParams extends AnyParamsSchema,
-  TSchema extends Schema,
+  TSchema extends AnySchema,
   O,
   TName extends string,
   TDataContent,
@@ -129,12 +135,14 @@ type ActionWithSchema<
 export function createAction<
   const TName extends string,
   const TState extends ActionStateRequirement,
-  const TSchema extends Schema,
+  const TSchema extends AnySchema,
   const TParams extends AnyParamsSchema = typeof emptyParamsSchema,
   O = unknown,
   TDataContent = never,
 >(
-  action: ActionConfig<TState, TParams, InputOf<TSchema>, O, TName, TDataContent> & { inputSchema: TSchema },
+  action: ActionConfig<TState, TParams, InputOf<TSchema>, O, TName, TDataContent>
+    & { inputSchema: TSchema }
+    & SchemaTransformError<TSchema>,
 ): ActionWithSchema<TState, TParams, TSchema, O, TName, TDataContent>;
 export function createAction<
   const TName extends string,
@@ -510,8 +518,11 @@ export function createGetStateAction(
   unknown,
   typeof GET_STATE_ACTION_NAME
 > {
-  const inputSchema = z.object({
-    address: z.string(),
+  const inputSchema = schemaFromJsonSchema<{ address: string }>({
+    type: "object",
+    properties: { address: { type: "string" } },
+    required: ["address"],
+    additionalProperties: false,
   });
   return {
     state: null,
@@ -522,7 +533,9 @@ export function createGetStateAction(
       if (!ctx.getState) {
         throw new Error("No getState handler is available for this action context");
       }
-      const { address } = normalizeSchema(inputSchema).parse(input);
+      const schema = normalizeSchema(inputSchema);
+      schema.assert(input);
+      const { address } = input as { address: string };
       return ctx.getState(address);
     },
   };

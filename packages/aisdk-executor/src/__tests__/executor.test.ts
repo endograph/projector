@@ -103,6 +103,24 @@ describe("AI SDK prompt rendering", () => {
     ]);
   });
 
+  it("preserves tool call arguments, results and errors across continuation history", () => {
+    expect(buildAiSdkMessages(inference({ history: [
+      { ...textUserMessage("remember this") },
+      { type: "action", kind: "request", action: "tool", name: "remember", callId: "save-1", input: { note: "already saved" } },
+      { type: "action", kind: "result", action: "tool", name: "remember", callId: "save-1", success: true, value: "saved" },
+      { type: "action", kind: "request", action: "tool", name: "check", callId: "check-1", input: {} },
+      { type: "action", kind: "result", action: "tool", name: "check", callId: "check-1", success: false, error: "offline" },
+      { type: "action", kind: "request", action: "tool", name: "unfinished", callId: "pending-1", input: { path: "work" } },
+    ] }))).toEqual([
+      { role: "user", content: "remember this" },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "save-1", toolName: "remember", input: { note: "already saved" } }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "save-1", toolName: "remember", output: { type: "text", value: "saved" } }] },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "check-1", toolName: "check", input: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "check-1", toolName: "check", output: { type: "error-text", value: "offline" } }] },
+      { role: "assistant", content: 'Tool call unfinished (pending-1) with {"path":"work"}; no result recorded.' },
+    ]);
+  });
+
   it("inserts dynamic context before the latest user request", () => {
     expect(
       buildAiSdkMessages(

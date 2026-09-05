@@ -156,7 +156,7 @@ export type ClientCommandDefinitionName<TCommand> = TCommand extends {
   : string;
 
 export type ClientCommandDefinitionInput<TCommand> = TCommand extends {
-  inputSchema?: Schema<any, infer TInput>;
+  inputSchema?: Schema<infer TInput>;
 }
   ? TInput
   : unknown;
@@ -172,7 +172,7 @@ export type ClientToolOf<TTool> = ClientToolMeta<
 >;
 
 export type ClientStateOf<TStateDescriptor> = TStateDescriptor extends {
-  schema: Schema<any, infer TValue>;
+  schema: Schema<infer TValue>;
 }
   ? TValue
   : unknown;

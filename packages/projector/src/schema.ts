@@ -1,40 +1,49 @@
+import { Validator, type OutputUnit } from "@cfworker/json-schema";
 import type { StandardJSONSchemaV1, StandardSchemaV1 } from "@standard-schema/spec";
-import * as z from "zod";
 
 /**
- * Projector's schema seam. Every schema position (state values, action
- * inputs, params, output contracts, executor node config) accepts any
- * Standard Schema; projector normalizes it once into a {@link NormalizedSchema}
- * that validates synchronously and yields JSON Schema. zod is a private
- * dependency here only (hydration of serialized JSON Schema) — it never
- * appears in a public type.
+ * Projector schemas are validation-only contracts: accepted values keep the
+ * same type and value. A source library may expose richer decoding behavior,
+ * but Projector converts only its input contract to JSON Schema and uses that
+ * document as the canonical validator and serialized form.
  */
-export type Schema<Input = unknown, Output = Input> = StandardSchemaV1<Input, Output>;
+export type Schema<Value = unknown> = StandardSchemaV1<Value, Value>;
 export type AnySchema = StandardSchemaV1<any, any>;
-export type InferSchemaOutput<T extends StandardSchemaV1> = StandardSchemaV1.InferOutput<T>;
-export type InferSchemaInput<T extends StandardSchemaV1> = StandardSchemaV1.InferInput<T>;
+export type InferSchemaValue<T extends StandardSchemaV1> = StandardSchemaV1.InferInput<T>;
 
 export type JsonSchema = Record<string, unknown>;
 export type SchemaIssue = StandardSchemaV1.Issue;
-export type SchemaResult<Output = unknown> = StandardSchemaV1.Result<Output>;
+export type SchemaCheckResult =
+  | { readonly issues?: undefined }
+  | { readonly issues: readonly SchemaIssue[] };
 
 export type JsonSchemaOptions = {
-  /** Which side of the schema to describe. Defaults to `"output"`. */
-  io?: "input" | "output";
   /** Defaults to `"draft-2020-12"`. */
   target?: StandardJSONSchemaV1.Target;
   libraryOptions?: Record<string, unknown>;
 };
 
-export type NormalizedSchema<Output = unknown> = {
-  readonly schema: StandardSchemaV1<unknown, Output>;
-  /** Synchronous Standard Schema validation. */
-  validate(value: unknown): SchemaResult<Output>;
-  /** Validates and returns the output value; throws {@link SchemaError}. */
-  parse(value: unknown): Output;
-  accepts(value: unknown): boolean;
-  /** The JSON Schema document describing this schema (memoized per io). */
+export type NormalizedSchema<Value = unknown> = {
+  /** Checks the original value without returning or applying a decoded value. */
+  check(value: unknown): SchemaCheckResult;
+  /** Throws {@link SchemaError} when the original value is invalid. */
+  assert(value: unknown): void;
+  accepts(value: unknown): value is Value;
+  /** The canonical input JSON Schema document. */
   jsonSchema(options?: JsonSchemaOptions): JsonSchema;
+};
+
+export type SchemaTransformError<TSchema extends StandardSchemaV1> =
+  [StandardSchemaV1.InferInput<TSchema>] extends [StandardSchemaV1.InferOutput<TSchema>]
+    ? [StandardSchemaV1.InferOutput<TSchema>] extends [StandardSchemaV1.InferInput<TSchema>]
+      ? unknown
+      : SchemaTransformDiagnostic<TSchema>
+    : SchemaTransformDiagnostic<TSchema>;
+
+type SchemaTransformDiagnostic<TSchema extends StandardSchemaV1> = {
+  readonly __schemaTransformError: "Projector schemas must have identical input and output types";
+  readonly input: StandardSchemaV1.InferInput<TSchema>;
+  readonly output: StandardSchemaV1.InferOutput<TSchema>;
 };
 
 export class SchemaError extends Error {
@@ -72,14 +81,14 @@ const DEFAULT_TARGET: StandardJSONSchemaV1.Target = "draft-2020-12";
 const normalized = new WeakMap<object, NormalizedSchema<any>>();
 
 /**
- * Normalizes a Standard Schema. Memoized per schema object, so calling this at
- * every use site costs one lookup; creation sites call it eagerly so an
- * unusable schema (async validation, no JSON Schema source) fails at
- * declaration time with a clear message rather than mid-activation.
+ * Converts a Standard Schema's input contract to Projector's canonical JSON
+ * Schema form. The source validator is deliberately never invoked: authored
+ * and hydrated schemas therefore have exactly the same validation behavior,
+ * and source-library coercions/transforms cannot enter the durable machine.
  */
 export function normalizeSchema<T extends StandardSchemaV1>(
-  schema: T,
-): NormalizedSchema<StandardSchemaV1.InferOutput<T>> {
+  schema: T & SchemaTransformError<T>,
+): NormalizedSchema<StandardSchemaV1.InferInput<T>> {
   const cached = normalized.get(schema);
   if (cached) return cached;
   const built = buildNormalizedSchema(schema);
@@ -87,96 +96,62 @@ export function normalizeSchema<T extends StandardSchemaV1>(
   return built;
 }
 
-function buildNormalizedSchema<Output>(
-  schema: StandardSchemaV1<unknown, Output>,
-): NormalizedSchema<Output> {
+function buildNormalizedSchema<Value>(
+  schema: StandardSchemaV1<Value, unknown>,
+): NormalizedSchema<Value> {
   const props = schema["~standard"];
   if (!props || props.version !== 1 || typeof props.validate !== "function") {
     throw new Error("Expected a Standard Schema (an object with a `~standard` v1 property)");
   }
 
-  const validate = (value: unknown): SchemaResult<Output> => {
-    const result = props.validate(value);
-    if (isPromiseLike(result)) {
-      throw new Error(
-        `Schema (vendor "${props.vendor}") validates asynchronously; projector schemas must validate synchronously`,
-      );
-    }
-    return result;
-  };
-  // Probe: an always-async validator is rejected at creation, not at first use.
-  validate(undefined);
-
   const convert = resolveJsonSchemaConverter(schema, props);
-  const memo = new Map<"input" | "output", JsonSchema>();
+  const canonicalDocument = convert({ target: DEFAULT_TARGET });
+  const check = createJsonSchemaCheck(canonicalDocument);
 
   return {
-    schema,
-    validate,
-    parse(value) {
-      const result = validate(value);
+    check,
+    assert(value) {
+      const result = check(value);
       if (result.issues) throw new SchemaError(result.issues);
-      return result.value;
     },
-    accepts(value) {
-      return !validate(value).issues;
+    accepts(value): value is Value {
+      return !check(value).issues;
     },
     jsonSchema(options = {}) {
-      const io = options.io ?? "output";
-      const isDefault = options.target === undefined && options.libraryOptions === undefined;
-      if (isDefault) {
-        const hit = memo.get(io);
-        if (hit) return hit;
+      if (options.target === undefined && options.libraryOptions === undefined) {
+        return canonicalDocument;
       }
-      const document = convert(io, {
+      return convert({
         target: options.target ?? DEFAULT_TARGET,
         libraryOptions: options.libraryOptions,
       });
-      if (isDefault) memo.set(io, document);
-      return document;
     },
   };
 }
 
-type Converter = (
-  io: "input" | "output",
-  options: StandardJSONSchemaV1.Options,
-) => JsonSchema;
+type Converter = (options: StandardJSONSchemaV1.Options) => JsonSchema;
 
 function resolveJsonSchemaConverter(
   schema: StandardSchemaV1,
   props: StandardSchemaV1.Props,
 ): Converter {
   const json = (props as Partial<StandardJSONSchemaV1.Props>).jsonSchema;
-  if (json && typeof json.input === "function" && typeof json.output === "function") {
-    return (io, options) => json[io](options);
-  }
-  if (props.vendor === "zod") {
-    return (io, options) =>
-      z.toJSONSchema(schema as never, {
-        io,
-        target: options.target as never,
-        ...(options.libraryOptions ?? {}),
-      }) as JsonSchema;
+  if (json && typeof json.input === "function") {
+    return (options) => json.input(options);
   }
   throw new Error(
     `Schema (vendor "${props.vendor}") has no JSON Schema source: implement \`~standard.jsonSchema\` or wrap it with withJsonSchema()`,
   );
 }
 
-/**
- * Attaches an explicit JSON Schema to a Standard Schema whose library cannot
- * produce one. The result implements StandardJSONSchemaV1 (inheriting from
- * the original schema) and normalizes like any other schema.
- */
+/** Attaches Projector's single canonical JSON Schema to a Standard Schema. */
 export function withJsonSchema<T extends StandardSchemaV1>(
   schema: T,
-  output: JsonSchema,
-  input: JsonSchema = output,
+  jsonSchema: JsonSchema,
 ): T & StandardJSONSchemaV1<StandardSchemaV1.InferInput<T>, StandardSchemaV1.InferOutput<T>> {
   const converter: StandardJSONSchemaV1.Converter = {
-    input: () => input,
-    output: () => output,
+    input: () => jsonSchema,
+    output: () => jsonSchema,
   };
   const wrapped = Object.create(schema);
   Object.defineProperty(wrapped, "~standard", {
@@ -186,12 +161,98 @@ export function withJsonSchema<T extends StandardSchemaV1>(
   return wrapped;
 }
 
+/** Re-enters Projector's canonical JSON Schema as a validation-only schema. */
+export function schemaFromJsonSchema<Value = unknown>(
+  jsonSchema: unknown,
+): Schema<Value> {
+  const document = jsonSchema as JsonSchema;
+  let check: ((value: unknown) => SchemaCheckResult) | undefined;
+  const schema: Schema<Value> = {
+    "~standard": {
+      version: 1,
+      vendor: "projector",
+      validate(value) {
+        const result = (check ??= createJsonSchemaCheck(document))(value);
+        return result.issues ? result : { value: value as Value };
+      },
+    },
+  };
+  return withJsonSchema(schema, document);
+}
+
+function createJsonSchemaCheck(
+  document: JsonSchema,
+): (value: unknown) => SchemaCheckResult {
+  // Report every problem (no short-circuit): a caller fixes all fields in
+  // one round trip, and the issue list is the durable record of a rejection.
+  const validator = new Validator(document as never, "2020-12", false);
+  return (value) => {
+    try {
+      // Validate the value as JSON would carry it: the machine's durable form
+      // is JSON, so a key holding `undefined` is absent, not a wrong type.
+      const result = validator.validate(jsonView(value));
+      return result.valid ? {} : { issues: jsonSchemaIssues(result.errors) };
+    } catch (error) {
+      return {
+        issues: [{ message: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  };
+}
+
+/** The value as JSON serialization sees it: undefined properties dropped, undefined array items null. */
+function jsonView(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => (item === undefined ? null : jsonView(item)));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (item !== undefined) out[key] = jsonView(item);
+    }
+    return out;
+  }
+  return value;
+}
+
 /**
- * Re-enters a serialized JSON Schema as a Standard Schema (via zod, privately).
- * Hydrated schemas normalize like any other.
+ * Validator errors → Standard Schema issues, structurally. The validator
+ * reports each problem at a JSON pointer; we keep the leaf-most report and
+ * drop its container echoes:
+ * - `properties` at the parent ("Property x does not match schema") echoes
+ *   the error at `#/x`.
+ * - `additionalProperties` at the parent names the offending key only in
+ *   prose; the paired `false` error at `#/x` carries the path, so that one
+ *   becomes the issue — unless `#/x` also failed its own subschema, in which
+ *   case the property is declared and the `false` report is an echo too.
+ * A missing required property is reported at its parent; the message names it.
  */
-export function schemaFromJsonSchema(jsonSchema: unknown): Schema {
-  return z.fromJSONSchema(jsonSchema as Parameters<typeof z.fromJSONSchema>[0]);
+function jsonSchemaIssues(errors: OutputUnit[]): readonly SchemaIssue[] {
+  const reportedAt = new Set(
+    errors.filter((error) => error.keyword !== "false").map((error) => error.instanceLocation),
+  );
+  const issues: SchemaIssue[] = [];
+  for (const error of errors) {
+    if (error.keyword === "properties" || error.keyword === "additionalProperties") continue;
+    const path = decodeJsonPointer(error.instanceLocation);
+    if (error.keyword === "false") {
+      if (reportedAt.has(error.instanceLocation)) continue;
+      issues.push({ message: "Property is not allowed.", path });
+      continue;
+    }
+    issues.push({ message: error.error, path });
+  }
+  return issues;
+}
+
+function decodeJsonPointer(pointer: string): string[] {
+  if (pointer === "#") return [];
+  const path = pointer.startsWith("#") ? pointer.slice(1) : pointer;
+  if (!path.startsWith("/")) return [path];
+  return path
+    .slice(1)
+    .split("/")
+    .map((segment) =>
+      decodeURIComponent(segment).replace(/~1/g, "/").replace(/~0/g, "~"),
+    );
 }
 
 /** JSON Schema properties declared by an object schema, in declaration order. */
@@ -204,12 +265,4 @@ export function jsonSchemaProperties(document: JsonSchema): string[] {
 export function jsonSchemaRequired(document: JsonSchema): Set<string> {
   const required = document.required;
   return new Set(Array.isArray(required) ? required.map(String) : []);
-}
-
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { then?: unknown }).then === "function"
-  );
 }

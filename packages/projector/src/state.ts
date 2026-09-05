@@ -125,7 +125,7 @@ type StateGroup<TDataContent = any> = {
 
 /**
  * Resolves every state declared in scope of the instance tree WITHOUT
- * provisioning: existing containers are validated/parsed (keeping the
+ * provisioning: existing containers are validated (keeping the
  * onInitConflict reset path for schema evolution); declared-but-unrealized
  * states resolve to a detached container view carrying the init value, and
  * nothing is attached to the tree. Realization is a logged write —

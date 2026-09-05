@@ -1,46 +1,48 @@
-import * as z from "zod";
 import {
   jsonSchemaProperties,
   jsonSchemaRequired,
   normalizeSchema,
-  type InferSchemaInput,
-  type InferSchemaOutput,
+  schemaFromJsonSchema,
+  type InferSchemaValue,
   type Schema,
 } from "./schema.ts";
 import type { AnyAction, Instance, Node } from "./types.ts";
 
 export type JsonObject = Record<string, unknown>;
 /** A params schema: any Standard Schema over an object. */
-export type AnyParamsSchema = Schema<JsonObject, JsonObject>;
-export const emptyParamsSchema: Schema<{}, {}> = z.object({});
-type ParamsSchemaKeys<TSchema extends AnyParamsSchema> = keyof InferSchemaInput<TSchema>;
+export type AnyParamsSchema = Schema<JsonObject>;
+export const emptyParamsSchema = schemaFromJsonSchema<{}>({
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+});
+type ParamsSchemaKeys<TSchema extends AnyParamsSchema> = keyof InferSchemaValue<TSchema>;
 
 export type InferParams<TSchema> = TSchema extends AnyParamsSchema
-  ? InferSchemaOutput<TSchema>
+  ? InferSchemaValue<TSchema>
   : {};
 
 export type InputParams<TSchema> = TSchema extends AnyParamsSchema
-  ? InferSchemaInput<TSchema>
+  ? InferSchemaValue<TSchema>
   : {};
 
 /**
  * never = compatible; otherwise a diagnostic object validators intersect into
  * the config parameter so the assignability failure names the mismatch.
- * Compares the provider's resolved output against the consumer's INPUT: the
- * consumer re-parses what it picks (resolveActionParams), so a key its schema
- * can default or treat as optional need not be provided.
+ * Compares the value supplied by the provider with the value accepted by the
+ * consumer. The consumer revalidates the keys selected by resolveActionParams.
  */
 export type ParamsSatisfyError<
   TSuper extends AnyParamsSchema,
   TSub extends AnyParamsSchema,
 > = ParamsSchemaKeys<TSub> extends never
   ? never
-  : InferSchemaOutput<TSuper> extends InferSchemaInput<TSub>
+  : InferSchemaValue<TSuper> extends InferSchemaValue<TSub>
   ? never
   : {
       readonly __paramCompatibilityError: "params do not satisfy required schema";
-      readonly expected: InferSchemaInput<TSub>;
-      readonly received: InferSchemaOutput<TSuper>;
+      readonly expected: InferSchemaValue<TSub>;
+      readonly received: InferSchemaValue<TSuper>;
     };
 
 export type InferNodeParams<N> =
@@ -87,7 +89,8 @@ export function resolveNodeParams(
 ): JsonObject {
   const schema = normalizeParamsSchema(node.params);
   const picked = pickDeclaredParamKeys(effectiveParams, schema);
-  return normalizeSchema(schema).parse(picked);
+  normalizeSchema(schema).assert(picked);
+  return picked;
 }
 
 export function resolveActionParams(
@@ -96,7 +99,8 @@ export function resolveActionParams(
 ): JsonObject {
   const schema = normalizeParamsSchema(action.params);
   const picked = pickDeclaredParamKeys(nodeParams, schema);
-  return normalizeSchema(schema).parse(picked);
+  normalizeSchema(schema).assert(picked);
+  return picked;
 }
 
 /**
@@ -117,7 +121,7 @@ export function assertNodeActionParamsCompatibility(
     return;
   }
   const nodeKeys = declaredParamKeys(normalizeParamsSchema(node.params));
-  const actionInput = normalizeSchema(action.params).jsonSchema({ io: "input" });
+  const actionInput = normalizeSchema(action.params).jsonSchema();
   const required = jsonSchemaRequired(actionInput);
   for (const key of jsonSchemaProperties(actionInput)) {
     if (nodeKeys.includes(key) || !required.has(key)) {
@@ -144,5 +148,5 @@ export function pickDeclaredParamKeys(
 }
 
 function declaredParamKeys(schema: AnyParamsSchema): string[] {
-  return jsonSchemaProperties(normalizeSchema(schema).jsonSchema({ io: "input" }));
+  return jsonSchemaProperties(normalizeSchema(schema).jsonSchema());
 }

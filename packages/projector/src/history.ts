@@ -345,7 +345,8 @@ export function assistantMessageFromTextOutput<TDataContent = never>(
 
   if (mapTextBlock) {
     const mapped = mapTextBlock(text);
-    const content = schema ? normalizeSchema(schema).parse(mapped) : mapped;
+    if (schema) normalizeSchema(schema).assert(mapped);
+    const content = mapped;
     return {
       type: "assistant",
       content: [dataContent(content)],
@@ -355,9 +356,11 @@ export function assistantMessageFromTextOutput<TDataContent = never>(
   }
 
   if (schema) {
+    const normalized = normalizeSchema(schema);
+    normalized.assert(text);
     return {
       type: "assistant",
-      content: [dataContent(normalizeSchema(schema).parse(text))],
+      content: [dataContent(text as TDataContent)],
       text,
       ...(output?.audience ? { audience: output.audience } : {}),
     };

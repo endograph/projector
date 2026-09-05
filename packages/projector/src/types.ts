@@ -255,7 +255,7 @@ export type StateProjection = {
 
 export type StateDescriptor<S = unknown> = {
   key: string;
-  schema: Schema<unknown, S>;
+  schema: Schema<S>;
   init?: S | (() => S);
   scope?: "hoist" | "local";
   onInitConflict?: "error" | "replace";
@@ -379,7 +379,7 @@ export type Action<
   params?: TParams;
   name: TName;
   description?: string;
-  inputSchema?: Schema<unknown, I>;
+  inputSchema?: Schema<I>;
   /** The executor must supply this action's native tool representation and execution. */
   executorOwned?: boolean;
   run?: (
@@ -393,7 +393,7 @@ export type AnyAction<TParams extends AnyParamsSchema = AnyParamsSchema> = {
   params?: TParams;
   name: string;
   description?: string;
-  inputSchema?: Schema<any, any>;
+  inputSchema?: Schema<any>;
   executorOwned?: boolean;
   run?: (input: any, ctx: any) => any | Promise<any>;
 };
@@ -873,7 +873,7 @@ export type ActionResultMessage<TDataContent = never> = {
   success: boolean;
   value?: unknown;
   error?: string;
-  /** Standard Schema issues, verbatim, when the failure was input validation. */
+  /** Canonical validator issues when the failure was input validation. */
   issues?: readonly SchemaIssue[];
   terminal?: boolean;
   outputMessageIndices?: number[];
@@ -895,7 +895,7 @@ export type ExecuteActionResult<T = unknown, TDataContent = never> =
       success: false;
       /** Human-readable rendering; for input rejections, formatSchemaIssues(issues). */
       error: string;
-      /** Standard Schema issues, verbatim, when the failure was input validation. */
+      /** Canonical validator issues when the failure was input validation. */
       issues?: readonly SchemaIssue[];
       value?: T;
       messages?: FrameMessage<TDataContent>[];
@@ -976,7 +976,7 @@ export type Frame<TDataContent = never> = FrameDraft<TDataContent> & {
  */
 export type OutputConfig<TDataContent = never> = {
   audience?: Audience;
-  schema?: Schema<unknown, TDataContent>;
+  schema?: Schema<TDataContent>;
   mapTextBlock?: (text: string) => TDataContent;
 };
 
@@ -1080,7 +1080,7 @@ export type Charter<
   version?: string;
   params: TParams;
   /** The log's data-content vocabulary (see CharterConfig.dataContent). */
-  dataContent?: Schema<unknown, TDataContent>;
+  dataContent?: Schema<TDataContent>;
   nodes: Record<string, Node<TDataContent>>;
   /** Unified action registry; tools and commands share one namespace. */
   actions: Record<string, AnyAction>;
@@ -1108,7 +1108,7 @@ export type CharterConfig<TDataContent = never> = {
    * sole inference site — otherwise a mismatched node's data type would union
    * into TDataContent instead of failing against it.
    */
-  dataContent?: Schema<unknown, TDataContent>;
+  dataContent?: Schema<TDataContent>;
   nodes: readonly Node<NoInfer<TDataContent>>[];
   /** Sugar: registered into `actions` alongside `commands`. */
   tools?: readonly AnyAction[];

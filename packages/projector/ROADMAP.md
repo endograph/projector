@@ -115,3 +115,13 @@ ordering across slots is unanchored (items append at the conversation tail —
 `previous_item_id` anchoring is a follow-up); tool-list `session.update`
 diffing.
 
+### 9. Params declaration metadata
+
+Params currently discover declared keys and required keys by inspecting the
+top-level `properties` and `required` fields of the schema's input JSON Schema.
+That is intentionally sufficient for today's flat object schemas, but it is not
+a general JSON Schema reflection mechanism: valid schemas may hide the same
+object shape behind `$ref`, `$defs`, `allOf`, or other composition. Revisit this
+when params need to support those forms. Prefer explicit params declaration
+metadata (or another small params-specific contract) over growing a partial
+JSON Schema resolver inside core.

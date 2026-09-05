@@ -213,16 +213,14 @@ export class LiveKitCascadeConnection<TDataContent = never> {
       throw new Error(`No LiveKit tool named "${name}" is registered in the current projection`);
     }
 
-    let parsedInput = input;
     if (action.inputSchema) {
-      const parsed = normalizeSchema(action.inputSchema).validate(input);
-      if (parsed.issues) throw new SchemaError(parsed.issues);
-      parsedInput = parsed.value;
+      const checked = normalizeSchema(action.inputSchema).check(input);
+      if (checked.issues) throw new SchemaError(checked.issues);
     }
 
     const callId = crypto.randomUUID();
     const actionRequest = {
-      ...createToolActionRequest(name, parsedInput, callId),
+      ...createToolActionRequest(name, input, callId),
       source: { external: true },
     };
     const context: ActionContext<unknown, TDataContent> =
@@ -232,7 +230,7 @@ export class LiveKitCascadeConnection<TDataContent = never> {
       context.getState ??= (address) => this.getRetrievableState(address);
     }
     const runAction = this.config.runAction;
-    const runInput: RunActionInput<TDataContent> = { action, input: parsedInput, context, liveKitContext };
+    const runInput: RunActionInput<TDataContent> = { action, input, context, liveKitContext };
     const result = await executeActionInvocation({
       request: actionRequest,
       throwErrors: true,

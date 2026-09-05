@@ -244,7 +244,7 @@ export function createMachine<TDataContent = never>({
   };
   assertUniqueInstanceIds(machine.instance);
   assertHasSourceInstance(machine.instance);
-  normalizeSchema(charter.params).parse(resolveEffectiveParams([machine.instance]));
+  normalizeSchema(charter.params).assert(resolveEffectiveParams([machine.instance]));
   validateMachineActionStateCompatibility(machine.instance, machine.charter);
   validateExecutorConfig(machine.instance, machine.charter, executor);
   return machine;
@@ -273,7 +273,7 @@ function validateExecutorConfig<TDataContent>(
     const config = node.executorConfig?.[namespace];
     if (config !== undefined) {
       try {
-        normalizeSchema(schema).parse(config);
+        normalizeSchema(schema).assert(config);
       } catch (error) {
         throw new Error(
           `Invalid executorConfig["${namespace}"] on node "${node.key}": ${
@@ -808,16 +808,15 @@ export async function executeCommand<
 
   let input = message.input;
   if (resolved.command.inputSchema) {
-    const parsed = normalizeSchema(resolved.command.inputSchema).validate(input);
-    if (parsed.issues) {
+    const checked = normalizeSchema(resolved.command.inputSchema).check(input);
+    if (checked.issues) {
       return enqueueImmediateActionResult(machine, message, {
         success: false,
-        error: formatSchemaIssues(parsed.issues),
-        issues: parsed.issues,
+        error: formatSchemaIssues(checked.issues),
+        issues: checked.issues,
         callId: message.callId,
       });
     }
-    input = parsed.value;
   }
 
   const projectorMachine = machine as ProjectorMachine<TDataContent>;
@@ -1509,7 +1508,7 @@ export function applyInstanceMessage<TDataContent>(
     const address = { instanceId: message.instanceId, stateKey: message.stateKey };
     const state = findResolvedState(root, address, options);
     const next = applyStateUpdate(state.container.value, message.update);
-    normalizeSchema(state.descriptor.schema).parse(next);
+    normalizeSchema(state.descriptor.schema).assert(next);
     // Realization is a logged write: an unrealized state's container attaches
     // here, at the instance resolveStates derived for the declaring
     // contributor's scope, with the updater having seen init as `current`.
@@ -1674,7 +1673,7 @@ function validateStateValue(
   value: unknown,
 ): void {
   const state = findResolvedState(root, address);
-  normalizeSchema(state.descriptor.schema).parse(value);
+  normalizeSchema(state.descriptor.schema).assert(value);
 }
 
 function findResolvedState(
