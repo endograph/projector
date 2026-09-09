@@ -11,7 +11,7 @@ This plan is scoped to making camera work for the LiveKit realtime demo. It does
 - The LiveKit OpenAI realtime image patch already exists at `patches/@livekit%2Fagents-plugin-openai@1.0.40.patch`.
 - The patch targets the GA realtime implementation used by `openai.realtime.RealtimeModel`.
 - `apps/sandbox-agent` currently has no vision sampler.
-- The old camera sampler lived at `apps/sandbox-agent/src/agent/vision.ts` in commit `81b25b4ea2cc61a2e27df09d4e161cd64e0098bb`.
+- The old camera sampler lived at `apps/sandbox-agent/src/agent/vision.ts` in commit `2b2d795ee1aef08ec90e398f2dd66949608678ff`.
 - `apps/sandbox/src/voice/LiveVoiceClient.tsx` currently publishes camera only when `cameraEnabled && voiceEnabled`.
 - The frontend currently has no visible local camera preview.
 

@@ -16,7 +16,7 @@ Logos are citations, not labels. Two kinds in play:
 | typescript | Fully typed end to end, frontend and backend. | — |
 | component based | Local reasoning for agents. Compose, nest, and reuse them. | — |
 | context projection | Model the full resolution of reality, then choose how it projects to the llm. | — |
-| state complete | Frame log + app state + configuration. All replayable, forkable, testable state. | Doc icon (rainbow) → [state-complete.md](https://github.com/anteprojector/projector/blob/main/packages/projector/docs/state-complete.md) |
+| state complete | Frame log + app state + configuration. All replayable, forkable, testable state. | Doc icon (rainbow) → [state-complete.md](https://github.com/endograph/projector/blob/main/packages/projector/docs/state-complete.md) |
 
 ## evolutionary
 
@@ -40,5 +40,5 @@ Logos are citations, not labels. Two kinds in play:
 | --- | --- | --- |
 | composable dimensions | Separate the base agent configuration from its thread configuration. Project into one at runtime. | — |
 | state concurrency | Allow the llm and the user to share state. | — |
-| durable frame log | Every step recorded, including state updates, work scheduling, and tool calls. | Doc icon (rainbow) → [durable-frame-log.md](https://github.com/anteprojector/projector/blob/main/packages/projector/docs/durable-frame-log.md) |
+| durable frame log | Every step recorded, including state updates, work scheduling, and tool calls. | Doc icon (rainbow) → [durable-frame-log.md](https://github.com/endograph/projector/blob/main/packages/projector/docs/durable-frame-log.md) |
 | coordinated subagents | Agents are systems and need proper coordination primitives. | — |

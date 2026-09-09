@@ -4,7 +4,7 @@
 
 Replace the old `ephemeralMessage(...)` design with a frame-native transient context API in `@packages/projector`.
 
-The old implementation from commit `81b25b4ea2cc61a2e27df09d4e161cd64e0098bb` modeled ephemera as messages with `role: "ephemeral"`. That fit the old queue-based runtime, but the current framework is frame-based: history, visibility, scheduling, and persistence all operate on `Frame` objects.
+The old implementation from commit `2b2d795ee1aef08ec90e398f2dd66949608678ff` modeled ephemera as messages with `role: "ephemeral"`. That fit the old queue-based runtime, but the current framework is frame-based: history, visibility, scheduling, and persistence all operate on `Frame` objects.
 
 The updated design should introduce transient frames, not a new actor message type.
 

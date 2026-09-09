@@ -35,5 +35,14 @@
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
     "@standard-schema/spec": "^1.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/endograph/projector.git",
+    "directory": "packages/projector"
+  },
+  "homepage": "https://github.com/endograph/projector/tree/main/packages/projector#readme",
+  "bugs": {
+    "url": "https://github.com/endograph/projector/issues"
   }
 }
